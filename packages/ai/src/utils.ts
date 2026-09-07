@@ -2,6 +2,7 @@ import { $env } from "@oh-my-pi/pi-utils";
 import type { ResponseInput, ResponseInputItem } from "./providers/openai-responses-wire";
 import { redactSensitiveCredentials } from "./providers/transform-messages";
 import type { CacheRetention, OpenAIResponsesHistoryPayload, ProviderPayload } from "./types";
+import { exportItemOrigins, importItemOrigins, transferSourceOrigin } from "./utils/source-origin";
 
 type OpenAIResponsesReplayItem = ResponseInput[number];
 const NON_WHITESPACE_RE = /\S/;
@@ -107,7 +108,7 @@ export function stripOpenAIResponsesOutputOnlyStatusesForReplay<TItem extends { 
 		if (!sanitized) sanitized = items.slice(0, index);
 		const withoutStatus = { ...item };
 		delete withoutStatus.status;
-		sanitized.push(withoutStatus);
+		sanitized.push(transferSourceOrigin(item, withoutStatus));
 	}
 	return sanitized ?? items;
 }
@@ -124,7 +125,7 @@ function clampReplayItemImageDetail(
 	if (supportsImageDetailOriginal) return item;
 
 	if (item.type === "input_image" && item.detail === "original") {
-		return { ...item, detail: "auto" };
+		return transferSourceOrigin(item, { ...item, detail: "auto" });
 	}
 
 	if (item.type !== "message" || !Array.isArray(item.content)) return item;
@@ -135,9 +136,9 @@ function clampReplayItemImageDetail(
 		const record = part as Record<string, unknown>;
 		if (record.type !== "input_image" || record.detail !== "original") return part;
 		changed = true;
-		return { ...record, detail: "auto" };
+		return transferSourceOrigin(record, { ...record, detail: "auto" });
 	});
-	return changed ? { ...item, content } : item;
+	return changed ? transferSourceOrigin(item, { ...item, content }) : item;
 }
 
 function isOpenAIResponsesClientInputBoundary(item: Record<string, unknown>): boolean {
@@ -285,7 +286,7 @@ export function stripOpenAIResponsesComputerLinkedReasoningIdsForReplay(items: R
 		}
 		if (!sanitized) sanitized = items.slice(0, index);
 		const { id: _id, ...withoutId } = record;
-		sanitized.push(withoutId as unknown as ResponseInput[number]);
+		sanitized.push(transferSourceOrigin(item, withoutId) as unknown as ResponseInput[number]);
 	}
 	return sanitized ?? items;
 }
@@ -313,7 +314,7 @@ export function stripUnpairedOpenAIResponsesComputerReasoningIdsForReplay(items:
 		}
 		if (!sanitized) sanitized = items.slice(0, index);
 		const { id: _id, ...withoutId } = record;
-		sanitized.push(withoutId as unknown as ResponseInput[number]);
+		sanitized.push(transferSourceOrigin(item, withoutId) as unknown as ResponseInput[number]);
 	}
 	return sanitized ?? items;
 }
@@ -415,6 +416,7 @@ function sanitizeOpenAIResponsesHistoryItemForReplay(
 		return sanitizeOpenAIResponsesReasoningItemForReplay(item, preserveReasoningItemIds);
 	}
 	const { id: _id, ...sanitizedItem } = item;
+	transferSourceOrigin(item, sanitizedItem);
 	if (item.type === "computer_call" && typeof item.id === "string") sanitizedItem.id = item.id;
 
 	return clampReplayItemImageDetail(
@@ -434,7 +436,7 @@ function sanitizeOpenAIResponsesReasoningItemForReplay(
 	if (typeof item.encrypted_content === "string" || item.encrypted_content === null) {
 		sanitizedItem.encrypted_content = item.encrypted_content;
 	}
-	return sanitizedItem as unknown as OpenAIResponsesReplayItem;
+	return transferSourceOrigin(item, sanitizedItem) as unknown as OpenAIResponsesReplayItem;
 }
 
 function sanitizeOpenAIResponsesImageGenerationCallForReplay(
@@ -443,12 +445,12 @@ function sanitizeOpenAIResponsesImageGenerationCallForReplay(
 	if (typeof item.id !== "string" || typeof item.result !== "string" || item.result.length === 0) {
 		return undefined;
 	}
-	return {
+	return transferSourceOrigin(item, {
 		id: truncateResponseItemId(item.id, "ig"),
 		type: "image_generation_call",
 		status: "completed",
 		result: item.result,
-	};
+	});
 }
 
 export function createOpenAIResponsesHistoryPayload(
@@ -461,6 +463,7 @@ export function createOpenAIResponsesHistoryPayload(
 		provider,
 		...(incremental ? { dt: true } : {}),
 		items,
+		origins: exportItemOrigins(items),
 	};
 }
 
@@ -474,6 +477,7 @@ export function getOpenAIResponsesHistoryPayload(
 	}
 	const payloadProvider = providerPayload.provider ?? fallbackProvider ?? currentProvider;
 	if (payloadProvider !== currentProvider) return undefined;
+	importItemOrigins(providerPayload.items, providerPayload.origins);
 	return { ...providerPayload, provider: payloadProvider };
 }
 

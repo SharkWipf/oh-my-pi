@@ -2,6 +2,7 @@ export * from "@oh-my-pi/pi-catalog/effort";
 export * from "@oh-my-pi/pi-catalog/types";
 
 import type { Type } from "@oh-my-pi/omptype";
+import type { NativeItemOrigin } from "./utils/source-origin";
 import type {
 	DeleteArgs,
 	DeleteResult,
@@ -876,6 +877,8 @@ export interface OpenAIResponsesHistoryPayload {
 	provider?: string;
 	dt?: boolean;
 	items: Array<Record<string, unknown>>;
+	/** Local provenance sidecar; never part of a provider wire item. */
+	origins?: NativeItemOrigin[];
 }
 
 /** Anthropic-only controls attached to a mid-conversation system message. */
