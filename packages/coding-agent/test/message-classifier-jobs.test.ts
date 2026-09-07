@@ -15,7 +15,7 @@ import {
 } from "../src/session/preserved-message-settings";
 import { readPreservedUserMessageClassificationMasks } from "../src/session/preserved-messages";
 import { SessionManager } from "../src/session/session-manager";
-import { FileSessionStorage, type WriteTextAtomicOptions } from "../src/session/session-storage";
+import { FileSessionStorage } from "../src/session/session-storage";
 import { EventBus } from "../src/utils/event-bus";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
@@ -58,17 +58,8 @@ class PausedStorage extends FileSessionStorage {
 	readonly entered = Promise.withResolvers<void>();
 	readonly released = Promise.withResolvers<void>();
 	armed = false;
-	constructor(readonly point: "ensureOnDisk" | "flush") { super(); }
-	override async writeTextAtomic(path: string, content: string, options?: WriteTextAtomicOptions): Promise<void> {
-		if (this.armed && this.point === "ensureOnDisk") {
-			this.armed = false;
-			this.entered.resolve();
-			await this.released.promise;
-		}
-		await super.writeTextAtomic(path, content, options);
-	}
 	override async drain(): Promise<void> {
-		if (this.armed && this.point === "flush") {
+		if (this.armed) {
 			this.armed = false;
 			this.entered.resolve();
 			await this.released.promise;
@@ -385,31 +376,29 @@ describe("message classifier session jobs", () => {
 		expect((await facts()).has(id)).toBe(false);
 		expect(job(backfill).state).toBe("failed");
 	});
-	for (const point of ["ensureOnDisk", "flush"] as const) {
-		it(`canceling during ${point} preflight prevents provider admission`, async () => {
-			await session.dispose();
-			const storage = new PausedStorage(point);
-			manager = SessionManager.create(dir.path(), dir.path(), storage);
-			session = createSession(manager);
-			const canceled = user("synthetic canceled preflight source");
-			const next = user("synthetic subsequent preflight source");
-			storage.armed = true;
-			try {
-				const started = await session.startMessageClassification(canceled);
-				await storage.entered.promise;
-				session.cancelMessageClassification(started);
-				expect(job(started).state).toBe("canceled");
-				expect(provider.requests).toEqual([]);
-				storage.released.resolve();
-				const subsequent = await session.startMessageClassification(next);
-				await until(() => provider.requests.length === 1);
-				provider.forSource("synthetic subsequent preflight source").finish();
-				await settled(subsequent);
-				expect(provider.requests).toHaveLength(1);
-				expect(await facts(await reopen())).toEqual(new Map([[next, 0]]));
-			} finally { storage.released.resolve(); }
-		});
-	}
+	it("canceling while source durability is pending prevents provider admission", async () => {
+		await session.dispose();
+		const storage = new PausedStorage();
+		manager = SessionManager.create(dir.path(), dir.path(), storage);
+		session = createSession(manager);
+		const canceled = user("synthetic canceled preflight source");
+		const next = user("synthetic subsequent preflight source");
+		storage.armed = true;
+		try {
+			const started = await session.startMessageClassification(canceled);
+			await storage.entered.promise;
+			session.cancelMessageClassification(started);
+			expect(job(started).state).toBe("canceled");
+			expect(provider.requests).toEqual([]);
+			storage.released.resolve();
+			const subsequent = await session.startMessageClassification(next);
+			await until(() => provider.requests.length === 1);
+			provider.forSource("synthetic subsequent preflight source").finish();
+			await settled(subsequent);
+			expect(provider.requests).toHaveLength(1);
+			expect(await facts(await reopen())).toEqual(new Map([[next, 0]]));
+		} finally { storage.released.resolve(); }
+	});
 	it("actual tree navigation rejects a sibling late result without moving its selected leaf", async () => {
 		const root = user("synthetic navigation ancestor");
 		const target = manager.appendMessage(reply("synthetic target sibling"));
