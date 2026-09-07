@@ -508,4 +508,22 @@ describe("message classifier session jobs", () => {
 		expect(provider.requests).toHaveLength(2);
 		expect(await facts(await reopen())).toEqual(new Map([[first, 0], [separator, 0], [unaffected, 0]]));
 	});
+	it("rejects a pending result when a reasoning-only neighbor becomes visible without changing either user source", async () => {
+		user("synthetic unchanged previous user");
+		const neighbor = manager.appendMessage({ ...reply(""), content: [{ type: "thinking", thinking: "synthetic hidden reasoning" }] });
+		const target = user("synthetic unchanged current user");
+		const started = await session.startMessageClassification(target);
+		await until(() => provider.requests.length === 1);
+		const entry = manager.getEntry(neighbor)!;
+		if (entry.type !== "message" || entry.message.role !== "assistant") throw new Error("Missing fixture neighbor");
+		entry.message.content = [{ type: "text", text: "synthetic newly visible assistant context" }];
+		await manager.rewriteEntries();
+		// The lifecycle owner expands this eligibility change to the affected
+		// target; the old request never named the formerly invisible assistant.
+		session.interruptMessageClassificationInputs([target]);
+		expect(session.getMessageClassificationRowStatus(target)?.state).toBe("interrupted");
+		provider.requests[0]!.finish();
+		await until(() => job(started).running === 0);
+		expect((await facts(await reopen())).has(target)).toBe(false);
+	});
 });
