@@ -296,13 +296,19 @@ Legacy `<read-files>`/`<modified-files>` tags from summaries written by earlier 
 
 ### Persist and reload
 
-After summary generation (or hook-provided summary), agent session:
+Before source-ID-addressed preparation or external work, the session establishes durable journal IDs and flushes them. A compaction operation captures the active session, branch/reset ownership, actual source input, and selection once; configured method fallbacks stay inside that operation.
 
-1. Appends `CompactionEntry` with `appendCompaction(...)`; the handoff method commits the generated document as the entry's summary on the same session.
-2. Rebuilds display context from the active leaf via `buildDisplaySessionContext()`.
-3. Replaces live agent messages with rebuilt context.
-4. Synchronizes active todo phases from the rebuilt branch and closes provider sessions whose history was rewritten.
-5. Emits `session_compact` hook event.
+After summary generation (or a hook-provided result), the session:
+
+1. Freezes the actual result and synchronously appends one `CompactionEntry`. Handoff commits its generated document as the summary in the same journal.
+2. Awaits the journal flush. Recovery persists the same entry rather than appending another compaction.
+3. Revalidates ownership **after** the flush. A switch to another branch/session or a source rewrite prevents stale live installation. A valid same-branch suffix and policy-only changes do not invalidate an already committed result.
+4. Rebuilds the active chronological context from the committed method representation plus its ordinary suffix, then replaces the live agent messages.
+5. Synchronizes active todo phases, closes affected provider sessions, and emits the successful `session_compact` notification only after durable installation.
+
+Source rewrites publish source content, positional current-coverage mappings, and invalidation of affected successful classifier records through one `rewriteEntries` transaction. All mapped prior/sibling descriptors and shadowed affected classifier records are updated; unrelated manual state remains intact. Immutable physical archive/native offsets do not move. Unsupported affected codecs retain their raw data but are inactive for coverage/replay, never guessed from equal text.
+
+Automatic pruning uses the same source-protection view for selected user sources, admitted non-user atoms, and active unresolved requirements deliveries. Hard-recent user sources are already included in the selected user set. Pending delivery IDs are not capture IDs and do not confer user-preservation eligibility. Explicit image removal remains an override.
 
 ## Branch summarization pipeline
 

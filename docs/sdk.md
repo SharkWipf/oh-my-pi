@@ -283,6 +283,21 @@ Classification reads the current durable source message and its entry ID, not im
 
 Cold source capture cooperates with the event loop; backfill projects its prior-user/two-assistant neighborhood in one forward pass. Before and after each request, validation reads only the captured current and auxiliary source IDs. Ordinary later appends cannot change those preceding neighbors. The existing source-rewrite callback invalidates dependent targets when content or eligibility changes, including affected rows not yet admitted by an active backfill; those rows require explicit retry while unaffected rows continue.
 
+## Preserved source state
+
+`await session.preparePreservedMessages()` establishes durable source IDs and the active post-reset query. `session.getPreservedMessageQuery()` returns the current query when prepared; it never starts an asynchronous rebuild. Rows and manual actions identify current source entries, not equal text or immutable V2 capture evidence. Selected image blocks use the complete atomic source interval `[0, 1)`, not an empty text interval.
+
+Human `prompt`, `steer`, `followUp`, and explicitly human-produced `sendUserMessage` inputs recognize `/keep <message>` and `/once <message>` once at the original input boundary. The remaining body is literal, not another extension/template command. Empty directives are rejected. Explicit `compactionOverride` and restored `sourceCaptureId` inputs preserve their existing decision instead of reinterpreting the body; generated messages do not acquire user policy from directive-looking text. Queue restoration retains the manual state, source capture, image attachments, and attachment links. Initial manual state is persisted with the delivered source entry.
+
+Maintenance compaction and handoff freeze applicable requirements with their operation. A later live requirements change does not silently replace that operation’s provider input. Handoff composes its frozen requirements segment once, before the existing physical provider transforms. Unresolved requirements deliveries remain ordinary, fully charged retained history until acknowledged; this mandatory source visibility is independent of user-preservation policy. The same active pending delivery IDs protect original content from automatic pruning and shaking.
+
+- `session.getPreservedMessageSelection()` exposes the current policy result, including selected user sources, admitted non-user atoms, reasons, quota totals, blockers, and `unavailableLimits`. An unavailable model-relative percentage is not zero or unlimited.
+- `session.subscribePreservedMessages(affectedIds => ...)` returns an unsubscribe function. An omitted ID list signals a scope/policy-wide refresh; saved classification changes publish affected source IDs.
+- `session.getPreservedMessagesOwnership()` identifies the active session/branch/reset scope. Ordinary same-branch appends and policy changes do not replace this identity.
+- `await session.setPreservedMessageOverride(sourceId, "auto" | "keep" | "exclude")` writes the complete manageable source atom through the journal durability boundary. Auto removes the manual override; it does not erase classifier facts or disable automatic protection.
+- `await session.capturePreservedMessageOverrideReset(sourceIds?)` captures a finite, durable confirmation snapshot, including the selected IDs, their current override revisions, and source/group counts. Omitting IDs captures every non-Auto group in the active scope; UI filters must not narrow reset-all. Large captures yield cooperatively.
+- `await session.resetPreservedMessageOverrides(snapshot)` returns `{ reset, skipped }`. Same-branch suffixes are allowed but excluded from the captured targets; newer manual edits are skipped instead of overwritten. Branch/reset/session changes reject stale confirmation. Reusing a completed snapshot is idempotent, and durable-write recovery reuses its committed journal transition.
+- `await session.recoverCompactionPersistence()` retries durable publication of the same frozen compaction event. It never appends a duplicate or installs an old result onto a different active branch.
 
 ## `AgentSession` lifecycle and disposal
 

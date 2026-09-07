@@ -6,6 +6,26 @@
 
 - Added source-ID preservation policy APIs with independent first/recent/hard-recent limits, uniformly capped manual tool exchanges, compact source quota indexes, and compatible saved settings/classification readers.
 - Added nonblocking user-message classification with eleven independent saved category facts, selected-message reclassification, bounded missing-only backfill, per-row status updates, and isolated cancellation. Classifier jobs validate active source/branch ownership before saving and require explicit backfill after restart.
+- Added independent living requirements memory under `/memory requirements`, with original human-source capture, source-backed extraction, separate fidelity/coverage review and fresh candidate-only sanity checks, durable lineage, complete active recall, and explicit coverage-gap and quarantine recovery controls. Ordinary memory backends remain independently selectable.
+- Added `--start-without-memory`, future-only memory bypass, and clean retry retaining only explicitly selected original human inputs. Recovery cancels queued work without flushing or consolidating learned memory and reports already-submitted remote writes as non-revocable.
+- Requirements capacity is evaluated at the actual prepared provider-request boundary, after physical transforms and inband tool encoding, using emitted system/context frame estimates. Requests retain every applicable statement, reject known irreducible overflow or stale snapshots before provider execution, and report invalidated physical estimates as unknown rather than silently truncating requirements.
+- Quarantined requirement bodies no longer leak through unresolved conflict recall; source evidence and conflict lineage remain inspectable.
+- Disabled or bypassed requirements no longer pin original user history during ordinary compaction; enabling requirements still protects unresolved current delivery IDs until processing or explicit gap passage.
+- Revalidated local and scoped foreign requirement evidence before provider dispatch, including original depot availability. Warm checks reuse journal/depot metadata rather than rereading complete histories; changed evidence reopens coverage and requires fresh review rather than automatically reviving historical records.
+
+### Fixed
+
+- Compaction now appends its frozen result once and awaits durable publication before installing live context or resetting provider state. Persistence recovery reuses the same journal entry; stale branch results cannot install, while valid same-branch suffixes survive.
+- Handoff composes its operation-frozen requirements once; concurrent live requirements changes cannot replace the captured provider input.
+- Human `/keep` and `/once` inputs retain literal bodies, initial durable manual state, and source/attachment metadata across prompt, steering, follow-up, and editor restoration; generated text is not reinterpreted as a user directive.
+- Controlled source rewrites atomically update current content, prior/sibling positional coverage, and affected successful classifier records without moving physical archive offsets or erasing unrelated manual state.
+- Automatic pruning and shaking retain original deliveries still pending in requirements memory, independently of user-preservation eligibility, while continuing ordinary pruning of unrelated content.
+- Fixed ACP cancellation during initial durable source capture: cancelled input no longer resumes into a provider request or delivered user message when capture completes.
+- Inline snap images now expose transient, identity-bound frame estimates and prompt/tool ownership through provider normalization, separately from original images. Outgoing image mutations no longer corrupt cached frames for later requests.
+- Preservation previews distinguish unavailable model-percentage limits from finite zero and expose source cap blockers; large manual-reset captures use bounded lazy source enumeration.
+- Quarantined classification records remain visibly invalidated after reload without fabricating category labels, and backfill readers skip history before the latest clear boundary.
+- Visible human custom-message journal sources retain manual protection and ordinary raw accounting without being promoted to automatic user classifications or windows.
+- Fixed repeated snapcompact rejecting genuine reductions by counting the committed prior archive alongside fresh context in the before-state estimate; opaque reasoning remains excluded symmetrically.
 ### Changed
 
 - Long-session footer totals, credential pins, and retained-context reconstruction now reuse the session index instead of repeatedly scanning cold history. Recent sibling branches reuse a bounded control-state checkpoint; full transcript exports still include historical messages.
