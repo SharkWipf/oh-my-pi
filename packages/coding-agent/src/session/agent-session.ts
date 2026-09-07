@@ -44,6 +44,7 @@ import {
 	type ToolChoiceDirective,
 } from "@oh-my-pi/pi-agent-core";
 import {
+	CompactionCancelledError,
 	type CompactionPreparation,
 	type CompactionResult,
 	calculatePromptTokens,
@@ -5600,14 +5601,14 @@ export class AgentSession {
 			settings === this.#preservationSettingsIdentity && sessionId === this.sessionManager.getSessionId() && tokenizer === this.agent.tokenizer;
 		const build = (async () => {
 			await ensurePreservedMessageStateOnDisk(this.sessionManager);
-			if (!isCurrent()) throw new Error("Preservation source scope changed while preparing.");
+			if (!isCurrent()) throw new CompactionCancelledError("Preservation source scope changed while preparing.");
 			const entries = this.sessionManager.getBranch();
 			const leaf = this.sessionManager.getLeafId();
 			const query = await PreservedMessageQuery.build(entries, this.#preservationSettings!, tokenizer, { isCurrent });
-			if (!query || !isCurrent()) throw new Error("Preservation source scope changed while preparing.");
+			if (!query || !isCurrent()) throw new CompactionCancelledError("Preservation source scope changed while preparing.");
 			this.#preservedQuery = { query, ownership, settings, sessionId, leaf, tokenizer };
 			const current = this.getPreservedMessageQuery();
-			if (!current) throw new Error("Preservation source branch changed while preparing.");
+			if (!current) throw new CompactionCancelledError("Preservation source branch changed while preparing.");
 			return current;
 		})();
 		this.#preservedQueryBuild = build;

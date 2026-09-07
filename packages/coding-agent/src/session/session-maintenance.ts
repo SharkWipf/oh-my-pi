@@ -527,8 +527,7 @@ export class SessionMaintenance {
 		// The caller checks ownership after its own await, immediately before live installation.
 	}
 
-	async #pruneToolOutputs(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
-		const operation = this.#captureCompactionOperation();
+	async #pruneToolOutputs(operation: CompactionOperation): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
 		const protectedSourceEntryIds = await this.#host.protectedSourceEntryIds();
 		if (!this.#compactionOwnerValid(operation)) throw new CompactionCancelledError();
 		let rewrite: Promise<void> | undefined;
@@ -574,10 +573,9 @@ export class SessionMaintenance {
 	 * (`/fork`, `/tan`) and resume rebuild a divergent prefix and cold-miss the
 	 * provider prompt cache.
 	 */
-	async #pruneStaleToolResults(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
+	async #pruneStaleToolResults(operation: CompactionOperation): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
 		const { supersedeReads, dropUseless } = this.#host.settings.getGroup("compaction");
 		if (!supersedeReads && !dropUseless) return undefined;
-		const operation = this.#captureCompactionOperation();
 		const protectedSourceEntryIds = await this.#host.protectedSourceEntryIds();
 		if (!this.#compactionOwnerValid(operation)) throw new CompactionCancelledError();
 		let rewrite: Promise<void> | undefined;
@@ -2294,7 +2292,15 @@ export class SessionMaintenance {
 		// Stale-result pass runs every turn, before any threshold gating: it is
 		// cheap (bails when no candidate) and independent of the compaction
 		// setting.
-		const supersedeResult = await this.#pruneStaleToolResults();
+		const operation = this.#captureCompactionOperation();
+		let supersedeResult: { prunedCount: number; tokensSaved: number } | undefined;
+		try {
+			supersedeResult = await this.#pruneStaleToolResults(operation);
+		} catch (error) {
+			if (error instanceof CompactionCancelledError) return COMPACTION_CHECK_NONE;
+			throw error;
+		}
+		if (!this.#compactionOwnerValid(operation)) return COMPACTION_CHECK_NONE;
 
 		const compactionSettings = this.#host.settings.getGroup("compaction");
 		if (!compactionSettings.enabled || !hasConfiguredCompactionMethod(compactionSettings))
@@ -2303,7 +2309,14 @@ export class SessionMaintenance {
 		// Case 4: Threshold - turn succeeded but context is getting large
 		// Skip if this was an error (non-overflow errors don't have usage data)
 		if (assistantMessage.stopReason === "error") return COMPACTION_CHECK_NONE;
-		const pruneResult = await this.#pruneToolOutputs();
+		let pruneResult: { prunedCount: number; tokensSaved: number } | undefined;
+		try {
+			pruneResult = await this.#pruneToolOutputs(operation);
+		} catch (error) {
+			if (error instanceof CompactionCancelledError) return COMPACTION_CHECK_NONE;
+			throw error;
+		}
+		if (!this.#compactionOwnerValid(operation)) return COMPACTION_CHECK_NONE;
 		const maintenanceTokensFreed = (supersedeResult?.tokensSaved ?? 0) + (pruneResult?.tokensSaved ?? 0);
 		// `errorIsFromBeforeCompaction` (computed above) is the general
 		// "this assistant message predates the latest compaction" predicate here,
