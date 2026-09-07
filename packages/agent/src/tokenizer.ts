@@ -273,13 +273,16 @@ export class Tokenizer {
 			}
 			case "hookMessage":
 			case "toolResult": {
+				// Computer serializers consume the typed screenshot, not content image mirrors.
+				const hasComputerScreenshot = message.role === "toolResult" && message.providerMetadata?.type === "computer";
+				if (hasComputerScreenshot) extra += IMAGE_TOKEN_ESTIMATE;
 				if (typeof message.content === "string") {
 					fragments.push(message.content);
 				} else {
 					for (const block of message.content) {
 						if (block.type === "text" && block.text) {
 							fragments.push(block.text);
-						} else if (block.type === "image") {
+						} else if (block.type === "image" && !hasComputerScreenshot) {
 							extra += IMAGE_TOKEN_ESTIMATE;
 						}
 					}

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
-import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { ImageContent, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import * as natives from "@oh-my-pi/pi-natives";
 import { Tokenizer, tokenizerEncodingForModel } from "../src/tokenizer";
 import type { AgentMessage } from "../src/types";
@@ -50,6 +50,24 @@ describe("Tokenizer", () => {
 			expect(tokenizer.countMessage(message, { excludeEncryptedReasoning: true })).toBe(expected);
 		}
 		expect(tokenizer.countMessages(messages)).toBe(4 * expected);
+	});
+
+	test("charges a metadata-only computer screenshot without charging content mirrors again", () => {
+		const tokenizer = new Tokenizer();
+		const screenshot: ToolResultMessage = {
+			role: "toolResult", toolCallId: "call_screen", toolName: "computer",
+			content: [], isError: false, timestamp: 0,
+			providerMetadata: {
+				type: "computer", screenshot: { type: "computer_screenshot", file_id: "file-screen" },
+				acknowledgedSafetyChecks: [],
+			},
+		};
+		expect(tokenizer.countMessage(screenshot)).toBe(1200);
+		expect(tokenizer.countMessage(screenshot, { excludeEncryptedReasoning: true })).toBe(1200);
+		const image: ImageContent = { type: "image", data: "cG5n", mimeType: "image/png" };
+		// The computer-result serializer emits its one screenshot instead of content images.
+		expect(tokenizer.countMessage({ ...screenshot, content: [image, { ...image }] })).toBe(1200);
+		expect(tokenizer.countMessage({ ...screenshot, providerMetadata: undefined, content: [image, { ...image }] })).toBe(2400);
 	});
 
 	test("defaults to null encoding and byte estimation", () => {
