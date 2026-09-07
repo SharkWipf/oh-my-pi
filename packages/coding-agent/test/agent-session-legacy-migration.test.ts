@@ -16,7 +16,7 @@ import { SessionManager } from "../src/session/session-manager";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 test("next-real legacy migration preserves installed history and reports unavailable original sources", async () => {
-	const dir = TempDir.createSync("legacy-migration");
+	const dir = TempDir.createSync("@legacy-migration-");
 	const bundled = getBundledModel("openai", "gpt-5.5");
 	assert(bundled);
 	const model = { ...bundled, tokenizer: undefined, contextWindow: 100_000 };
