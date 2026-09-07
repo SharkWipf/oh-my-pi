@@ -400,7 +400,15 @@ export interface OverlayHandle {
  * Container - a component that contains other components
  */
 export class Container implements Component {
-	children: Component[] = [];
+	#children: Component[] = [];
+
+	get children(): Component[] {
+		return this.#children;
+	}
+
+	set children(children: Component[]) {
+		this.#children = children;
+	}
 
 	// Memoized concatenation of the children's latest renders. Children are
 	// still rendered every frame (renders carry side effects: image placement
@@ -424,7 +432,7 @@ export class Container implements Component {
 	}
 
 	addChild(component: Component): void {
-		this.children.push(component);
+		this.#children.push(component);
 		if (this.#ignoreTight) {
 			component.setIgnoreTight?.(true);
 		}
@@ -432,11 +440,14 @@ export class Container implements Component {
 	}
 
 	removeChild(component: Component): void {
-		const index = this.children.indexOf(component);
-		if (index !== -1) {
-			this.children.splice(index, 1);
-			this.#memoLines = undefined;
-		}
+		this.removeChildAt(this.#children.indexOf(component));
+	}
+
+	/** Remove a known child position without searching the container again. */
+	protected removeChildAt(index: number): void {
+		if (!Number.isInteger(index) || index < 0 || index >= this.#children.length) return;
+		this.#children.splice(index, 1);
+		this.#memoLines = undefined;
 	}
 
 	clear(): void {

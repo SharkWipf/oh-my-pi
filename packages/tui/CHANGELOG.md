@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Added a protected indexed child-removal seam and overridable child-array accessors so transcript containers can track public mutations without rescanning committed history.
+
 ### Fixed
 
 - `extractMarkdownLinks()` now returns one-row visible labels for formatted and multiline links ([#11086](https://github.com/can1357/oh-my-pi/pull/11086) by [@mustafaabidali](https://github.com/mustafaabidali)).
