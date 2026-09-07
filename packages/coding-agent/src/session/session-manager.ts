@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import type { CompactionDiagnostics } from "@oh-my-pi/pi-agent-core/compaction/diagnostics";
-import type { SourceRewrite } from "@oh-my-pi/pi-agent-core/compaction/source";
+import { getCompactionSourceRepresentation, type SourceRewrite } from "@oh-my-pi/pi-agent-core/compaction/source";
 import * as path from "node:path";
 import type {
 	ImageContent,
@@ -34,7 +34,18 @@ import {
 	sanitizeRehydratedOpenAIResponsesAssistantMessage,
 	stripInternalDetailsFields,
 } from "./messages";
-import { type BuildSessionContextOptions, buildSessionContext, type SessionContext } from "./session-context";
+import {
+	applySessionContextControlEntry,
+	type BuildSessionContextOptions,
+	buildSessionContext,
+	buildSessionContextFromPath,
+	cloneSessionContextControlState,
+	createSessionContextControlState,
+	getOpenAiRemoteCompactionPayload,
+	type SessionContext,
+	type SessionContextControlState,
+	type SessionContextSourceInventory,
+} from "./session-context";
 import {
 	type BranchSummaryEntry,
 	type CompactionEntry,
@@ -244,6 +255,12 @@ function orderedByTimestamp(a: SessionTreeNode, b: SessionTreeNode): number {
 	return new Date(a.entry.timestamp).getTime() - new Date(b.entry.timestamp).getTime();
 }
 
+interface SessionBranchFold {
+	id: string | null;
+	controls: SessionContextControlState;
+	pins: Map<string, { hash: string; lastUsedAt: number }>;
+	sourceContext?: { compactionId: string; path: SessionEntry[]; inventory: SessionContextSourceInventory };
+}
 /**
  * Maintains the derived views over a session's entry list: id lookup, the
  * parent→children adjacency, the resolved label map, the active leaf, and the
@@ -256,6 +273,125 @@ class SessionEntryIndex {
 	#labels = new Map<string, string>();
 	#leaf: string | null = null;
 	#usage = emptyUsageStatistics();
+	#assistantUsage = emptyUsageStatistics();
+	// One branch fold and one applicable boundary checkpoint, never one per message.
+	// Older unrelated branches may replay ancestry; only recent siblings share this checkpoint.
+	#fold = this.#emptyFold();
+	#boundaryFold: SessionBranchFold | undefined;
+	#rebuilding = false;
+
+	#emptyFold(): SessionBranchFold {
+		return { id: null, controls: createSessionContextControlState(), pins: new Map() };
+	}
+
+	#cloneFold(fold: SessionBranchFold): SessionBranchFold {
+		const pins = new Map<string, { hash: string; lastUsedAt: number }>();
+		for (const [provider, pin] of fold.pins) pins.set(provider, { ...pin });
+		return { ...fold, controls: cloneSessionContextControlState(fold.controls), pins };
+	}
+
+	#foldEntry(entry: SessionEntry): void {
+		applySessionContextControlEntry(this.#fold.controls, entry);
+		if (entry.type === "credential_pin") {
+			this.#fold.pins.set(entry.provider, { hash: entry.hash, lastUsedAt: new Date(entry.timestamp).getTime() });
+		} else if (entry.type === "message" && entry.message.role === "assistant") {
+			const pin = this.#fold.pins.get(entry.message.provider);
+			if (pin) pin.lastUsedAt = Math.max(pin.lastUsedAt, entry.message.timestamp);
+		}
+		this.#fold.id = entry.id;
+		if (entry.type === "reset_boundary" || entry.type === "compaction") {
+			this.#boundaryFold = this.#cloneFold(this.#fold);
+		}
+	}
+
+	branchFold(): SessionBranchFold {
+		if (this.#fold.id === this.#leaf) return this.#fold;
+		const pending: SessionEntry[] = [];
+		const seen = new Set<string>();
+		let cursor = this.#leaf ? this.#entriesById.get(this.#leaf) : undefined;
+		while (cursor && !seen.has(cursor.id) && cursor.id !== this.#fold.id && cursor.id !== this.#boundaryFold?.id) {
+			seen.add(cursor.id);
+			pending.push(cursor);
+			cursor = cursor.parentId ? this.#entriesById.get(cursor.parentId) : undefined;
+		}
+		if (cursor?.id === this.#boundaryFold?.id && this.#boundaryFold) this.#fold = this.#cloneFold(this.#boundaryFold);
+		else if (!cursor || cursor.id !== this.#fold.id) this.#fold = this.#emptyFold();
+		for (let i = pending.length - 1; i >= 0; i--) this.#foldEntry(pending[i]);
+		return this.#fold;
+	}
+
+	assistantUsageSnapshot(): UsageStatistics {
+		return { ...this.#assistantUsage };
+	}
+
+	#sourceContextPath(compaction: CompactionEntry): NonNullable<SessionBranchFold["sourceContext"]> {
+		const fold = this.branchFold();
+		if (fold.sourceContext?.compactionId === compaction.id) return fold.sourceContext;
+		const representation = getCompactionSourceRepresentation(compaction.preserveData)!;
+		const ancestry = this.pathTo(compaction.id);
+		let reset = -1;
+		let firstKept = -1;
+		let through = -1;
+		for (let i = 0; i < ancestry.length; i++) {
+			const entry = ancestry[i];
+			if (entry.type === "reset_boundary") reset = i;
+			if (entry.id === compaction.firstKeptEntryId) firstKept = i;
+			if (entry.id === representation.throughEntryId) through = i;
+		}
+		const referenced = new Set<string>();
+		for (const part of representation.layout) if ("entryId" in part) referenced.add(part.entryId);
+		for (const run of representation.coverage) referenced.add(run.entryId);
+		const path: SessionEntry[] = [];
+		const before = new Map<string, number>();
+		const orders = new Map<string, number>();
+		let total = 0;
+		for (let i = Math.max(0, reset); i < ancestry.length; i++) {
+			const entry = ancestry[i];
+			const ordinary = representation.throughEntryId ? through >= 0 && i > through : firstKept >= 0 && i >= firstKept;
+			if (i === reset || entry.id === compaction.id || i === through || ordinary || referenced.has(entry.id)) {
+				path.push(entry);
+				before.set(entry.id, total);
+				orders.set(entry.id, i);
+			}
+			if (entry.type === "message" || entry.type === "custom_message") total++;
+		}
+		const sourceContext = { compactionId: compaction.id, path, inventory: { before, orders, total } };
+		fold.sourceContext = sourceContext;
+		if (this.#boundaryFold?.id === compaction.id) this.#boundaryFold.sourceContext = sourceContext;
+		return sourceContext;
+	}
+
+	/** Walk only actual replay; the existing boundary fold holds cold source inventory. */
+	contextPath(options?: BuildSessionContextOptions): { path: SessionEntry[]; inventory?: SessionContextSourceInventory } {
+		const path: SessionEntry[] = [];
+		const seen = new Set<string>();
+		let cursor = this.leafEntry();
+		let compaction: CompactionEntry | undefined;
+		let first: string | undefined;
+		while (cursor && !seen.has(cursor.id)) {
+			seen.add(cursor.id);
+			path.push(cursor);
+			if (!compaction) {
+				if (cursor.type === "reset_boundary") break;
+				if (cursor.type === "compaction") {
+					compaction = cursor;
+					if (!options?.transcript && getOpenAiRemoteCompactionPayload(compaction)) {
+						first = compaction.providerReplayThroughEntryId;
+						if (!first) break;
+					} else if (getCompactionSourceRepresentation(compaction.preserveData) && !getOpenAiRemoteCompactionPayload(compaction)) {
+						const source = this.#sourceContextPath(compaction);
+						const result = source.path.slice();
+						for (let i = path.length - 2; i >= 0; i--) result.push(path[i]);
+						return { path: result, inventory: source.inventory };
+					} else first = compaction.firstKeptEntryId;
+				}
+			}
+			if (compaction && cursor.id === first) break;
+			cursor = cursor.parentId ? this.#entriesById.get(cursor.parentId) : undefined;
+		}
+		path.reverse();
+		return { path };
+	}
 
 	clear(): void {
 		this.#entriesById.clear();
@@ -2639,7 +2775,11 @@ export class SessionManager {
 	 * the full-history display transcript, from the current leaf path.
 	 */
 	buildSessionContext(options?: BuildSessionContextOptions): SessionContext {
-		return buildSessionContext(this.#entries, this.#index.leafId(), this.#index.entriesById(), options);
+		if (options?.transcript && !options.collapseCompactedHistory) {
+			return buildSessionContext(this.#entries, this.#index.leafId(), this.#index.entriesById(), options);
+		}
+		const context = this.#index.contextPath(options);
+		return buildSessionContextFromPath(context.path, options, this.#index.branchFold().controls, context.inventory);
 	}
 
 	/** Strip stale OpenAI Responses assistant replay metadata from loaded entries. */
