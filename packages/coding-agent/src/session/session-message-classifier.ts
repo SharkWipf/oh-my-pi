@@ -5,9 +5,9 @@ import type { ModelRegistry } from "../config/model-registry";
 import { resolveModelOverride } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import {
-	buildPreservedUserMessageClassifierInputFromLookup,
 	classifyPreservedUserMessage,
-	preservedUserMessageClassifierInputsEqual,
+	iteratePreservedUserMessageClassifierInputsCooperatively,
+	matchesPreservedUserMessageClassifierSources,
 	type PreservedUserMessageClassifierInput,
 } from "./preserve-user-messages-classifier";
 import { packPreservedUserMessageClassifications, USER_MESSAGE_CLASSIFICATION_CUSTOM_TYPE } from "./preserved-message-settings";
@@ -69,6 +69,7 @@ interface Job {
 	model: Model;
 	iterator: Iterator<ClassifierTarget> | AsyncIterator<ClassifierTarget>;
 	sharedResults: Set<Promise<void>>;
+	invalidatedTargets: Set<string>;
 	finishedScanning: boolean;
 }
 interface Work {
@@ -139,6 +140,7 @@ export class SessionMessageClassifier {
 		const scope: ClassifierScope = { entries: [], boundaryId: null, anchorId: manager.getLeafId(),
 			sessionId: manager.getSessionId(), generation: this.#host.generation(), epoch: this.#epoch };
 		let cursor = scope.anchorId;
+		let collecting = targetId === undefined;
 		let deadline = performance.now() + 4;
 		while (cursor !== null) {
 			if (performance.now() >= deadline) {
@@ -149,16 +151,22 @@ export class SessionMessageClassifier {
 			const entry = manager.getEntry(cursor);
 			if (!entry) throw new Error("Classifier source ancestry is unavailable.");
 			if (entry.type === "reset_boundary") { scope.boundaryId = entry.id; break; }
-			if (targetId === undefined) scope.entries.push(entry);
-			else if (entry.id === targetId) { scope.entries.push(entry); break; }
+			if (entry.id === targetId) collecting = true;
+			if (collecting) scope.entries.push(entry);
 			cursor = entry.parentId;
 		}
 		if (targetId !== undefined && scope.entries.length === 0) throw new Error("Classifier target is not in the active post-clear branch.");
-		if (targetId === undefined) scope.entries.reverse();
+		scope.entries.reverse();
 		return scope;
 	}
-	#input(entryId: string): PreservedUserMessageClassifierInput | undefined {
-		return buildPreservedUserMessageClassifierInputFromLookup(entryId, id => this.#host.sessionManager.getEntry(id));
+	#inputMatches(input: PreservedUserMessageClassifierInput): boolean {
+		return matchesPreservedUserMessageClassifierSources(input, id => this.#host.sessionManager.getEntry(id));
+	}
+	*#currentEntries(entries: readonly SessionEntry[]): Iterable<SessionEntry> {
+		for (const captured of entries) {
+			const entry = this.#host.sessionManager.getEntry(captured.id);
+			if (entry) yield entry;
+		}
 	}
 	#current(job: Job): boolean {
 		if (job.epoch !== this.#epoch || job.controller.signal.aborted || this.#host.isDisposed() || job.generation !== this.#host.generation() ||
@@ -195,9 +203,13 @@ export class SessionMessageClassifier {
 		if (existing && this.#current(existing.job)) return Promise.resolve(existing.job.status.id);
 		const start = (async () => {
 			const scope = await this.#scope(entryId);
-			const input = this.#input(entryId);
-			if (!input) throw new Error("Only real user source messages can be classified.");
-			return this.#start(kind, 1, scope, () => [{ entryId, input }][Symbol.iterator](), entryId);
+			const isCurrent = () => this.#starts.get(entryId) === start && scope.epoch === this.#epoch &&
+				scope.sessionId === this.#host.sessionManager.getSessionId() && scope.generation === this.#host.generation();
+			for await (const target of iteratePreservedUserMessageClassifierInputsCooperatively(this.#currentEntries(scope.entries), isCurrent)) {
+				if (target.entryId !== entryId) continue;
+				return this.#start(kind, 1, scope, () => [target][Symbol.iterator](), entryId);
+			}
+			throw new Error("Classifier source changed or is not a real user message; retry with current input.");
 		})();
 		this.#starts.set(entryId, start);
 		void start.catch(() => { if (this.#starts.get(entryId) === start) this.#starts.delete(entryId); });
@@ -207,38 +219,44 @@ export class SessionMessageClassifier {
 		if (!Number.isSafeInteger(workers) || workers <= 0) throw new Error("Classifier workers must be a positive integer.");
 		const scope = await this.#scope();
 		const host = this.#host;
-		async function* missing(isCurrent: () => boolean): AsyncGenerator<ClassifierTarget> {
-			const masks = await host.readMasks(scope.entries, isCurrent);
-			if (!masks || !isCurrent()) return;
+		const currentEntries = () => this.#currentEntries(scope.entries);
+		async function* missing(isCurrent: () => boolean, isInvalidated: (entryId: string) => boolean): AsyncGenerator<ClassifierTarget> {
+			// Refresh captured entry objects once; rewrites may replace objects before credential admission.
 			let deadline = performance.now() + 4;
-			for (const entry of scope.entries) {
+			for (let index = 0; index < scope.entries.length; index++) {
 				if (performance.now() >= deadline) {
 					await new Promise<void>(resolve => setImmediate(resolve));
 					if (!isCurrent()) return;
 					deadline = performance.now() + 4;
 				}
-				if (entry.type !== "message" || entry.message.role !== "user" || masks.has(entry.id)) continue;
-				const input = buildPreservedUserMessageClassifierInputFromLookup(entry.id, id => host.sessionManager.getEntry(id));
-				if (input) yield { entryId: entry.id, input };
+				const entry = host.sessionManager.getEntry(scope.entries[index]!.id);
+				if (entry) scope.entries[index] = entry;
+			}
+			const masks = await host.readMasks(scope.entries, isCurrent);
+			if (!masks || !isCurrent()) return;
+			for await (const target of iteratePreservedUserMessageClassifierInputsCooperatively(currentEntries(), isCurrent)) {
+				if (!masks.has(target.entryId) || isInvalidated(target.entryId)) yield target;
 			}
 		}
 		return this.#start("backfill", workers, scope, missing);
 	}
-	async #start(kind: Job["status"]["kind"], workers: number, scope: ClassifierScope, createIterator: (isCurrent: () => boolean) => Job["iterator"], targetId?: string): Promise<string> {
+	async #start(kind: Job["status"]["kind"], workers: number, scope: ClassifierScope, createIterator: (isCurrent: () => boolean, isInvalidated: (entryId: string) => boolean) => Job["iterator"], targetId?: string): Promise<string> {
 		if (this.#host.isDisposed()) throw new Error("Session disposed.");
 		const model = this.#resolveModel();
 		const job: Job = {
 			targetId,
 			startPromise: targetId ? this.#starts.get(targetId) : undefined,
 			sharedResults: new Set(),
+			invalidatedTargets: new Set(),
 			validationLeafId: scope.anchorId, epoch: scope.epoch,
 			status: { id: Bun.randomUUIDv7(), kind, state: "running", sessionId: scope.sessionId,
 				anchorId: scope.anchorId, model: `${model.provider}/${model.id}`, workers,
 				queued: 0, running: 0, completed: 0, saved: 0, failed: 0 },
-			generation: scope.generation, boundaryId: scope.boundaryId, controller: new AbortController(), model, iterator: createIterator(() => this.#current(job)), finishedScanning: false,
+			generation: scope.generation, boundaryId: scope.boundaryId, controller: new AbortController(), model, iterator: createIterator(() => this.#current(job), entryId => job.invalidatedTargets.has(entryId)), finishedScanning: false,
 		};
 		const apiKey = await this.#host.modelRegistry.getApiKey(model, job.status.sessionId, { signal: job.controller.signal });
 		if (!this.#current(job)) throw new Error("Classifier launch interrupted by a session or branch transition.");
+		if (targetId && this.#starts.get(targetId) !== job.startPromise) throw new Error("Classifier input changed during launch; retry with current input.");
 		if (!apiKey) throw new Error(`Classifier credentials unavailable for ${model.provider}. Configure Model.`);
 		// A new explicit/live attempt supersedes the prior settled status, not its durable facts.
 		for (const [id, previous] of this.#jobs) {
@@ -268,6 +286,7 @@ export class SessionMessageClassifier {
 		} catch (error) {
 			if (job.status.state === "running") { job.status.state = "failed"; job.status.error = String(error instanceof Error ? error.message : error); }
 		} finally {
+			job.invalidatedTargets.clear();
 			if (job.targetId && this.#starts.get(job.targetId) === job.startPromise) this.#starts.delete(job.targetId);
 			job.startPromise = undefined;
 			if (job.status.kind === "live") { this.#liveActive = false; this.drainLive(); }
@@ -281,12 +300,18 @@ export class SessionMessageClassifier {
 			if (!(await this.#ready(job))) return undefined;
 			if (!this.#current(job)) { this.#cancel(job, "interrupted", "Classifier source scope changed before queueing."); return undefined; }
 			if (next.done) { job.finishedScanning = true; return undefined; }
+			if (job.invalidatedTargets.delete(next.value.entryId)) {
+				job.status.failed++; job.status.completed++;
+				this.#rows.set(next.value.entryId, { entryId: next.value.entryId, jobId: job.status.id, state: "interrupted", error: "Source/context changed; explicit retry required." });
+				this.#notify([next.value.entryId]);
+				continue;
+			}
 			const shared = this.#pending.get(next.value.entryId);
 			if (shared) {
 				job.status.queued++;
 				const observed = untilAborted(job.controller.signal, shared.completion.promise).then(saved => {
 					if (!this.#current(job)) return;
-					if (saved && preservedUserMessageClassifierInputsEqual(shared.input, this.#input(shared.entryId))) job.status.saved++;
+					if (saved && !job.invalidatedTargets.has(shared.entryId) && this.#inputMatches(shared.input)) job.status.saved++;
 					else job.status.failed++;
 				}).catch(() => { if (!job.controller.signal.aborted) job.status.failed++; }).finally(() => {
 					job.sharedResults.delete(observed);
@@ -323,7 +348,7 @@ export class SessionMessageClassifier {
 		this.#notify([entryId]);
 		try {
 			signal.throwIfAborted();
-			if (!preservedUserMessageClassifierInputsEqual(input, this.#input(entryId))) throw new Error("Classifier source/context changed; retry with current input.");
+			if (!this.#inputMatches(input)) throw new Error("Classifier source/context changed; retry with current input.");
 			const requestSessionId = Bun.randomUUIDv7();
 			const mask = await classifyPreservedUserMessage(input, {
 				model: job.model,
@@ -342,13 +367,14 @@ export class SessionMessageClassifier {
 			});
 			if (!(await this.#ready(job))) return;
 			signal.throwIfAborted();
-			if (!preservedUserMessageClassifierInputsEqual(input, this.#input(entryId))) throw new Error("Classifier source/context changed; retry with current input.");
+			if (!this.#inputMatches(input)) throw new Error("Classifier source/context changed; retry with current input.");
 			if (!this.#current(job) || this.#paused) throw new Error("Classifier ownership changed before publication.");
 			// No await between final owner/input validation and append: never write onto an off-branch resume leaf.
 			this.#host.sessionManager.appendCustomEntry(USER_MESSAGE_CLASSIFICATION_CUSTOM_TYPE, packPreservedUserMessageClassifications([{ id: entryId, mask }]));
 			await this.#host.sessionManager.flush();
 			if (!(await this.#ready(job))) return;
-			if (!this.#current(job) || this.#paused || !preservedUserMessageClassifierInputsEqual(input, this.#input(entryId))) { row.state = "interrupted"; return; }
+			signal.throwIfAborted();
+			if (!this.#current(job) || this.#paused || !this.#inputMatches(input)) { row.state = "interrupted"; return; }
 			row.state = "saved";
 			job.status.saved++;
 		} catch (error) {
@@ -398,6 +424,10 @@ export class SessionMessageClassifier {
 		for (const job of this.#jobs.values()) this.#cancel(job, "interrupted", reason);
 	}
 	interruptInputs(ids: readonly string[]): void {
+		for (const job of this.#jobs.values()) {
+			if (job.status.kind !== "backfill" || job.status.state !== "running") continue;
+			for (const id of ids) job.invalidatedTargets.add(id);
+		}
 		for (const id of ids) {
 			this.#starts.delete(id);
 			const work = this.#pending.get(id);

@@ -279,6 +279,8 @@ Classification records eleven independent category facts; preservation settings 
 
 Classification reads the current durable source message and its entry ID, not immutable V2 capture evidence. Source identities and inputs are revalidated before successful v1 facts are appended. Branch/reset/session changes interrupt stale work without appending to another branch; vetoed transitions resume the original scope. Failure is not an all-false classification. Restart never resumes requests automatically: explicitly launch missing-only backfill.
 
+Cold source capture cooperates with the event loop; backfill projects its prior-user/two-assistant neighborhood in one forward pass. Before and after each request, validation reads only the captured current and auxiliary source IDs. Ordinary later appends cannot change those preceding neighbors. The existing source-rewrite callback invalidates dependent targets when content or eligibility changes, including affected rows not yet admitted by an active backfill; those rows require explicit retry while unaffected rows continue.
+
 
 ## `AgentSession` lifecycle and disposal
 
