@@ -61,6 +61,7 @@ export interface CompactionMessageManagerOptions {
 	source: CompactionMessageSource;
 	summary(): CompactionMessageSummary;
 	inspect(id: string): readonly string[];
+	inspectSettings?(id: string): readonly { label: string; path: string }[];
 	setState(id: string, state: CompactionMessageState): ActionResult;
 	prepareResetAll(): CompactionMessageReset | Promise<CompactionMessageReset>;
 	classify(id: string): ActionResult;
@@ -90,7 +91,7 @@ const HELP = [
 	"Current policy / next-compaction preview are not installed representation. Use Inspect for source facts; Usage for physical totals; Details for emitted group inventory. Estimates and unavailable attribution remain labeled.",
 	"c reclassifies the selected real user, retaining valid prior tags until success. C backfills missing/current-unusable tags across the whole current scope, including hidden rows. Many requests/tokens may cost money; choose workers before launch.",
 	"Classifier job offers Cancel backfill and explicit missing-only Resume. Closing this view does not cancel session work. Only queued/running rows spin; failures remain visible and retryable.",
-	"Actions exposes every command. / Search; f independent role/stored-state toggles; i Inspect; p Policy / preview; r Reset row; R confirmed Reset all (hidden rows included, tags/settings preserved); s Settings; u Usage; d Details; j Classifier job; ? Help; Esc Back/Close. Arrows, PageUp/Down, Home/End navigate. Mouse click selects a source and opens its Actions; wheel scrolls; menu items and footer are clickable.",
+	"Actions exposes every command. / Search; f independent role/stored-state toggles; i Inspect; l Source settings; p Policy / preview; r Reset row; R confirmed Reset all (hidden rows included, tags/settings preserved); s Settings; u Usage; d Details; j Classifier job; ? Help; Esc Back/Close. Arrows, PageUp/Down, Home/End navigate. Mouse click selects a source and opens its Actions; wheel scrolls; menu items and footer are clickable.",
 ];
 
 function singleLine(text: string): string {
@@ -304,15 +305,16 @@ export class CompactionMessageManagerComponent implements Component {
 		this.#requestRender();
 	}
 	#actions(): void {
+		const sourceId = this.#document?.sourceId ?? this.#selectedId;
 		const items = [
 			["never", "Never [ ] (n)"], ["auto", "Auto [-] (- / Backspace)"], ["always", "Always [*] (y / *)"],
-			["cycle", "Cycle state (Space / Enter)"], ["inspect", "Inspect (i)"], ["search", "Search (/)"],
+			["cycle", "Cycle state (Space / Enter)"], ["inspect", "Inspect (i)"], ["source-settings", "Source settings (l)"], ["search", "Search (/)"],
 			["filters", "Filters (f)"], ["reset", "Reset row (r)"], ["reset-all", "Reset all (R)"],
 			["classify", "Classify selected / retry (c)"], ["backfill", "Backfill missing (C)"],
 			["job", "Classifier job (j)"], ["settings", "Settings (s)"], ["usage", "Usage (u)"],
 			["preview", "Policy / preview (p)"], ["details", "Details (d)"], ["help", "Help (?)"], ["close", "Close (Esc)"],
 		];
-		this.#showMenu("Actions", items.map(([value, label]) => ({ value: value!, label: label! })), value => this.#action(value));
+		this.#showMenu("Actions", items.map(([value, label]) => ({ value: value!, label: label! })), value => this.#action(value, sourceId));
 	}
 	#filters(selected = 0): void {
 		this.#initialSelectionPending = false;
@@ -477,7 +479,22 @@ export class CompactionMessageManagerComponent implements Component {
 			}
 		}, this.#jobLines());
 	}
-	#action(action: string): void {
+	#sourceSettings(id: string | undefined): void {
+		if (!id || this.options.source.indexOf(id, "all") < 0) {
+			this.#notice = "No active source selected for source settings.";
+			return;
+		}
+		const links = this.options.inspectSettings?.(id);
+		if (!links?.length) {
+			this.#notice = "No source-specific settings links available. Use s for Context settings.";
+			return;
+		}
+		this.#showMenu("Source settings", links.map(link => ({ value: link.path, label: singleLine(link.label) })), path => {
+			this.#back();
+			void this.#run(() => this.options.settings(path));
+		}, [`Source: ${id}`]);
+	}
+	#action(action: string, sourceId = this.#document?.sourceId ?? this.#selectedId): void {
 		this.#back();
 		const row = this.#row(this.#selected);
 		switch (action) {
@@ -496,6 +513,7 @@ export class CompactionMessageManagerComponent implements Component {
 			case "classify": this.#classify(); break;
 			case "backfill": this.#backfill(); break;
 			case "job": this.#job(); break;
+			case "source-settings": this.#sourceSettings(sourceId); break;
 			case "settings": void this.#run(() => this.options.settings()); break;
 			case "usage": void this.#run(() => this.options.usage()); break;
 			case "details": void this.#run(() => this.options.details()); break;
@@ -541,7 +559,7 @@ export class CompactionMessageManagerComponent implements Component {
 		else if (matchesKey(data, "backspace") || data === "-") this.#action("auto");
 		else if (matchesKey(data, "enter") || data === " ") this.#action("cycle");
 		else {
-			const actions: Record<string, string> = { n: "never", y: "always", "*": "always", "/": "search", f: "filters", i: "inspect", r: "reset", R: "reset-all", c: "classify", C: "backfill", j: "job", s: "settings", u: "usage", d: "details", p: "preview", "?": "help" };
+			const actions: Record<string, string> = { n: "never", y: "always", "*": "always", "/": "search", f: "filters", i: "inspect", l: "source-settings", r: "reset", R: "reset-all", c: "classify", C: "backfill", j: "job", s: "settings", u: "usage", d: "details", p: "preview", "?": "help" };
 			if (actions[data]) this.#action(actions[data]);
 		}
 		this.#requestRender();
