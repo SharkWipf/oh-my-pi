@@ -28,10 +28,16 @@ export type InlinePhysical = Readonly<
 	({ kind: "frame"; estimatedTokens: number } | { kind: "note" })
 >;
 
+/** Transient identity of one actual emitted archive frame, never inferred from aggregate coverage. */
+export type ArchiveFrameAccounting = Readonly<{
+	compactionEntryId: string;
+	layoutIndex: number;
+}>;
+
 export type NativeItemOrigin =
 	| { kind: "source"; parts: NativeSourcePart[] }
 	| { kind: "synthetic"; reason: string; anchorEntryId?: string; inlinePhysical?: InlinePhysical }
-	| { kind: "aggregate"; compactionEntryId: string; coveredSources?: NativeSourcePart[] }
+	| { kind: "aggregate"; compactionEntryId: string; coveredSources?: NativeSourcePart[]; archiveFrame?: ArchiveFrameAccounting }
 	| { kind: "unknown"; reason: string };
 
 const nativePositionSchema = type("number.integer").narrow(value => value >= 0);
@@ -51,6 +57,10 @@ const nativeSourcePartSchema: FluentType<NativeSourcePart> = type({
 	"status?": "'exact-current' | 'historical-not-current' | 'unknown' | undefined",
 	"transportBlockIndex?": nativePositionSchema.or(type("undefined")),
 });
+const archiveFrameSchema: FluentType<ArchiveFrameAccounting> = type({
+	compactionEntryId: "string",
+	layoutIndex: nativePositionSchema,
+});
 const inlinePhysicalSchema: FluentType<InlinePhysical> = type({
 	owner: "'system' | 'context' | 'tool'",
 	"toolCallId?": "string | undefined",
@@ -59,7 +69,7 @@ const inlinePhysicalSchema: FluentType<InlinePhysical> = type({
 }).or(type({ owner: "'system' | 'context' | 'tool'", "toolCallId?": "string | undefined", kind: "'note'" }));
 const nativeItemOriginSchema: FluentType<NativeItemOrigin> = type({ kind: "'source'", parts: nativeSourcePartSchema.array() })
 	.or(type({ kind: "'synthetic'", reason: "string", "anchorEntryId?": "string | undefined", "inlinePhysical?": inlinePhysicalSchema.or(type("undefined")) }))
-	.or(type({ kind: "'aggregate'", compactionEntryId: "string", "coveredSources?": nativeSourcePartSchema.array().or(type("undefined")) }))
+	.or(type({ kind: "'aggregate'", compactionEntryId: "string", "coveredSources?": nativeSourcePartSchema.array().or(type("undefined")), "archiveFrame?": archiveFrameSchema.or(type("undefined")) }))
 	.or(type({ kind: "'unknown'", reason: "string" }));
 const nativeItemOriginsSchema = nativeItemOriginSchema.array();
 const nativeSourcePartsSchema = nativeSourcePartSchema.array();
@@ -74,29 +84,35 @@ export function validateNativeItemOrigins(value: unknown): NativeItemOrigin[] | 
 	return nativeItemOriginsSchema.allows(value) ? value : undefined;
 }
 
-type InlineSnapshot =
+type PhysicalSnapshot =
 	| { kind: "note"; text: string }
 	| { kind: "frame"; data: string; mimeType: string; detail: ImageContent["detail"]; url: string | undefined; fileProvider: string | undefined; fileId: string | undefined };
-type OriginEntry = NativeItemOrigin | { kind: "inline"; origin: Extract<NativeItemOrigin, { kind: "synthetic" }>; snapshot: InlineSnapshot };
+type OriginEntry = NativeItemOrigin | { kind: "physical"; origin: Extract<NativeItemOrigin, { kind: "synthetic" | "aggregate" }>; snapshot: PhysicalSnapshot };
 const origins = new WeakMap<object, OriginEntry>();
 
-function withoutInlinePhysical(origin: NativeItemOrigin): NativeItemOrigin {
-	if (origin.kind !== "synthetic" || !origin.inlinePhysical) return origin;
-	const { inlinePhysical: _inlinePhysical, ...rest } = origin;
-	return rest;
+function withoutPhysicalAccounting(origin: NativeItemOrigin): NativeItemOrigin {
+	if (origin.kind === "synthetic" && origin.inlinePhysical) {
+		const { inlinePhysical: _inlinePhysical, ...rest } = origin;
+		return rest;
+	}
+	if (origin.kind === "aggregate" && origin.archiveFrame) {
+		const { archiveFrame: _archiveFrame, ...rest } = origin;
+		return rest;
+	}
+	return origin;
 }
 
-function inlineSnapshot(value: object, fact: InlinePhysical): InlineSnapshot | undefined {
+function physicalSnapshot(value: object, kind: PhysicalSnapshot["kind"]): PhysicalSnapshot | undefined {
 	if (!("type" in value)) return undefined;
-	if (fact.kind === "note" && value.type === "text" && "text" in value && typeof value.text === "string") {
+	if (kind === "note" && value.type === "text" && "text" in value && typeof value.text === "string") {
 		return { kind: "note", text: value.text };
 	}
-	if (fact.kind !== "frame" || value.type !== "image") return undefined;
+	if (kind !== "frame" || value.type !== "image") return undefined;
 	const image = value as ImageContent;
 	return { kind: "frame", data: image.data, mimeType: image.mimeType, detail: image.detail, url: image.url, fileProvider: image.providerFile?.provider, fileId: image.providerFile?.id };
 }
 
-function inlineSnapshotMatches(value: object, snapshot: InlineSnapshot): boolean {
+function physicalSnapshotMatches(value: object, snapshot: PhysicalSnapshot): boolean {
 	if (!("type" in value)) return false;
 	if (snapshot.kind === "note") return value.type === "text" && "text" in value && value.text === snapshot.text;
 	if (value.type !== "image") return false;
@@ -113,9 +129,9 @@ export function getSourceOriginBindingGeneration(): number {
 
 export function getSourceOrigin(value: object): NativeItemOrigin | undefined {
 	const entry = origins.get(value);
-	if (entry?.kind !== "inline") return entry;
-	if (inlineSnapshotMatches(value, entry.snapshot)) return entry.origin;
-	const origin = withoutInlinePhysical(entry.origin);
+	if (entry?.kind !== "physical") return entry;
+	if (physicalSnapshotMatches(value, entry.snapshot)) return entry.origin;
+	const origin = withoutPhysicalAccounting(entry.origin);
 	origins.set(value, origin);
 	return origin;
 }
@@ -126,13 +142,21 @@ export function getInlinePhysical(value: object): InlinePhysical | undefined {
 	return origin?.kind === "synthetic" ? origin.inlinePhysical : undefined;
 }
 
+/** Identity captured for this actual archive frame; aggregate provenance alone carries no frame locator. */
+export function getArchiveFrameAccounting(value: object): ArchiveFrameAccounting | undefined {
+	const origin = getSourceOrigin(value);
+	return origin?.kind === "aggregate" ? origin.archiveFrame : undefined;
+}
+
 export function setSourceOrigin<T extends object>(value: T, origin: NativeItemOrigin): T {
-	const fact = origin.kind === "synthetic" ? origin.inlinePhysical : undefined;
-	const snapshot = fact ? inlineSnapshot(value, fact) : undefined;
-	if (origin.kind === "synthetic" && fact && snapshot) {
-		origins.set(value, { kind: "inline", origin: { ...origin, inlinePhysical: Object.freeze({ ...fact }) }, snapshot });
+	const kind = origin.kind === "synthetic" ? origin.inlinePhysical?.kind : origin.kind === "aggregate" && origin.archiveFrame ? "frame" : undefined;
+	const snapshot = kind ? physicalSnapshot(value, kind) : undefined;
+	if (origin.kind === "synthetic" && origin.inlinePhysical && snapshot) {
+		origins.set(value, { kind: "physical", origin: { ...origin, inlinePhysical: Object.freeze({ ...origin.inlinePhysical }) }, snapshot });
+	} else if (origin.kind === "aggregate" && origin.archiveFrame && snapshot) {
+		origins.set(value, { kind: "physical", origin: { ...origin, archiveFrame: Object.freeze({ ...origin.archiveFrame }) }, snapshot });
 	} else {
-		origins.set(value, withoutInlinePhysical(origin));
+		origins.set(value, withoutPhysicalAccounting(origin));
 	}
 	return value;
 }
@@ -263,7 +287,7 @@ export function bindMessageSource(
 
 /** Serialize the sidecar separately; never put provenance fields inside provider items. */
 export function exportItemOrigins(items: readonly object[]): NativeItemOrigin[] {
-	return items.map(item => withoutInlinePhysical(getSourceOrigin(item) ?? unknownOrigin));
+	return items.map(item => withoutPhysicalAccounting(getSourceOrigin(item) ?? unknownOrigin));
 }
 
 /** Import only the persisted map. Missing legacy maps cannot be reconstructed from content. */
@@ -272,7 +296,7 @@ export function importItemOrigins(items: readonly object[], itemOrigins?: readon
 	for (let index = 0; index < items.length; index++) {
 		const item = items[index]!;
 		const origin = itemOrigins[index] ?? unknownOrigin;
-		setSourceOrigin(item, withoutInlinePhysical(origin));
+		setSourceOrigin(item, withoutPhysicalAccounting(origin));
 		const payload = "content" in item ? item.content : "output" in item ? item.output : undefined;
 		const content = Array.isArray(payload) ? payload : payload && typeof payload === "object" ? [payload] : undefined;
 		if (origin.kind !== "source" || !Array.isArray(content)) continue;
