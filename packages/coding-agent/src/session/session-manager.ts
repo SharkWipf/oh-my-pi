@@ -1,4 +1,13 @@
 import * as fs from "node:fs";
+<<<<<<< HEAD
+=======
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { CompactionDiagnostics } from "@oh-my-pi/pi-agent-core/compaction/diagnostics";
+import type { SourceRewrite } from "@oh-my-pi/pi-agent-core/compaction/source";
+import { REQUIREMENTS_SOURCE_ENTRY, REQUIREMENTS_OPERATOR_DECISION_ENTRY, requirementsHash, requirementsUnits, remapRequirementsUnits, type RequirementsCapture } from "../requirements/source-capture";
+import type { RequirementsObservation, RequirementsSource } from "../requirements/types";
+import type { UserMessageProducer } from "./messages";
+>>>>>>> 4a0af6db7b (fix(session): normalize durable source rewrite lifecycle)
 import * as path from "node:path";
 import type {
 	ImageContent,
@@ -77,6 +86,7 @@ import {
 } from "./session-paths";
 import { prepareEntryForPersistence } from "./session-persistence";
 import { loadPinnedSessionIds, sortPinnedFirst } from "./session-pins";
+import { rewriteSessionSources } from "./session-source-rewrite";
 import {
 	FileSessionStorage,
 	MemorySessionStorage,
@@ -2286,8 +2296,18 @@ export class SessionManager {
 			| BashExecutionMessage
 			| PythonExecutionMessage
 			| FileMentionMessage,
+		options?: { compactionOverride?: "keep" | "exclude" },
 	): string {
 		const entry: SessionMessageEntry = { type: "message", ...this.#freshEntryFields(), message };
+<<<<<<< HEAD
+=======
+		if (message.role === "user") {
+			entry.sourceOrigin = { journalId: this.#sessionId, entryId: entry.id };
+		}
+		if ((message.role === "user" || message.role === "custom") && options?.compactionOverride) {
+			entry.compactionOverride = options.compactionOverride;
+		}
+>>>>>>> 4a0af6db7b (fix(session): normalize durable source rewrite lifecycle)
 		this.#recordEntry(entry);
 		return entry.id;
 	}
@@ -2418,6 +2438,7 @@ export class SessionManager {
 			method?: CompactionMethod;
 			providerReplayThroughEntryId?: string;
 			tokensAfter?: number;
+			diagnostics?: CompactionDiagnostics;
 		} = {},
 	): string {
 		const entry: CompactionEntry<T> = {
@@ -2433,6 +2454,7 @@ export class SessionManager {
 			details: options.details,
 			fromExtension: options.fromExtension,
 			preserveData: options.preserveData,
+			diagnostics: options.diagnostics,
 		};
 		this.#recordEntry(entry);
 		return entry.id;
@@ -2456,11 +2478,23 @@ export class SessionManager {
 		return entry.id;
 	}
 
-	/**
-	 * Rewrite the session file after in-place entry updates (e.g. pruning old tool
-	 * outputs). Use sparingly.
-	 */
-	async rewriteEntries(): Promise<void> {
+	/** Publish source bytes, artifact coverage and classifier validity in one journal rewrite. */
+	async rewriteEntries(
+		rewrites: readonly SourceRewrite[] = [],
+		applySourceRewrites?: () => void,
+		onAffected?: (entryIds: readonly string[]) => void,
+	): Promise<void> {
+		if (this.#released) return;
+		if (rewrites.length > 0 && !applySourceRewrites) {
+			throw new Error("Source rewrite maps require a synchronous source mutation callback");
+		}
+		const affected = applySourceRewrites
+			? rewriteSessionSources(this.#entries, rewrites, applySourceRewrites, id => this.#index.get(id), id => this.#index.childrenOf(id))
+			: [];
+		const leaf = this.#index.leafId();
+		this.#index.rebuild(this.#entries);
+		this.#index.setLeaf(leaf);
+		onAffected?.(affected);
 		if (!this.#persist || !this.#sessionFile) return;
 		await this.#rewriteAtomically();
 	}

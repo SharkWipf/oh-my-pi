@@ -1,4 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { CompactionDiagnostics } from "@oh-my-pi/pi-agent-core/compaction/diagnostics";
 import type {
 	ImageContent,
 	MessageAttribution,
@@ -68,6 +69,8 @@ export interface SessionEntryBase {
 	id: string;
 	parentId: string | null;
 	timestamp: string;
+	/** Initial user override, recorded with the source before asynchronous work starts. */
+	compactionOverride?: "keep" | "exclude";
 }
 
 export interface SessionMessageEntry extends SessionEntryBase {
@@ -121,6 +124,7 @@ export interface CompactionEntry<T = unknown> extends SessionEntryBase {
 	shortSummary?: string;
 	firstKeptEntryId: string;
 	tokensBefore: number;
+	diagnostics?: CompactionDiagnostics;
 	/** Estimated context tokens after the rewrite (display metadata). */
 	tokensAfter?: number;
 	/** Method that produced this entry; absent on legacy sessions and extension-provided compactions. */
