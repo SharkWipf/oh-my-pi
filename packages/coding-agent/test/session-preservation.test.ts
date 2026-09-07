@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { rejects } from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Tokenizer } from "@oh-my-pi/pi-agent-core/tokenizer";
@@ -27,10 +28,15 @@ class FaultStorage extends FileSessionStorage {
 	failAtomic = false;
 	failDrain = false;
 	drainGate?: Promise<void>;
+	atomicWriteGate?: { reached(): void; release: Promise<void> };
 	override async writeTextAtomic(file: string, content: string, options?: WriteTextAtomicOptions): Promise<void> {
 		if (this.failAtomic) {
 			this.failAtomic = false;
 			throw new Error("manual atomic publication failed");
+		}
+		if (this.atomicWriteGate) {
+			this.atomicWriteGate.reached();
+			await this.atomicWriteGate.release;
 		}
 		await super.writeTextAtomic(file, content, options);
 	}
@@ -242,8 +248,22 @@ describe("durable manual preservation actions", () => {
 			manager.appendCustomEntry(MESSAGE_OVERRIDE_CUSTOM_TYPE, { messageIds: [source], state: "keep" });
 		});
 		const snapshot = (await f.preservation.capturePreservedMessageOverrideReset());
+		const repairStarted = Promise.withResolvers<void>();
+		const repairRelease = Promise.withResolvers<void>();
+		f.storage.atomicWriteGate = { reached: repairStarted.resolve, release: repairRelease.promise };
 		f.storage.failAtomic = true;
-		await expect(f.preservation.resetPreservedMessageOverrides(snapshot)).rejects.toThrow("publication failed");
+		// Await the real transaction; Bun's synchronous rejection matcher pumps a nested event loop.
+		const failure = rejects(f.preservation.resetPreservedMessageOverrides(snapshot), {
+			message: "manual atomic publication failed",
+		});
+		try {
+			await repairStarted.promise;
+			expect(f.query().getManualGroup(source)?.members[0]?.state).toBe("keep");
+			expect(f.changed).toEqual([]);
+		} finally {
+			repairRelease.resolve();
+		}
+		await failure;
 		expect(f.query().getManualGroup(source)?.members[0]?.state).toBe("keep");
 		expect((await reopenedQuery(f.manager)).getManualGroup(source)?.members[0]?.state).toBe("keep");
 		expect(f.changed).toEqual([]);
