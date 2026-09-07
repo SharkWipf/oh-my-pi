@@ -120,7 +120,7 @@ export function preservedUserMessageClassifierInputsEqual(
 	left: PreservedUserMessageClassifierInput | undefined,
 	right: PreservedUserMessageClassifierInput | undefined,
 ): boolean {
-	return JSON.stringify(left) === JSON.stringify(right);
+	return Bun.deepEquals(left, right);
 }
 
 export interface PreservedUserMessageClassifierRequestOptions {
