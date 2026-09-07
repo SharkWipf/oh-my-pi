@@ -49,6 +49,7 @@ import {
 	pruneToolOutputs,
 	readToolSupersedeKey,
 } from "@oh-my-pi/pi-agent-core/compaction/pruning";
+import type { SourceBlockRewrite, SourceRewrite } from "@oh-my-pi/pi-agent-core/compaction/source";
 import type { ProtectedToolMatcher } from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
 import type { AssistantMessage, CodexCompactionContext, Message, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
@@ -324,6 +325,8 @@ export interface SessionMaintenanceHost {
 	compactionSourceSelection(requirementsSnapshot: RequirementsApplicableSnapshot): Promise<CompactionSourceSelection>;
 	captureCompactionRequirements(): Promise<RequirementsApplicableSnapshot>;
 	recordCompactionRequirementsReceipt(receipt: RequirementsCallReceipt): void;
+	protectedSourceEntryIds(): Promise<Pick<ReadonlySet<string>, "has">>;
+	preservedSourcesChanged(changedIds: readonly string[], affectedClassifierIds: readonly string[]): void;
 	messages(): AgentMessage[];
 	baseSystemPrompt(): string[];
 	goalModeState(): GoalModeState | undefined;
@@ -511,15 +514,32 @@ export class SessionMaintenance {
 		const planMatcher = createPlanReadMatcher(() => this.#host.planReferencePath());
 		return { ...config, protectedTools: [...config.protectedTools, planMatcher] };
 	}
+	/** Publish source bytes and their dependent facts before awaiting durable storage. */
+	async #rewriteSources(operation: CompactionOperation, maps: readonly SourceRewrite[], apply: () => void): Promise<void> {
+		if (!this.#compactionOwnerValid(operation)) throw new CompactionCancelledError();
+		const changedIds = maps.map(map => map.entryId);
+		await operation.manager.rewriteEntries(
+			maps,
+			() => operation.manager.rewriteCapturedInputs(maps, apply),
+			affectedIds => { this.#host.preservedSourcesChanged(changedIds, affectedIds); },
+		);
+		await operation.manager.flush();
+		// The caller checks ownership after its own await, immediately before live installation.
+	}
 
 	async #pruneToolOutputs(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
-		const branchEntries = this.#host.sessionManager.getBranch();
+		const operation = this.#captureCompactionOperation();
+		const protectedSourceEntryIds = await this.#host.protectedSourceEntryIds();
+		if (!this.#compactionOwnerValid(operation)) throw new CompactionCancelledError();
+		let rewrite: Promise<void> | undefined;
+		const branchEntries = operation.manager.getBranch();
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
 		const result = pruneToolOutputs(
 			branchEntries,
 			this.#tokenizer,
 			this.#withPlanProtection({
 				...DEFAULT_PRUNE_CONFIG,
+				protectedSourceEntryIds,
 				pruneUseless: this.#host.settings.getGroup("compaction").dropUseless,
 				// Cache-stable boundary: never re-write the warm, already-sent prefix
 				// (deep stale/age victims) or summarized-away entries every turn.
@@ -528,12 +548,11 @@ export class SessionMaintenance {
 				cacheWarmSuffixTokens:
 					this.#host.model()?.thinking?.prefixBinding === true ? 0 : PRUNE_CACHE_WARM_SUFFIX_TOKENS,
 			}),
+			(maps, apply) => { rewrite = this.#rewriteSources(operation, maps, apply); },
 		);
-		if (result.prunedCount === 0) {
-			return undefined;
-		}
-
-		await this.#host.sessionManager.rewriteEntries();
+		await rewrite;
+		if (!this.#compactionOwnerValid(operation)) throw new CompactionCancelledError();
+		if (result.prunedCount === 0) return undefined;
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
 		this.#host.resetAdvisorRuntimes("prune-tool-outputs");
@@ -558,12 +577,17 @@ export class SessionMaintenance {
 	async #pruneStaleToolResults(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
 		const { supersedeReads, dropUseless } = this.#host.settings.getGroup("compaction");
 		if (!supersedeReads && !dropUseless) return undefined;
-		const branchEntries = this.#host.sessionManager.getBranch();
+		const operation = this.#captureCompactionOperation();
+		const protectedSourceEntryIds = await this.#host.protectedSourceEntryIds();
+		if (!this.#compactionOwnerValid(operation)) throw new CompactionCancelledError();
+		let rewrite: Promise<void> | undefined;
+		const branchEntries = operation.manager.getBranch();
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
 		const result = pruneSupersededToolResults(
 			branchEntries,
 			this.#tokenizer,
 			this.#withPlanProtection({
+				protectedSourceEntryIds,
 				supersedeKey: supersedeReads ? readToolSupersedeKey : undefined,
 				pruneUseless: dropUseless,
 				protectedTools: [...DEFAULT_PRUNE_CONFIG.protectedTools],
@@ -574,12 +598,11 @@ export class SessionMaintenance {
 				// Prefix-bound thinking cannot survive rewrites inside a warm provider prefix.
 				suffixTokenLimit: this.#host.model()?.thinking?.prefixBinding === true ? 0 : undefined,
 			}),
+			(maps, apply) => { rewrite = this.#rewriteSources(operation, maps, apply); },
 		);
-		if (result.prunedCount === 0) {
-			return undefined;
-		}
-
-		await this.#host.sessionManager.rewriteEntries();
+		await rewrite;
+		if (!this.#compactionOwnerValid(operation)) throw new CompactionCancelledError();
+		if (result.prunedCount === 0) return undefined;
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
 		this.#host.resetAdvisorRuntimes("prune-stale-tool-results");
@@ -601,36 +624,53 @@ export class SessionMaintenance {
 	 * skips the disk rewrite.
 	 */
 	async dropImages(): Promise<{ removed: number }> {
-		const branchEntries = this.#host.sessionManager.getBranch();
+		const operation = this.#captureCompactionOperation();
+		const maps: SourceRewrite[] = [];
+		const edits: Array<() => void> = [];
 		let removed = 0;
-		for (const entry of branchEntries) {
+		for (const entry of operation.manager.getBranch()) {
+			if (entry.type !== "message" && entry.type !== "custom_message") continue;
+			const message = entry.type === "message" ? entry.message : undefined;
+			const content = entry.type === "custom_message" ? entry.content : message && "content" in message ? message.content : undefined;
+			let blocks: SourceBlockRewrite[] | undefined;
+			let dropped = 0;
+			if (Array.isArray(content) && message?.role !== "assistant" && content.some(block => block.type === "image")) {
+				blocks = [];
+				let next = 0;
+				for (let index = 0; index < content.length; index++) {
+					const image = content[index].type === "image";
+					if (image) dropped++;
+					blocks.push({ oldBlockIndex: index, newBlockIndex: image ? null : next++ });
+				}
+			}
+			let auxiliaryImages = 0;
+			if (message?.role === "bashExecution") auxiliaryImages = message.images?.length ?? 0;
+			else if (message?.role === "fileMention") {
+				for (const file of message.files) if (file.image) auxiliaryImages++;
+			} else if (message?.role === "toolResult") {
+				const images = (message.details as { images?: unknown } | undefined)?.images;
+				if (Array.isArray(images)) {
+					for (const image of images) if (image?.type === "image") auxiliaryImages++;
+				}
+			}
+			if (dropped + auxiliaryImages === 0) continue;
+			// Tool-result details are not source content; richer execution/file image slots have no numeric map.
+			maps.push({
+				entryId: entry.id,
+				blocks: message?.role === "bashExecution" || message?.role === "fileMention" ? undefined : (blocks ?? []),
+			});
+			removed += dropped + auxiliaryImages;
 			if (entry.type === "message") {
-				removed += stripImagesFromMessage(entry.message);
-				continue;
-			}
-			if (entry.type === "custom_message" && typeof entry.content !== "string") {
-				const kept: typeof entry.content = [];
-				let dropped = 0;
-				for (const part of entry.content) {
-					if (part.type === "image") {
-						dropped++;
-					} else {
-						kept.push(part);
-					}
-				}
-				if (dropped > 0) {
-					if (kept.length === 0) {
-						kept.push({ type: "text", text: "[image removed]" });
-					}
-					entry.content = kept;
-					removed += dropped;
-				}
+				edits.push(() => { stripImagesFromMessage(entry.message); });
+			} else {
+				const kept = (entry.content as Exclude<typeof entry.content, string>).filter(part => part.type !== "image");
+				if (kept.length === 0) kept.push({ type: "text", text: "[image removed]" });
+				edits.push(() => { entry.content = kept; });
 			}
 		}
-		if (removed === 0) {
-			return { removed: 0 };
-		}
-		await this.#host.sessionManager.rewriteEntries();
+		if (removed === 0) return { removed: 0 };
+		await this.#rewriteSources(operation, maps, () => { for (const edit of edits) edit(); });
+		if (!this.#compactionOwnerValid(operation)) throw new CompactionCancelledError();
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
 		this.#host.resetAdvisorRuntimes("drop-images");
@@ -657,27 +697,37 @@ export class SessionMaintenance {
 			const { removed } = await this.#host.dropImages();
 			return { mode, toolResultsDropped: 0, blocksDropped: 0, imagesDropped: removed, tokensFreed: 0 };
 		}
-
+		const operation = this.#captureCompactionOperation(opts.signal);
 		if (mode === "thinking") {
-			const branchEntries = this.#host.sessionManager.getBranch();
+			const branchEntries = operation.manager.getBranch();
+			const maps: SourceRewrite[] = [];
+			const edits: Array<() => void> = [];
 			let removed = 0;
 			for (const entry of branchEntries) {
 				if (entry.type !== "message" || entry.message.role !== "assistant") continue;
 				const message = entry.message;
-				const kept = message.content.filter(
-					block => block.type !== "thinking" && block.type !== "redactedThinking",
-				);
-				const dropped = message.content.length - kept.length;
-				if (dropped === 0) continue;
-				// Provider serializers omit empty assistant turns, so don't invent model-authored text.
-				message.content = kept;
-				invalidateMessageCache(message);
-				removed += dropped;
+				if (!message.content.some(block => block.type === "thinking" || block.type === "redactedThinking")) continue;
+				const kept: typeof message.content = [];
+				const blocks = message.content.map((block, oldBlockIndex) => {
+					if (block.type === "thinking" || block.type === "redactedThinking") {
+						removed++;
+						return { oldBlockIndex, newBlockIndex: null };
+					}
+					const newBlockIndex = kept.length;
+					kept.push(block);
+					return { oldBlockIndex, newBlockIndex };
+				});
+				maps.push({ entryId: entry.id, blocks });
+				edits.push(() => {
+					message.content = kept;
+					invalidateMessageCache(message);
+				});
 			}
 			if (removed === 0) {
 				return { mode, toolResultsDropped: 0, blocksDropped: 0, thinkingBlocksDropped: 0, tokensFreed: 0 };
 			}
-			await this.#host.sessionManager.rewriteEntries();
+			await this.#rewriteSources(operation, maps, () => { for (const edit of edits) edit(); });
+			if (!this.#compactionOwnerValid(operation)) throw new CompactionCancelledError();
 			const sessionContext = this.#host.buildDisplaySessionContext();
 			this.#host.agent.replaceMessages(sessionContext.messages);
 			this.#host.resetAdvisorRuntimes("shake");
@@ -685,10 +735,16 @@ export class SessionMaintenance {
 			return { mode, toolResultsDropped: 0, blocksDropped: 0, thinkingBlocksDropped: removed, tokensFreed: 0 };
 		}
 
-		const branchEntries = this.#host.sessionManager.getBranch();
+		const protectedSourceEntryIds = await this.#host.protectedSourceEntryIds();
+		if (!this.#compactionOwnerValid(operation)) throw new CompactionCancelledError();
+		const branchEntries = operation.manager.getBranch();
 		const latestCompaction = getLatestCompactionEntry(branchEntries);
+		const configuredProtection = opts.config?.protectedSourceEntryIds;
 		const config = this.#withPlanProtection({
 			...(opts.config ?? AGGRESSIVE_SHAKE_CONFIG),
+			protectedSourceEntryIds: configuredProtection
+				? { has: (id: string) => protectedSourceEntryIds.has(id) || configuredProtection.has(id) }
+				: protectedSourceEntryIds,
 			// Skip entries summarized away by the latest compaction — shaking them
 			// only churns persisted history with no prompt/cache effect. The cut is
 			// unconditional on the wire (see `buildSessionContext`), so a compaction
@@ -700,7 +756,10 @@ export class SessionMaintenance {
 			return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
 		}
 
+		// Freeze only the actual regions' sources, never the whole history.
+		this.#captureCompactionSources(operation, [...new Set(regions.map(region => region.entry))]);
 		const artifactId = await this.#saveShakeArtifact(regions);
+		if (!this.#compactionInputValid(operation)) throw new CompactionCancelledError();
 		const replacements = regions.map((region, index) => this.#shakeElidePlaceholder(region, index, artifactId));
 
 		const hasRemoteReplacementHistory = getOpenAiRemoteCompactionPayload(latestCompaction) !== undefined;
@@ -737,10 +796,11 @@ export class SessionMaintenance {
 			return { region, replacement };
 		});
 
-		applyShakeRegions(items);
+		let rewrite: Promise<void> | undefined;
+		applyShakeRegions(items, (maps, apply) => { rewrite = this.#rewriteSources(operation, maps, apply); });
+		await rewrite;
+		if (!this.#compactionOwnerValid(operation)) throw new CompactionCancelledError();
 		this.#host.recordAnchoredHistoryRewrite(anchoredTokensRemoved);
-
-		await this.#host.sessionManager.rewriteEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
 		this.#host.resetAdvisorRuntimes("shake");

@@ -110,6 +110,64 @@ describe("AgentSession shake", () => {
 			.map(e => (e as { message: ToolResultMessage }).message);
 	}
 
+	it("rejects an artifact plan when its selected source changes during the save", async () => {
+		seedHeavyToolResult("original output ".repeat(1000));
+		appendRecentProtectedTail();
+		const original = branchToolResults()[0];
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const save = sessionManager.saveArtifact.bind(sessionManager);
+		vi.spyOn(sessionManager, "saveArtifact").mockImplementation(async (...args) => {
+			started.resolve();
+			await release.promise;
+			return save(...args);
+		});
+		const pending = session.shake("elide");
+		const rejected = pending.catch((error: unknown) => error);
+		await started.promise;
+		original.content = [{ type: "text", text: "new source bytes" }];
+		release.resolve();
+		expect(await rejected).toBeInstanceOf(compactionModule.CompactionCancelledError);
+		expect(original.content).toEqual([{ type: "text", text: "new source bytes" }]);
+		expect(original.prunedAt).toBeUndefined();
+	});
+
+	it("keeps a suffix appended while the selected shake artifact is saving", async () => {
+		seedHeavyToolResult("original output ".repeat(1000));
+		appendRecentProtectedTail();
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const save = sessionManager.saveArtifact.bind(sessionManager);
+		vi.spyOn(sessionManager, "saveArtifact").mockImplementation(async (...args) => {
+			started.resolve();
+			await release.promise;
+			return save(...args);
+		});
+		const pending = session.shake("elide");
+		await started.promise;
+		sessionManager.appendMessage({ role: "user", content: "appended suffix", timestamp: Date.now() });
+		release.resolve();
+		expect((await pending).toolResultsDropped).toBe(1);
+		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "user", content: "appended suffix" });
+	});
+
+	it("removes an image from the original captured source and its durable replay", async () => {
+		const image: ImageContent = { type: "image", data: "aW1n", mimeType: "image/png" };
+		const sourceCaptureId = await sessionManager.captureRequirementsInput("original instruction", [image]);
+		sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "original instruction" }, image],
+			timestamp: Date.now(),
+			sourceCaptureId,
+			producer: { type: "human" },
+		});
+		expect(await session.dropImages()).toEqual({ removed: 1 });
+		const originalText = [{ type: "text" as const, text: "original instruction" }];
+		expect(await sessionManager.readCapturedInput(sourceCaptureId)).toEqual(originalText);
+		const reloaded = await SessionManager.open(sessionManager.getSessionFile()!, tempDir.path());
+		expect(await reloaded.readCapturedInput(sourceCaptureId)).toEqual(originalText);
+	});
+
 	describe("elide", () => {
 		it("drops the tool result, offloads to an artifact, and embeds the recovery link", async () => {
 			seedHeavyToolResult("X".repeat(4000));

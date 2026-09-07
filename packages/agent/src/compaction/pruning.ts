@@ -3,6 +3,7 @@
  */
 
 import type { ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type { SourceRewrite } from "@oh-my-pi/pi-ai/compaction-source";
 import type { Tokenizer } from "../tokenizer";
 import type { AgentMessage, AgentToolCall } from "../types";
 import type { SessionEntry, SessionMessageEntry } from "./entries";
@@ -253,6 +254,7 @@ export function pruneSupersededToolResults(
 	entries: SessionEntry[],
 	tokenizer: Tokenizer,
 	config: SupersedePruneConfig,
+	rewrite?: (maps: readonly SourceRewrite[], apply: () => void) => void,
 ): PruneResult {
 	const toolCallsById = collectToolCallsById(entries);
 	const candidates = config.supersedeKey
@@ -300,12 +302,20 @@ export function pruneSupersededToolResults(
 
 	const prunedAt = Date.now();
 	let tokensSaved = 0;
-	for (const candidate of toPrune) {
-		candidate.message.content = [{ type: "text", text: candidate.notice }];
-		candidate.message.prunedAt = prunedAt;
-		invalidateMessageCache(candidate.message as AgentMessage);
-		tokensSaved += estimatePrunedSavings(candidate.tokens, candidate.notice);
-	}
+	const apply = () => {
+		for (const candidate of toPrune) {
+			candidate.message.content = [{ type: "text", text: candidate.notice }];
+			candidate.message.prunedAt = prunedAt;
+			invalidateMessageCache(candidate.message as AgentMessage);
+			tokensSaved += estimatePrunedSavings(candidate.tokens, candidate.notice);
+		}
+	};
+	if (rewrite) {
+		rewrite(toPrune.map(candidate => ({
+			entryId: candidate.entry.id,
+			blocks: candidate.message.content.map((_, oldBlockIndex) => ({ oldBlockIndex, newBlockIndex: null })),
+		})), apply);
+	} else apply();
 	return { prunedCount: toPrune.length, tokensSaved };
 }
 
@@ -313,6 +323,7 @@ export function pruneToolOutputs(
 	entries: SessionEntry[],
 	tokenizer: Tokenizer,
 	config: PruneConfig = DEFAULT_PRUNE_CONFIG,
+	rewrite?: (maps: readonly SourceRewrite[], apply: () => void) => void,
 ): PruneResult {
 	let accumulatedTokens = 0;
 	let tokensSaved = 0;
@@ -404,18 +415,26 @@ export function pruneToolOutputs(
 	}
 
 	const prunedAt = Date.now();
-	for (const candidate of candidates) {
-		const message = candidate.entry.message as ToolResultMessage;
-		const notice = candidate.superseded
-			? SUPERSEDED_NOTICE
-			: candidate.useless
-				? USELESS_NOTICE
-				: createPrunedNotice(candidate.tokens);
-		message.content = [{ type: "text", text: notice }];
-		message.prunedAt = prunedAt;
-		invalidateMessageCache(message as AgentMessage);
-		prunedCount++;
-	}
+	const apply = () => {
+		for (const candidate of candidates) {
+			const message = candidate.entry.message as ToolResultMessage;
+			const notice = candidate.superseded
+				? SUPERSEDED_NOTICE
+				: candidate.useless
+					? USELESS_NOTICE
+					: createPrunedNotice(candidate.tokens);
+			message.content = [{ type: "text", text: notice }];
+			message.prunedAt = prunedAt;
+			invalidateMessageCache(message as AgentMessage);
+			prunedCount++;
+		}
+	};
+	if (rewrite) {
+		rewrite(candidates.map(candidate => ({
+			entryId: candidate.entry.id,
+			blocks: (candidate.entry.message as ToolResultMessage).content.map((_, oldBlockIndex) => ({ oldBlockIndex, newBlockIndex: null })),
+		})), apply);
+	} else apply();
 
 	return { prunedCount, tokensSaved };
 }
