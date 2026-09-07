@@ -27,6 +27,8 @@ import {
 	DEFAULT_SHAKE_CONFIG,
 	type CompactionSettings as EngineCompactionSettings,
 	effectiveReserveTokens,
+	getCompactionV2PreserveData,
+	getPreservedOpenAiRemoteCompactionData,
 	invalidateMessageCache,
 	isTranscriptUsageAnchor,
 	NativeCompactionError,
@@ -52,6 +54,7 @@ import { getCompactionSourceRepresentation, type SourceBlockRewrite, type Source
 import type { ProtectedToolMatcher } from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
 import type { AssistantMessage, CodexCompactionContext, Message, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { hasNativeHistorySourceMapping } from "@oh-my-pi/pi-ai/utils/source-origin";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
@@ -944,7 +947,7 @@ export class SessionMaintenance {
 				return await this.compact(customInstructions, options, selectedMethodIndex + 1, compactionAbortController, operation);
 			}
 			const pathEntries = operation.manager.getBranch(retryOperation ? operation.snapshotLeafId ?? undefined : undefined);
-			const preparation = prepareCompaction(pathEntries, effectiveSettings, activeModel, this.#tokenizer, operation.selection);
+			const preparation = this.#prepareSourceCompaction(pathEntries, effectiveSettings, activeModel, operation.selection);
 			if (!preparation) {
 				// Check why we can't compact
 				const lastEntry = pathEntries[pathEntries.length - 1];
@@ -1332,11 +1335,10 @@ export class SessionMaintenance {
 		const messageCount = entries.filter(e => e.type === "message").length;
 		if (messageCount < 2) throw new Error("Nothing to hand off (no messages yet)");
 		const compactionSettings = this.#host.settings.getGroup("compaction");
-		const preparation = prepareCompaction(
+		const preparation = this.#prepareSourceCompaction(
 			entries,
 			resolveMethodSettings(compactionSettings, "handoff"),
 			model,
-			this.#tokenizer,
 			operation.selection,
 		);
 		if (!preparation) throw new Error("Nothing to hand off (already compacted)");
@@ -1475,7 +1477,7 @@ export class SessionMaintenance {
 		const branch = this.#host.sessionManager.getBranch();
 		const snapshotLeafId = branch[branch.length - 1]?.id;
 		if (!snapshotLeafId) return clear();
-		const preparation = prepareCompaction(branch, effectiveSettings, model, this.#tokenizer, operation.selection);
+		const preparation = this.#prepareSourceCompaction(branch, effectiveSettings, model, operation.selection);
 		if (!preparation) return clear();
 		this.#captureCompactionSources(operation, branch, preparation);
 		const signal = run.controller.signal;
@@ -2567,7 +2569,7 @@ export class SessionMaintenance {
 		throw this.#buildCompactionAuthError();
 	}
 
-	/** Only a real compaction upgrades an unmapped archive from durable originals. */
+	/** Upgrade unreadable source only at a real operation, never during installed-history reload. */
 	#prepareSourceCompaction(
 		entries: SessionEntry[],
 		settings: EngineCompactionSettings,
@@ -2578,12 +2580,19 @@ export class SessionMaintenance {
 		const legacyArchive =
 			snapcompact.getPreservedArchive(previous?.preserveData) &&
 			!getCompactionSourceRepresentation(previous?.preserveData);
+		const nativeHistory =
+			getCompactionV2PreserveData(previous?.preserveData) ??
+			getPreservedOpenAiRemoteCompactionData(previous?.preserveData);
+		const rematerializeNative = nativeHistory && (
+			settings.remoteEnabled === false ||
+			!hasNativeHistorySourceMapping(nativeHistory.replacementHistory, nativeHistory.replacementOrigins)
+		);
 		return prepareCompaction(
 			entries,
 			settings,
 			model,
 			this.#tokenizer,
-			legacyArchive ? { ...selection, rematerializeOriginals: true } : selection,
+			legacyArchive || rematerializeNative ? { ...selection, rematerializeOriginals: true } : selection,
 		);
 	}
 
@@ -3057,8 +3066,10 @@ export class SessionMaintenance {
 		// shrinks the real culprit. Bail and let the elide/image tiers handle
 		// that tail instead.
 		let keptTailTokens = 0;
+		const recentSources: NonNullable<CompactionPreparation["recentSources"]> = [];
 		let inKeptRegion = false;
-		for (const entry of branchEntries) {
+		for (let order = 0; order < branchEntries.length; order++) {
+			const entry = branchEntries[order]!;
 			if (entry.id === staleEntry.firstKeptEntryId) inKeptRegion = true;
 			if (entry.id === staleEntry.id) {
 				// Everything after the archive is always kept.
@@ -3066,15 +3077,15 @@ export class SessionMaintenance {
 				continue;
 			}
 			if (!inKeptRegion) continue;
-			const message = (entry as { message?: AgentMessage }).message;
-			if (message) keptTailTokens += this.#tokenizer.countMessage(message);
+			if (entry.type === "message") {
+				keptTailTokens += this.#tokenizer.countMessage(entry.message);
+				recentSources.push({ entryId: entry.id, order, message: entry.message });
+			}
 		}
 		const archive = snapcompact.getPreservedArchive(staleEntry.preserveData);
 		if (!archive || archive.frames.length <= 1) return undefined;
 		const archiveText = snapcompact.archiveSourceText(archive);
 		if (!archiveText) return undefined;
-		const maxFrames = this.#computeSnapcompactRescueMaxFrames(settings, keptTailTokens);
-		if (maxFrames < 1 || maxFrames >= archive.frames.length) return undefined;
 
 		const staleDetails = staleEntry.details as snapcompact.CompactionDetails | undefined;
 		const fileOps = snapcompact.createFileOps();
@@ -3082,16 +3093,40 @@ export class SessionMaintenance {
 		for (const file of staleDetails?.modifiedFiles ?? []) fileOps.edited.add(file);
 		const operation = this.#captureCompactionOperation(signal);
 		await this.#preflightCompactionOperation(operation);
-		this.#captureCompactionSources(operation, branchEntries);
+		const legacyArchive = !getCompactionSourceRepresentation(staleEntry.preserveData);
+		const legacyPreparation = legacyArchive
+			? this.#prepareSourceCompaction(branchEntries, settings, this.#model, operation.selection)
+			: undefined;
+		if (legacyArchive && !legacyPreparation) return undefined;
+		const maxFrames = this.#computeSnapcompactRescueMaxFrames(
+			settings,
+			legacyPreparation ? this.#tokenizer.countMessages(legacyPreparation.recentMessages) : keptTailTokens,
+		);
+		if (maxFrames < 1 || maxFrames >= archive.frames.length) return undefined;
+		this.#captureCompactionSources(operation, branchEntries, legacyPreparation);
+		const includeThinking = preferredDialect(this.#model.id) !== "anthropic";
+		const sourceText = legacyPreparation
+			? snapcompact.serializeConversation(
+					convertToLlm(legacyPreparation.messagesToSummarize.concat(legacyPreparation.turnPrefixMessages)),
+					{ includeThinking },
+				)
+			: archiveText;
 		const shapeSetting = this.#host.settings.get("snapcompact.shape");
-		const shape = snapcompact.resolveShapeForText(archiveText, this.#model, shapeSetting);
+		const shape = snapcompact.resolveShapeForText(sourceText, this.#model, shapeSetting);
 		let result: snapcompact.CompactionResult;
 		try {
 			result = await snapcompact.compact(
-				{
+				legacyPreparation ?? {
 					firstKeptEntryId: staleEntry.firstKeptEntryId,
 					messagesToSummarize: [],
 					turnPrefixMessages: [],
+					sourcesToSummarize: [],
+					turnPrefixSources: [],
+					recentSources,
+					selectedSources: [
+						...(operation.selection.selectedSources ?? []),
+						...(operation.selection.admittedNonUserSources ?? []),
+					],
 					tokensBefore: staleEntry.tokensBefore,
 					previousSummary: staleEntry.summary,
 					previousPreserveData: staleEntry.preserveData,
@@ -3102,6 +3137,7 @@ export class SessionMaintenance {
 					model: this.#model,
 					...(shapeSetting === "auto" ? {} : { shape }),
 					maxFrames,
+					includeThinking,
 				},
 			);
 		} catch (error) {
@@ -3363,7 +3399,7 @@ export class SessionMaintenance {
 			const pathEntries = operation.manager.getBranch(retryOperation ? operation.snapshotLeafId ?? undefined : undefined);
 
 			let pathEntriesForCompaction = pathEntries;
-			let preparation = prepareCompaction(pathEntriesForCompaction, effectiveSettings, this.#model, this.#tokenizer, operation.selection);
+			let preparation = this.#prepareSourceCompaction(pathEntriesForCompaction, effectiveSettings, this.#model, operation.selection);
 			if (!preparation) {
 				// prepareCompaction found nothing to summarize because the kept region
 				// is a single oversized recent turn — findCutPoint never cuts inside a
@@ -3415,11 +3451,10 @@ export class SessionMaintenance {
 								rescueRewroteHistory = true;
 								if (!this.#compactionOwnerValid(operation, operation.manager.getLeafId())) throw new CompactionCancelledError();
 								pathEntriesForCompaction = this.#host.sessionManager.getBranch();
-								preparation = prepareCompaction(
+								preparation = this.#prepareSourceCompaction(
 									pathEntriesForCompaction,
 									effectiveSettings,
 									this.#model,
-									this.#tokenizer,
 									operation.selection,
 								);
 								return preparation !== undefined;
@@ -3506,7 +3541,7 @@ export class SessionMaintenance {
 				operation = this.#captureCompactionOperation(autoCompactionSignal);
 				await this.#preflightCompactionOperation(operation);
 				pathEntriesForCompaction = operation.manager.getBranch();
-				preparation = prepareCompaction(pathEntriesForCompaction, effectiveSettings, this.#model, this.#tokenizer, operation.selection);
+				preparation = this.#prepareSourceCompaction(pathEntriesForCompaction, effectiveSettings, this.#model, operation.selection);
 				if (!preparation) throw new CompactionCancelledError();
 			}
 			this.#captureCompactionSources(operation, pathEntriesForCompaction, preparation);
