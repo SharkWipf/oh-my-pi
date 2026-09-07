@@ -101,10 +101,12 @@ export interface TokenBudgetCheck {
 }
 
 /**
- * Image content has no tokenizer representation; charge a fixed estimate
- * matching what providers typically bill for inline images.
+ * Baseline per original image in user, developer, tool and hook messages.
+ * This local estimate is independent of provider/model/detail, not a bill.
+ * A representation-specific projection must replace this charge (add only
+ * its effective image estimate minus this baseline), never add a second image.
  */
-const IMAGE_TOKEN_ESTIMATE = 1200;
+export const IMAGE_TOKEN_ESTIMATE = 1200;
 
 /**
  * Memoized estimates for one message under this tokenizer's encoding, split by
@@ -219,6 +221,7 @@ export class Tokenizer {
 		}
 
 		switch (message.role) {
+			case "developer":
 			case "user": {
 				const content: string | Array<{ type: string; text?: string }> = message.content;
 				if (typeof content === "string") {
@@ -227,6 +230,8 @@ export class Tokenizer {
 					for (const block of content) {
 						if (block.type === "text" && block.text) {
 							fragments.push(block.text);
+						} else if (block.type === "image") {
+							extra += IMAGE_TOKEN_ESTIMATE;
 						}
 					}
 				}

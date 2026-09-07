@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
+import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import * as natives from "@oh-my-pi/pi-natives";
 import { Tokenizer, tokenizerEncodingForModel } from "../src/tokenizer";
+import type { AgentMessage } from "../src/types";
 
 afterEach(() => {
 	vi.restoreAllMocks();
@@ -28,6 +30,28 @@ describe("tokenizerEncodingForModel", () => {
 });
 
 describe("Tokenizer", () => {
+	test("counts each original image once across user, developer, tool and hook content", () => {
+		const tokenizer = new Tokenizer();
+		const content: (TextContent | ImageContent)[] = [
+			{ type: "text", text: "Inspect these images" },
+			{ type: "image", data: "cG5n", mimeType: "image/png", detail: "low" },
+			{ type: "image", data: "cG5n", mimeType: "image/png", detail: "high" },
+			{ type: "image", data: "cG5n", mimeType: "image/png", detail: "auto" },
+		];
+		const messages: AgentMessage[] = [
+			{ role: "user", content, timestamp: 0 },
+			{ role: "developer", content, timestamp: 0 },
+			{ role: "toolResult", toolCallId: "read_1", toolName: "read", content, isError: false, timestamp: 0 },
+			{ role: "hookMessage", customType: "images", content, display: false, timestamp: 0 },
+		];
+		const expected = tokenizer.countTokens("Inspect these images") + 3 * 1200;
+		for (const message of messages) {
+			expect(tokenizer.countMessage(message)).toBe(expected);
+			expect(tokenizer.countMessage(message, { excludeEncryptedReasoning: true })).toBe(expected);
+		}
+		expect(tokenizer.countMessages(messages)).toBe(4 * expected);
+	});
+
 	test("defaults to null encoding and byte estimation", () => {
 		const tokenizer = new Tokenizer();
 		expect(tokenizer.encoding).toBeNull();

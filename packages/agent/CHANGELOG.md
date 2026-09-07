@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed local token estimates omitting user and developer images; original images now receive the same one-time baseline as tool-result and hook images.
+
 ## [18.1.10] - 2026-09-04
 
 ### Fixed
