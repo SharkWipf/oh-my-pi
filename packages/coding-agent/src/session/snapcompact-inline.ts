@@ -16,6 +16,7 @@
 
 import { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type { Context, ImageContent, Model, TextContent, ToolResultMessage, UserMessage } from "@oh-my-pi/pi-ai";
+import { combineContentSourceOrigins, setSourceOrigin, transferSourceOrigin } from "@oh-my-pi/pi-ai/utils/source-origin";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { SnapcompactFrameSink } from "../blob-broker/service";
 import contextFramesNote from "../prompts/system/snapcompact-context-frames-note.md" with { type: "text" };
@@ -498,18 +499,21 @@ export class SnapcompactInlineTransformer {
 			const target = targets.get(swap.id);
 			if (!target) continue;
 			const frames = await this.#framesFor(this.#toolCache, swap.id, target.text, shape);
-			const content: (TextContent | ImageContent)[] = [{ type: "text", text: toolResultNote }, ...frames];
+			const content: (TextContent | ImageContent)[] = [
+				setSourceOrigin({ type: "text", text: toolResultNote }, { kind: "synthetic", reason: "raster-control" }),
+				...frames,
+			];
 			let sourceImageIndex = 0;
 			for (const block of target.message.content) {
 				if (block.type !== "image") continue;
 				sourceImageIndex++;
-				content.push({
+				content.push(setSourceOrigin({
 					type: "text",
 					text: `[Original source image ${sourceImageIndex}; corresponds to its marker in the compacted text.]`,
-				});
+				}, { kind: "synthetic", reason: "raster-control" }));
 				content.push(block);
 			}
-			messages[target.index] = { ...target.message, content };
+			messages[target.index] = setSourceOrigin({ ...target.message, content }, combineContentSourceOrigins(content));
 			changed = true;
 			savings.push({
 				toolCallId: swap.id,
@@ -542,13 +546,16 @@ export class SnapcompactInlineTransformer {
 				this.#systemCache = cached;
 			}
 			const frames = cached.frames;
+			for (const frame of frames) setSourceOrigin(frame, { kind: "synthetic", reason: "system-prompt-raster" });
 			const original = messages[userIndex] as UserMessage;
 			const originalContent: (TextContent | ImageContent)[] =
-				typeof original.content === "string" ? [{ type: "text", text: original.content }] : original.content;
-			messages[userIndex] = {
-				...original,
-				content: [{ type: "text", text: systemPromptTarget.userNote }, ...frames, ...originalContent],
-			};
+				typeof original.content === "string" ? [transferSourceOrigin(original, { type: "text", text: original.content })] : original.content;
+			const content: (TextContent | ImageContent)[] = [
+				setSourceOrigin({ type: "text", text: systemPromptTarget.userNote }, { kind: "synthetic", reason: "raster-control" }),
+				...frames,
+				...originalContent,
+			];
+			messages[userIndex] = setSourceOrigin({ ...original, content }, combineContentSourceOrigins(content));
 			systemPrompt = systemPromptTarget.replacement;
 			changed = true;
 		}
@@ -569,6 +576,7 @@ export class SnapcompactInlineTransformer {
 		// A frame sink defers rasterization until a provider actually fetches
 		// the frame URL — the cache then holds tiny placeholders, not pixels.
 		const frames = (await this.frameSink?.framesFor(text, shape)) ?? (await snapcompact.renderMany(text, { shape }));
+		for (const frame of frames) setSourceOrigin(frame, { kind: "synthetic", reason: "tool-result-raster" });
 		cache.set(key, { hash, frames });
 		return frames;
 	}

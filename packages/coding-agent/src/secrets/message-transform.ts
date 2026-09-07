@@ -1,5 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Context, ImageContent, Message, TextContent } from "@oh-my-pi/pi-ai";
+import { combineContentSourceOrigins, setSourceOrigin, transferTransformedSourceOrigin } from "@oh-my-pi/pi-ai/utils/source-origin";
 import type { SessionContext } from "../session/session-context";
 import type { JsonValue, SecretObfuscator } from "./obfuscator";
 import { collectJsonRegexSecretValues, mapJsonStrings } from "./placeholder-scan";
@@ -33,13 +34,13 @@ export function deobfuscateAgentMessages(obfuscator: SecretObfuscator, messages:
 				const content = deobfuscateAssistantContent(obfuscator, message.content);
 				if (content === message.content) return message;
 				changed = true;
-				return { ...message, content };
+				return setSourceOrigin({ ...message, content }, combineContentSourceOrigins(content));
 			}
 			case "branchSummary": {
 				const summary = deob(message.summary);
 				if (summary === message.summary) return message;
 				changed = true;
-				return { ...message, summary };
+				return transferTransformedSourceOrigin(message, { ...message, summary });
 			}
 			case "compactionSummary": {
 				const summary = deob(message.summary);
@@ -49,7 +50,7 @@ export function deobfuscateAgentMessages(obfuscator: SecretObfuscator, messages:
 					return message;
 				}
 				changed = true;
-				return { ...message, summary, shortSummary, blocks };
+				return transferTransformedSourceOrigin(message, { ...message, summary, shortSummary, blocks });
 			}
 			default:
 				return message;
@@ -75,7 +76,7 @@ export function deobfuscateAssistantContent(
 			const text = deob(block.text);
 			if (text === block.text) return block;
 			changed = true;
-			return { ...block, text };
+			return transferTransformedSourceOrigin(block, { ...block, text });
 		}
 
 		if (block.type === "toolCall") {
@@ -84,7 +85,7 @@ export function deobfuscateAssistantContent(
 			const rawBlock = block.rawBlock === undefined ? undefined : deob(block.rawBlock);
 			if (args === block.arguments && intent === block.intent && rawBlock === block.rawBlock) return block;
 			changed = true;
-			return { ...block, arguments: args, intent, rawBlock };
+			return transferTransformedSourceOrigin(block, { ...block, arguments: args, intent, rawBlock });
 		}
 		return block;
 	});
@@ -133,7 +134,7 @@ function obfuscateTextBlocks(
 		const text = obfuscator.obfuscate(block.text, sharedRegexSecretValues);
 		if (text === block.text) return block;
 		changed = true;
-		return { ...block, text };
+		return transferTransformedSourceOrigin(block, { ...block, text });
 	});
 	return changed ? result : content;
 }
@@ -149,7 +150,7 @@ function deobfuscateTextBlocks(
 		const text = obfuscator.deobfuscate(block.text);
 		if (text === block.text) return block;
 		changed = true;
-		return { ...block, text };
+		return transferTransformedSourceOrigin(block, { ...block, text });
 	});
 	return changed ? result : content;
 }
@@ -175,13 +176,13 @@ function obfuscateAssistantContentForReplay(
 			const text = obfuscate(block.text);
 			if (text === block.text) return block;
 			changed = true;
-			return { ...block, text };
+			return transferTransformedSourceOrigin(block, { ...block, text });
 		}
 		if (block.type === "thinking") {
 			const thinking = obfuscate(block.thinking);
 			if (thinking === block.thinking) return block;
 			changed = true;
-			return { ...block, thinking, thinkingSignature: undefined };
+			return transferTransformedSourceOrigin(block, { ...block, thinking, thinkingSignature: undefined });
 		}
 		if (block.type === "toolCall") {
 			const args = mapJsonStrings(block.arguments as JsonValue, obfuscate) as Record<string, unknown>;
@@ -189,7 +190,7 @@ function obfuscateAssistantContentForReplay(
 			const rawBlock = block.rawBlock === undefined ? undefined : obfuscate(block.rawBlock);
 			if (args === block.arguments && intent === block.intent && rawBlock === block.rawBlock) return block;
 			changed = true;
-			return { ...block, arguments: args, intent, rawBlock };
+			return transferTransformedSourceOrigin(block, { ...block, arguments: args, intent, rawBlock });
 		}
 		return block;
 	});
@@ -259,19 +260,19 @@ export function obfuscateMessages(obfuscator: SecretObfuscator, messages: Messag
 			const content = obfuscateAssistantContentForReplay(obfuscator, message.content, sharedRegexSecretValues);
 			if (content === message.content) return message;
 			changed = true;
-			return { ...message, content };
+			return setSourceOrigin({ ...message, content }, combineContentSourceOrigins(content));
 		}
 		const target = message as UserFacingMessage;
 		if (typeof target.content === "string") {
 			const content = obfuscator.obfuscate(target.content, sharedRegexSecretValues);
 			if (content === target.content) return message;
 			changed = true;
-			return { ...target, content } as Message;
+			return transferTransformedSourceOrigin(message, { ...target, content } as Message);
 		}
 		const content = obfuscateTextBlocks(obfuscator, target.content, sharedRegexSecretValues);
 		if (content === target.content) return message;
 		changed = true;
-		return { ...target, content } as Message;
+		return setSourceOrigin({ ...target, content } as Message, combineContentSourceOrigins(content));
 	});
 	return changed ? result : messages;
 }
