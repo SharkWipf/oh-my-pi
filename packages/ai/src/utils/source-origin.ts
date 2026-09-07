@@ -50,6 +50,12 @@ const nativeItemOriginSchema: FluentType<NativeItemOrigin> = type({ kind: "'sour
 	.or(type({ kind: "'aggregate'", compactionEntryId: "string", "coveredSources?": nativeSourcePartSchema.array() }))
 	.or(type({ kind: "'unknown'", reason: "string" }));
 const nativeItemOriginsSchema = nativeItemOriginSchema.array();
+const nativeSourcePartsSchema = nativeSourcePartSchema.array();
+
+/** Validate persisted aggregate input coverage without fabricating an item wrapper. */
+export function validateNativeSourceParts(value: unknown): NativeSourcePart[] | undefined {
+	return nativeSourcePartsSchema.allows(value) ? value : undefined;
+}
 
 /** Validate persisted local metadata once at its untyped boundary; never infer missing origins. */
 export function validateNativeItemOrigins(value: unknown): NativeItemOrigin[] | undefined {
