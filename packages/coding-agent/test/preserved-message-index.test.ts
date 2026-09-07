@@ -9,10 +9,25 @@ import {
 } from "../src/session/preserved-message-index";
 
 function user(raw: number, overrides: Partial<PolicySlot> = {}): PolicySlot {
-	return { user: true, raw, candidate: raw, eligible: true, always: false, manual: false, nonUserCount: 0, ...overrides };
+	return {
+		user: true,
+		raw,
+		candidate: raw,
+		eligible: true,
+		always: false,
+		manual: false,
+		nonUserCount: 0,
+		...overrides,
+	};
 }
 
-function price(slot: PolicySlot, position: number, kind: PolicyKind, hard: number, automatic: boolean): number | undefined {
+function price(
+	slot: PolicySlot,
+	position: number,
+	kind: PolicyKind,
+	hard: number,
+	automatic: boolean,
+): number | undefined {
 	if (!slot.user) return kind === "always" && slot.nonUserCount > 0 ? slot.raw : undefined;
 	if (!automatic) return kind === "always" && slot.manual ? slot.raw : undefined;
 	if (kind === "always" && !slot.always && !slot.manual) return undefined;
@@ -21,7 +36,14 @@ function price(slot: PolicySlot, position: number, kind: PolicyKind, hard: numbe
 }
 
 // Deliberately plain source walk: no blocks, cumulative searches, or production predicates.
-function oracle(slots: PolicySlot[], limit: PolicyLimit, direction: PolicyDirection, kind: PolicyKind, hard: number, automatic: boolean) {
+function oracle(
+	slots: PolicySlot[],
+	limit: PolicyLimit,
+	direction: PolicyDirection,
+	kind: PolicyKind,
+	hard: number,
+	automatic: boolean,
+) {
 	const selected: number[] = [];
 	let count = 0;
 	let tokens = 0;
@@ -33,7 +55,10 @@ function oracle(slots: PolicySlot[], limit: PolicyLimit, direction: PolicyDirect
 		const cost = price(slot, position, kind, hard, automatic);
 		if (cost === undefined) continue;
 		const weight = slot.user ? 1 : slot.nonUserCount;
-		if ((limit.mode === "messages" && count + weight > limit.value) || (limit.mode === "tokens" && tokens + cost > limit.value)) {
+		if (
+			(limit.mode === "messages" && count + weight > limit.value) ||
+			(limit.mode === "tokens" && tokens + cost > limit.value)
+		) {
 			blocker = position;
 			break;
 		}
@@ -49,7 +74,13 @@ describe("PreservedMessageIndex", () => {
 	it("stops asymmetric suffixes at the first nonfit and retains zero-price edge ties", () => {
 		const index = new PreservedMessageIndex();
 		for (const cost of [6, 6]) index.append(user(cost));
-		expect(index.query({ mode: "tokens", value: 10 }, "recent", "raw")).toEqual({ start: 1, end: 2, count: 1, tokens: 6, blocker: 0 });
+		expect(index.query({ mode: "tokens", value: 10 }, "recent", "raw")).toEqual({
+			start: 1,
+			end: 2,
+			count: 1,
+			tokens: 6,
+			blocker: 0,
+		});
 		index.truncate(0);
 		for (const cost of [0, 0, 3, 0, 0]) index.append(user(cost, { always: true }));
 		for (const kind of ["raw", "eligible", "always"] as const) {
@@ -106,7 +137,10 @@ describe("PreservedMessageIndex", () => {
 		expect(admitted).toMatchObject({ count: 3, tokens: 12, blocker: 3 });
 		expect(index.query({ mode: "all" }, "first", "always", 0, false)).toMatchObject({ count: 4, tokens: 13 });
 		expect(index.measureUnion([{ range: admitted, kind: "always" }])).toEqual({ count: 0, tokens: 0 });
-		expect(index.measureUnion([{ range: admitted, kind: "always" }], index.length, true, false)).toEqual({ count: 3, tokens: 12 });
+		expect(index.measureUnion([{ range: admitted, kind: "always" }], index.length, true, false)).toEqual({
+			count: 3,
+			tokens: 12,
+		});
 	});
 
 	it("matches an independent oracle across blocks, deltas, rollback, reappend and overlapping unions", () => {
@@ -142,13 +176,33 @@ describe("PreservedMessageIndex", () => {
 				const direction = trial % 2 === 0 ? "first" : "recent";
 				const hard = [0, slots.length, 4096, 4101, random(slots.length + 1)][trial % 5];
 				const automatic = trial % 7 !== 0;
-				const limit: PolicyLimit = trial % 4 === 0 ? { mode: "all" } : trial % 4 === 1 ? { mode: "off" } : { mode: trial % 4 === 2 ? "tokens" : "messages", value: random(slots.length * 5) };
+				const limit: PolicyLimit =
+					trial % 4 === 0
+						? { mode: "all" }
+						: trial % 4 === 1
+							? { mode: "off" }
+							: { mode: trial % 4 === 2 ? "tokens" : "messages", value: random(slots.length * 5) };
 				const expected = oracle(slots, limit, direction, kind, hard, automatic);
 				const actual = index.query(limit, direction, kind, hard, automatic);
-				expect({ count: actual.count, tokens: actual.tokens, blocker: actual.blocker }).toEqual({ count: expected.count, tokens: expected.tokens, blocker: expected.blocker });
+				expect({ count: actual.count, tokens: actual.tokens, blocker: actual.blocker }).toEqual({
+					count: expected.count,
+					tokens: expected.tokens,
+					blocker: expected.blocker,
+				});
 				expect([...index.iterate(actual, kind, hard, automatic)]).toEqual(expected.selected);
-				for (const position of [0, 4095, 4096, actual.start - 1, actual.start, actual.end - 1, actual.end, slots.length]) {
-					expect(index.includes(position, actual, kind, hard, automatic)).toBe(expected.selected.includes(position));
+				for (const position of [
+					0,
+					4095,
+					4096,
+					actual.start - 1,
+					actual.start,
+					actual.end - 1,
+					actual.end,
+					slots.length,
+				]) {
+					expect(index.includes(position, actual, kind, hard, automatic)).toBe(
+						expected.selected.includes(position),
+					);
 				}
 			}
 			for (const automatic of [false, true]) {
@@ -156,8 +210,14 @@ describe("PreservedMessageIndex", () => {
 				const hard = hardRange.start;
 				const selections: { range: PolicyRange; kind: PolicyKind }[] = [
 					{ range: hardRange, kind: "raw" },
-					{ range: index.query({ mode: "messages", value: 4000 }, "first", "eligible", hard, automatic), kind: "eligible" },
-					{ range: index.query({ mode: "messages", value: 3000 }, "recent", "eligible", hard, automatic), kind: "eligible" },
+					{
+						range: index.query({ mode: "messages", value: 4000 }, "first", "eligible", hard, automatic),
+						kind: "eligible",
+					},
+					{
+						range: index.query({ mode: "messages", value: 3000 }, "recent", "eligible", hard, automatic),
+						kind: "eligible",
+					},
 					{ range: index.query({ mode: "all" }, "first", "always", hard, automatic), kind: "always" },
 				];
 				for (const userOnly of [false, true]) {

@@ -177,8 +177,11 @@ const SETTING_PATH_SEGMENTS: Record<SettingPath, readonly string[]> = Object.fro
 	(Object.keys(SETTINGS_SCHEMA) as SettingPath[]).map(settingPath => [settingPath, settingPath.split(".")]),
 ) as unknown as Record<SettingPath, readonly string[]>;
 
-const PRESERVATION_SETTING_PATHS = (Object.keys(SETTINGS_SCHEMA) as SettingPath[]).filter(path =>
-	path.startsWith("compaction.keep") || path === "compaction.pruneLongUserMessages" || path === "compaction.maxTokensPerUserMessage",
+const PRESERVATION_SETTING_PATHS = (Object.keys(SETTINGS_SCHEMA) as SettingPath[]).filter(
+	path =>
+		path.startsWith("compaction.keep") ||
+		path === "compaction.pruneLongUserMessages" ||
+		path === "compaction.maxTokensPerUserMessage",
 );
 
 /**
@@ -500,7 +503,6 @@ function normalizeEffectivePreservationLimits(raw: RawSettings): void {
 	if (compaction.keepRecentUserMessagesLimit === "messages:0") compaction.keepRecentUserMessagesLimit = "off";
 	if (Object.keys(compaction).length > 0) raw.compaction = compaction;
 }
-
 
 /**
  * Migrate a v17 leaf rename that used to nest under a boolean parent path
@@ -864,16 +866,28 @@ export class Settings {
 	set<P extends SettingPath>(path: P, value: SettingValue<P>): void {
 		const prev = this.get(path);
 		// The first explicit legacy edit saves both effective edges together; opening settings writes nothing.
-		if ((path === "compaction.keepFirstLimit" || path === "compaction.keepLastLimit") && hasLegacyPreservationPair(this.#merged)) {
-			const counterpart = path === "compaction.keepFirstLimit" ? "compaction.keepLastLimit" : "compaction.keepFirstLimit";
+		if (
+			(path === "compaction.keepFirstLimit" || path === "compaction.keepLastLimit") &&
+			hasLegacyPreservationPair(this.#merged)
+		) {
+			const counterpart =
+				path === "compaction.keepFirstLimit" ? "compaction.keepLastLimit" : "compaction.keepFirstLimit";
 			const counterpartValue = this.get(counterpart);
-			this.#captureGlobalMutation(counterpart, this.#modifiedPathMutations, mutationComparableSettingValue(this.#global, counterpart));
+			this.#captureGlobalMutation(
+				counterpart,
+				this.#modifiedPathMutations,
+				mutationComparableSettingValue(this.#global, counterpart),
+			);
 			setByPath(this.#global, counterpart.split("."), counterpartValue);
 			updateCanonicalPreservationLimitOperation(this.#global, counterpart, counterpartValue, true);
 			this.#modified.add(counterpart);
 		}
 		const segments = path.split(".");
-		this.#captureGlobalMutation(path, this.#modifiedPathMutations, mutationComparableSettingValue(this.#global, path));
+		this.#captureGlobalMutation(
+			path,
+			this.#modifiedPathMutations,
+			mutationComparableSettingValue(this.#global, path),
+		);
 		setByPath(this.#global, segments, value);
 		updateCanonicalPreservationLimitOperation(this.#global, path, value, true);
 		this.#persistedMutationGeneration++;

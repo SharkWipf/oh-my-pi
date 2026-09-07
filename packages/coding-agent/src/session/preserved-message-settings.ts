@@ -5,15 +5,29 @@ export type PreservationAction = "auto" | "exclude" | "keep";
 export type PreservationLimit =
 	| { readonly mode: "off" | "all" }
 	| { readonly mode: "messages" | "tokens" | "context-percent"; readonly value: number };
-export type PreservedUserMessageLimit = "off" | "all" | `messages:${number}` | `tokens:${number}` | `context-percent:${number}`;
+export type PreservedUserMessageLimit =
+	| "off"
+	| "all"
+	| `messages:${number}`
+	| `tokens:${number}`
+	| `context-percent:${number}`;
 export const PRESERVED_USER_MESSAGE_FILTER_KEEP_CAPS = ["keep-last", "keep-first", "uncapped"] as const;
 export const PRUNE_LONG_USER_MESSAGE_MODES = ["no", "middle-out", "head-only", "tail-only", "exclude"] as const;
 export type PruneLongUserMessageMode = (typeof PRUNE_LONG_USER_MESSAGE_MODES)[number];
 export const DEFAULT_MAX_TOKENS_PER_USER_MESSAGE = 2_000;
 
 export const PRESERVED_USER_MESSAGE_CATEGORIES = [
-	"longTermRule", "longTermGoal", "lastingSolution", "shortTermTask", "shortTermContext", "venting",
-	"restorationGuidance", "preventionGuidance", "contextFreeInstruction", "banter", "question",
+	"longTermRule",
+	"longTermGoal",
+	"lastingSolution",
+	"shortTermTask",
+	"shortTermContext",
+	"venting",
+	"restorationGuidance",
+	"preventionGuidance",
+	"contextFreeInstruction",
+	"banter",
+	"question",
 ] as const;
 export type PreservationCategory = (typeof PRESERVED_USER_MESSAGE_CATEGORIES)[number];
 export const PRESERVED_USER_MESSAGE_CATEGORY_LABELS: Readonly<Record<PreservationCategory, string>> = {
@@ -43,9 +57,17 @@ export const PRESERVED_USER_MESSAGE_CATEGORY_SETTING_PATHS = {
 	question: "compaction.keepUserMessagesLlmQuestion",
 } as const;
 export const DEFAULT_PRESERVATION_CATEGORY_ACTIONS: Readonly<Record<PreservationCategory, PreservationAction>> = {
-	longTermRule: "keep", longTermGoal: "keep", lastingSolution: "keep", shortTermTask: "auto",
-	shortTermContext: "auto", venting: "exclude", restorationGuidance: "auto", preventionGuidance: "auto",
-	contextFreeInstruction: "auto", banter: "exclude", question: "auto",
+	longTermRule: "keep",
+	longTermGoal: "keep",
+	lastingSolution: "keep",
+	shortTermTask: "auto",
+	shortTermContext: "auto",
+	venting: "exclude",
+	restorationGuidance: "auto",
+	preventionGuidance: "auto",
+	contextFreeInstruction: "auto",
+	banter: "exclude",
+	question: "auto",
 };
 
 export interface PreservedUserMessageRegexRule {
@@ -122,8 +144,13 @@ export function compilePreservedUserMessageRegexRules(value: unknown): readonly 
 		const rule = regexRule(raw);
 		if (!rule || !condition.trim()) continue;
 		try {
-			rules.push({ condition, pattern: RE2JS.compile(condition, rule.caseInsensitive ? RE2JS.CASE_INSENSITIVE : 0),
-				action: rule.state, ignoreCase: rule.caseInsensitive, final: rule.final ?? false });
+			rules.push({
+				condition,
+				pattern: RE2JS.compile(condition, rule.caseInsensitive ? RE2JS.CASE_INSENSITIVE : 0),
+				action: rule.state,
+				ignoreCase: rule.caseInsensitive,
+				final: rule.final ?? false,
+			});
 		} catch {
 			// Invalid persisted RE2 conditions have no policy effect; UI validation blocks new saves.
 		}
@@ -132,11 +159,17 @@ export function compilePreservedUserMessageRegexRules(value: unknown): readonly 
 }
 
 export function normalizePreservedUserMessageRegexRules(value: unknown): PreservedUserMessageRegexRules {
-	return Object.fromEntries(compilePreservedUserMessageRegexRules(value).map(rule => [rule.condition,
-		{ state: rule.action, caseInsensitive: rule.ignoreCase, final: rule.final }]));
+	return Object.fromEntries(
+		compilePreservedUserMessageRegexRules(value).map(rule => [
+			rule.condition,
+			{ state: rule.action, caseInsensitive: rule.ignoreCase, final: rule.final },
+		]),
+	);
 }
 
-export function readPreservationPolicySettings(settings: { get<P extends SettingPath>(path: P): SettingValue<P> }): PreservationPolicySettings {
+export function readPreservationPolicySettings(settings: {
+	get<P extends SettingPath>(path: P): SettingValue<P>;
+}): PreservationPolicySettings {
 	const categoryActions = { ...DEFAULT_PRESERVATION_CATEGORY_ACTIONS };
 	for (const category of PRESERVED_USER_MESSAGE_CATEGORIES) {
 		const action = settings.get(PRESERVED_USER_MESSAGE_CATEGORY_SETTING_PATHS[category]);
@@ -147,12 +180,17 @@ export function readPreservationPolicySettings(settings: { get<P extends Setting
 		enabled: settings.get("compaction.keepUserMessages"),
 		first: parsePreservationLimit(settings.get("compaction.keepFirstLimit")) ?? { mode: "tokens", value: 0 },
 		recent: parsePreservationLimit(settings.get("compaction.keepLastLimit")) ?? { mode: "tokens", value: 0 },
-		hardRecent: parsePreservationLimit(settings.get("compaction.keepRecentUserMessagesLimit")) ?? { mode: "tokens", value: 0 },
+		hardRecent: parsePreservationLimit(settings.get("compaction.keepRecentUserMessagesLimit")) ?? {
+			mode: "tokens",
+			value: 0,
+		},
 		alwaysCap: settings.get("compaction.keepUserMessagesFilterKeepCap"),
 		prune: settings.get("compaction.pruneLongUserMessages"),
 		maxTokens: Number.isFinite(maxTokens) && maxTokens > 0 ? maxTokens : DEFAULT_MAX_TOKENS_PER_USER_MESSAGE,
 		heuristics: settings.get("compaction.keepUserMessagesHeuristic"),
-		regexRules: settings.get("compaction.keepUserMessagesRegex") ? compilePreservedUserMessageRegexRules(settings.get("compaction.keepUserMessagesRegexRules")) : [],
+		regexRules: settings.get("compaction.keepUserMessagesRegex")
+			? compilePreservedUserMessageRegexRules(settings.get("compaction.keepUserMessagesRegexRules"))
+			: [],
 		classifier: settings.get("compaction.keepUserMessagesClassifierFilter"),
 		categoryActions,
 	};
@@ -162,19 +200,36 @@ export const MESSAGE_OVERRIDE_CUSTOM_TYPE = "com.omp.compaction.message-override
 export const USER_MESSAGE_CLASSIFICATION_CUSTOM_TYPE = "com.omp.compaction.user-message-classification.v1";
 export const INVALIDATED_USER_MESSAGE_CLASSIFICATION_CUSTOM_TYPE = `${USER_MESSAGE_CLASSIFICATION_CUSTOM_TYPE}.invalidated`;
 export const MAX_PRESERVED_USER_MESSAGE_CATEGORY_MASK = (1 << PRESERVED_USER_MESSAGE_CATEGORIES.length) - 1;
-export interface CompactionMessageOverrideData { messageIds: string[]; state: PreservationAction }
-export interface PreservedUserMessageClassification { id: string; mask: number }
-export interface PreservedUserMessageClassificationData { v: 1; c: Array<string | number> }
+export interface CompactionMessageOverrideData {
+	messageIds: string[];
+	state: PreservationAction;
+}
+export interface PreservedUserMessageClassification {
+	id: string;
+	mask: number;
+}
+export interface PreservedUserMessageClassificationData {
+	v: 1;
+	c: Array<string | number>;
+}
 export type ClassificationDecodeResult =
 	| { status: "valid"; classifications: PreservedUserMessageClassification[] }
 	| { status: "unsupported" | "malformed"; raw: unknown };
 
 function validClassification(id: unknown, mask: unknown): boolean {
-	return typeof id === "string" && id.length > 0 && typeof mask === "number" && Number.isInteger(mask)
-		&& mask >= 0 && mask <= MAX_PRESERVED_USER_MESSAGE_CATEGORY_MASK;
+	return (
+		typeof id === "string" &&
+		id.length > 0 &&
+		typeof mask === "number" &&
+		Number.isInteger(mask) &&
+		mask >= 0 &&
+		mask <= MAX_PRESERVED_USER_MESSAGE_CATEGORY_MASK
+	);
 }
 
-export function packPreservedUserMessageClassifications(classifications: readonly PreservedUserMessageClassification[]): PreservedUserMessageClassificationData {
+export function packPreservedUserMessageClassifications(
+	classifications: readonly PreservedUserMessageClassification[],
+): PreservedUserMessageClassificationData {
 	const c: Array<string | number> = [];
 	for (const { id, mask } of classifications) {
 		if (!validClassification(id, mask)) throw new Error("Invalid user-message classification");
@@ -210,7 +265,8 @@ export function decodeCompactionMessageOverride(value: unknown): CompactionMessa
 	const data = value as { messageIds?: unknown; messageId?: unknown; state?: unknown };
 	if (!isPreservationAction(data.state)) return undefined;
 	const ids = data.messageIds ?? (typeof data.messageId === "string" ? [data.messageId] : undefined);
-	if (!Array.isArray(ids) || ids.length === 0 || ids.some(id => typeof id !== "string" || id.length === 0)) return undefined;
+	if (!Array.isArray(ids) || ids.length === 0 || ids.some(id => typeof id !== "string" || id.length === 0))
+		return undefined;
 	return { messageIds: [...new Set(ids as string[])], state: data.state };
 }
 
@@ -218,7 +274,12 @@ export function decodeCompactionMessageOverride(value: unknown): CompactionMessa
 export function migrateLegacyCompactionPin(value: unknown): CompactionMessageOverrideData | undefined {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
 	const data = value as { messageId?: unknown; pinned?: unknown };
-	if (typeof data.messageId !== "string" || !data.messageId || (data.pinned !== undefined && typeof data.pinned !== "boolean")) return undefined;
+	if (
+		typeof data.messageId !== "string" ||
+		!data.messageId ||
+		(data.pinned !== undefined && typeof data.pinned !== "boolean")
+	)
+		return undefined;
 	return { messageIds: [data.messageId], state: data.pinned === false ? "auto" : "keep" };
 }
 

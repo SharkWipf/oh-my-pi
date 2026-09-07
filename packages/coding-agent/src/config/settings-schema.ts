@@ -13,7 +13,12 @@ import {
 	type CompactionMethod,
 	DEFAULT_COMPACTION_METHOD_ORDER,
 } from "../session/compaction-methods";
-import { DEFAULT_MAX_TOKENS_PER_USER_MESSAGE, PRESERVED_USER_MESSAGE_FILTER_KEEP_CAPS, PRUNE_LONG_USER_MESSAGE_MODES, type PreservedUserMessageRegexRule } from "../session/preserved-message-settings";
+import {
+	DEFAULT_MAX_TOKENS_PER_USER_MESSAGE,
+	PRESERVED_USER_MESSAGE_FILTER_KEEP_CAPS,
+	PRUNE_LONG_USER_MESSAGE_MODES,
+	type PreservedUserMessageRegexRule,
+} from "../session/preserved-message-settings";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS, STT_MODEL_VALUES } from "../stt/models";
 import { STT_SUBMIT_TRIGGER_OPTIONS, STT_SUBMIT_TRIGGER_VALUES } from "../stt/submit-trigger";
 import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "../thinking";
@@ -216,7 +221,15 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Agent",
 		"Git",
 	],
-	context: ["General", "Compaction", "User Message Preservation", "User Message Preservation Filtering", "User Message Classifier (LLM)", "Rules (TTSR)", "Experimental"],
+	context: [
+		"General",
+		"Compaction",
+		"User Message Preservation",
+		"User Message Preservation Filtering",
+		"User Message Classifier (LLM)",
+		"Rules (TTSR)",
+		"Experimental",
+	],
 	memory: ["General", "Auto-Learn", "Mnemopi", "Hindsight", "Sharpshooter"],
 	files: ["Editing", "Reading", "Read Summaries", "LSP"],
 	shell: ["Bash", "Eval & Runtimes"],
@@ -2755,7 +2768,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "context",
 			group: "User Message Preservation",
 			label: "Keep First Limit",
-			description: "Off / All / positive messages / nonnegative tokens / 0–100% maximum model context. Linked Always cap remains editable when automatic selection is off.",
+			description:
+				"Off / All / positive messages / nonnegative tokens / 0–100% maximum model context. Linked Always cap remains editable when automatic selection is off.",
 		},
 	},
 
@@ -2766,7 +2780,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "context",
 			group: "User Message Preservation",
 			label: "Keep Recent Limit",
-			description: "Off / All / positive messages / nonnegative tokens / 0–100% maximum model context. Linked Always cap remains editable when automatic selection is off.",
+			description:
+				"Off / All / positive messages / nonnegative tokens / 0–100% maximum model context. Linked Always cap remains editable when automatic selection is off.",
 		},
 	},
 
@@ -2777,7 +2792,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "context",
 			group: "User Message Preservation",
 			label: "Protect Most-Recent Limit",
-			description: "Off / All / messages / tokens / % maximum context. Newest real users bypass stored Never and all pruning.",
+			description:
+				"Off / All / messages / tokens / % maximum context. Newest real users bypass stored Never and all pruning.",
 		},
 	},
 
@@ -2789,7 +2805,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "context",
 			group: "User Message Preservation",
 			label: "Prune Kept Long Messages",
-			description: "Automatic/inferred Keep only. Manual Always and hard-most-recent bypass every mode. Images are never dropped.",
+			description:
+				"Automatic/inferred Keep only. Manual Always and hard-most-recent bypass every mode. Images are never dropped.",
 		},
 	},
 
@@ -2800,7 +2817,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "context",
 			group: "User Message Preservation",
 			label: "Max Tokens Per Message",
-			description: "Positive integer text-plus-image pruning threshold; not a manual Always or hard-most-recent ceiling.",
+			description:
+				"Positive integer text-plus-image pruning threshold; not a manual Always or hard-most-recent ceiling.",
 		},
 	},
 
@@ -2812,7 +2830,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "context",
 			group: "User Message Preservation Filtering",
 			label: "Always-Keep Limit",
-			description: "Uniform mixed-role cap including /keep. Linked First/Recent Off or All is uncapped; tokens 0 and 0% remain finite zero.",
+			description:
+				"Uniform mixed-role cap including /keep. Linked First/Recent Off or All is uncapped; tokens 0 and 0% remain finite zero.",
 		},
 	},
 
@@ -2834,7 +2853,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "context",
 			group: "User Message Preservation Filtering",
 			label: "Use Custom Regex Filters",
-			description: "Ordinary RE2 before classifier policy; Final after it. Keep wins same-stage conflicts; Auto is neutral.",
+			description:
+				"Ordinary RE2 before classifier policy; Final after it. Keep wins same-stage conflicts; Auto is neutral.",
 		},
 	},
 
@@ -2856,7 +2876,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "context",
 			group: "User Message Preservation Filtering",
 			label: "Custom Regex Rules",
-			description: "RE2 Condition, Auto (disabled) / Keep / Never, case-insensitivity, Final (default off). Validate before save.",
+			description:
+				"RE2 Condition, Auto (disabled) / Keep / Never, case-insensitivity, Final (default off). Validate before save.",
 		},
 	},
 
@@ -2868,7 +2889,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "context",
 			group: "User Message Preservation Filtering",
 			label: "Long-term rule / specification",
-			description: "Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
+			description:
+				"Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
 		},
 	},
 
@@ -2880,7 +2902,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "context",
 			group: "User Message Preservation Filtering",
 			label: "Long-term goal / feature",
-			description: "Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
+			description:
+				"Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
 		},
 	},
 
@@ -2892,7 +2915,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "context",
 			group: "User Message Preservation Filtering",
 			label: "Lasting solution / guidance",
-			description: "Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
+			description:
+				"Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
 		},
 	},
 
@@ -2904,7 +2928,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "context",
 			group: "User Message Preservation Filtering",
 			label: "Short-term task / improvement",
-			description: "Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
+			description:
+				"Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
 		},
 	},
 
@@ -2916,7 +2941,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "context",
 			group: "User Message Preservation Filtering",
 			label: "Short-term context / instruction",
-			description: "Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
+			description:
+				"Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
 		},
 	},
 
@@ -2928,7 +2954,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "context",
 			group: "User Message Preservation Filtering",
 			label: "Venting after a failure",
-			description: "Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
+			description:
+				"Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
 		},
 	},
 
@@ -2940,7 +2967,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "context",
 			group: "User Message Preservation Filtering",
 			label: "Restoration guidance",
-			description: "Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
+			description:
+				"Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
 		},
 	},
 
@@ -2952,7 +2980,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "context",
 			group: "User Message Preservation Filtering",
 			label: "Prevention guidance",
-			description: "Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
+			description:
+				"Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
 		},
 	},
 
@@ -2964,7 +2993,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "context",
 			group: "User Message Preservation Filtering",
 			label: "Context-free instruction",
-			description: "Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
+			description:
+				"Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
 		},
 	},
 
@@ -2976,7 +3006,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "context",
 			group: "User Message Preservation Filtering",
 			label: "Banter / no lasting information",
-			description: "Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
+			description:
+				"Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
 		},
 	},
 
@@ -2988,7 +3019,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "context",
 			group: "User Message Preservation Filtering",
 			label: "Question",
-			description: "Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
+			description:
+				"Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
 		},
 	},
 
@@ -2999,7 +3031,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "context",
 			group: "User Message Classifier (LLM)",
 			label: "Auto-Classify New User Messages",
-			description: "Launch background tagging only while Remember User Messages is enabled. Can consume substantial tokens; explicit classification and stored tags are independent.",
+			description:
+				"Launch background tagging only while Remember User Messages is enabled. Can consume substantial tokens; explicit classification and stored tags are independent.",
 		},
 	},
 
@@ -3010,7 +3043,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "context",
 			group: "User Message Classifier (LLM)",
 			label: "Model",
-			description: "Registered role/model for live and explicit classification. Automatic uses @tiny; unavailable models are explained before requests.",
+			description:
+				"Registered role/model for live and explicit classification. Automatic uses @tiny; unavailable models are explained before requests.",
 		},
 	},
 

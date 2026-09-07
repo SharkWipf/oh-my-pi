@@ -142,7 +142,10 @@ export class PreservedMessageIndex {
 			block.raw[column] = slot.raw;
 			block.candidate[column] = slot.candidate;
 			block.flags[offset] =
-				USER | (slot.eligible ? ELIGIBLE : 0) | (slot.always || slot.manual ? ALWAYS : 0) | (slot.manual ? MANUAL : 0);
+				USER |
+				(slot.eligible ? ELIGIBLE : 0) |
+				(slot.always || slot.manual ? ALWAYS : 0) |
+				(slot.manual ? MANUAL : 0);
 			block.nonUsers.delete(offset);
 		} else {
 			if (wasUser) block.freeColumns.push(block.userColumns![offset]);
@@ -197,7 +200,8 @@ export class PreservedMessageIndex {
 		const edge = first ? 0 : this.#length;
 		const result: PolicyRange = { start: edge, end: edge, count: 0, tokens: 0 };
 		if (limit.mode === "off" || (!automaticEnabled && kind !== "always")) return result;
-		if (limit.mode === "context-percent") throw new Error("Resolve context-percent against model maximum before querying");
+		if (limit.mode === "context-percent")
+			throw new Error("Resolve context-percent against model maximum before querying");
 		const quota = limit.mode === "all" ? Infinity : limit.value;
 		const byCount = limit.mode === "messages";
 		const step = first ? 1 : -1;
@@ -208,7 +212,16 @@ export class PreservedMessageIndex {
 			// H is virtual. Only its crossing block needs per-source inspection.
 			if (kind === "raw" || !automaticEnabled || hardBoundary <= start || hardBoundary >= end) {
 				const hard = hardBoundary <= start;
-				const lane = kind === "raw" ? RAW_USER : kind === "eligible" ? (hard ? RAW_USER : CANDIDATE_USER) : hard ? RAW_ALWAYS : CANDIDATE_ALWAYS;
+				const lane =
+					kind === "raw"
+						? RAW_USER
+						: kind === "eligible"
+							? hard
+								? RAW_USER
+								: CANDIDATE_USER
+							: hard
+								? RAW_ALWAYS
+								: CANDIDATE_ALWAYS;
 				let count = automaticEnabled ? block.counts[lane] : (block.manualUsers?.count ?? 0);
 				let tokens = automaticEnabled ? block.tokens[lane] : (block.manualUsers?.tokens ?? 0);
 				if (kind === "always") {
@@ -272,7 +285,16 @@ export class PreservedMessageIndex {
 			if (!raw && !eligible && !always) continue;
 			const kind: PolicyKind = raw ? "raw" : eligible ? "eligible" : "always";
 			const hard = start >= hardBoundary;
-			const lane = kind === "raw" ? RAW_USER : kind === "eligible" ? (hard ? RAW_USER : CANDIDATE_USER) : hard ? RAW_ALWAYS : CANDIDATE_ALWAYS;
+			const lane =
+				kind === "raw"
+					? RAW_USER
+					: kind === "eligible"
+						? hard
+							? RAW_USER
+							: CANDIDATE_USER
+						: hard
+							? RAW_ALWAYS
+							: CANDIDATE_ALWAYS;
 			const includeNonUsers = !userOnly && always;
 			for (let position = start; position < end;) {
 				const b = Math.floor(position / BLOCK_SIZE);
@@ -318,8 +340,23 @@ export class PreservedMessageIndex {
 		hardBoundary = this.#length,
 		automaticEnabled = true,
 	): boolean {
-		if (!Number.isInteger(position) || position < range.start || position >= range.end || position < 0 || position >= this.#length) return false;
-		return !Number.isNaN(this.#price(this.#blocks[Math.floor(position / BLOCK_SIZE)], position % BLOCK_SIZE, kind, position >= hardBoundary, automaticEnabled));
+		if (
+			!Number.isInteger(position) ||
+			position < range.start ||
+			position >= range.end ||
+			position < 0 ||
+			position >= this.#length
+		)
+			return false;
+		return !Number.isNaN(
+			this.#price(
+				this.#blocks[Math.floor(position / BLOCK_SIZE)],
+				position % BLOCK_SIZE,
+				kind,
+				position >= hardBoundary,
+				automaticEnabled,
+			),
+		);
 	}
 
 	/** Enumerates anchors in source order; the source owner expands complete N closures. */
