@@ -64,3 +64,15 @@ The result separates selected users `P`, complete admitted non-user atoms `N`, a
 Visible user-attributed `custom_message` journal entries support manual state as non-user `N` sources. Their current durable content is normalized through the existing custom-message helper while retaining the journal ID; they never enter automatic user windows, hard-recent, or classification. Hidden and agent-attributed custom injections do not become manual user rows.
 
 Saved manual overrides and successful eleven-bit classification metadata keep their established v1 codecs. Settings compose layers before interpreting legacy paired message-zero limits; opening settings does not write normalized values.
+
+## Physical context inspection
+
+`/context details` opens the ordered classified inventory separately from the ordinary usage view. Recorded compaction, current reconstruction, and the last actual-prepared request remain distinct snapshots. The detail view lists fixed prompts/tools/context/skills, summary and gap text, retained and post-compaction content, native payloads, raster frames and original images with source coverage, structural counts, controls and qualified token quantities. Manual and automatic compact summaries use concise ordinary/added/shared results and the method’s actual target.
+
+`AgentSession.getCompactionDiagnostics("current")` materializes the reconstructed inventory only when requested; `getSourceRepresentationDetails(sourceId)` inspects current versus captured source spans without tokenizing the inventory. Neither operation runs on policy toggles or footer updates. Source quota membership and estimates are separate from disjoint physical charges: overlap does not refund quota, and a shared frame is charged once.
+
+`getCompactionDiagnostics("recorded")` reads frozen facts from the existing atomic compaction record. It includes the initiating model, settings, fixed counts, source reasons and quotas, and actual ordinary target/calibration, complete non-user precharge and residual allocation. Legacy records without facts remain unavailable, not reconstructed with today’s settings. Settings changes and reload do not rewrite historical facts.
+
+`getPreparedCompactionDiagnostics()` reads the last compact inventory observed at the existing post-inband `beforeModelCall` boundary on the current history owner. It works with memory disabled, never reruns preparation, retains no request Context or image bytes, and returns an independent copy to explicit viewers. The label is actual-prepared, not confirmed sent: later provider hooks, dispatch, acceptance and billing remain unobserved. Boundary-time settings and installed archive settings remain separate.
+
+Text tokenizer quantities, generic local image estimates, actual inline-renderer estimates and unknown native/opaque costs are labeled separately. Archive identity is not a historical renderer price; absent historical pricing stays explicitly unavailable. Original-image physical correction replaces the base estimate once. None of these local quantities is a provider invoice.

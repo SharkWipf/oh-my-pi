@@ -5,6 +5,7 @@
 ### Added
 
 - Added source-ID preservation policy APIs with independent first/recent/hard-recent limits, uniformly capped manual tool exchanges, compact source quota indexes, and compatible saved settings/classification readers.
+- Added concise frozen compaction target/results and a separate `/context details` inventory for recorded, reconstructed and actual-prepared contexts, with ordered source coverage, one-time image/frame charges, explicit estimate/unknown labels and backend-independent request observation.
 - Added nonblocking user-message classification with eleven independent saved category facts, selected-message reclassification, bounded missing-only backfill, per-row status updates, and isolated cancellation. Classifier jobs validate active source/branch ownership before saving and require explicit backfill after restart.
 - Added independent living requirements memory under `/memory requirements`, with original human-source capture, source-backed extraction, separate fidelity/coverage review and fresh candidate-only sanity checks, durable lineage, complete active recall, and explicit coverage-gap and quarantine recovery controls. Ordinary memory backends remain independently selectable.
 - Added `--start-without-memory`, future-only memory bypass, and clean retry retaining only explicitly selected original human inputs. Recovery cancels queued work without flushing or consolidating learned memory and reports already-submitted remote writes as non-revocable.
