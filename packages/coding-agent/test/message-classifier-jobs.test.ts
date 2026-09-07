@@ -438,11 +438,13 @@ describe("message classifier session jobs", () => {
 			const released = Promise.withResolvers<void>();
 			const runtime = new ExtensionRuntime();
 			const extension = await loadExtensionFromFactory(pi => {
-				pi.on(transition === "tree" ? "session_before_tree" : "session_before_branch", async () => {
+				const veto = async () => {
 					entered.resolve();
 					await released.promise;
 					return { cancel: true };
-				});
+				};
+				if (transition === "tree") pi.on("session_before_tree", veto);
+				else pi.on("session_before_branch", veto);
 			}, dir.path(), new EventBus(), runtime, "synthetic-classifier-veto");
 			const runner = new ExtensionRunner([extension], runtime, dir.path(), manager, registry);
 			session = createSession(manager, false, runner);
