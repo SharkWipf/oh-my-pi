@@ -40,6 +40,20 @@ import type { OutputMeta } from "../tools/output-meta";
 import { formatOutputNotice } from "../tools/output-meta";
 import { titleTextFromSkillPrompt } from "./skill-title-input";
 
+/** Host-recorded producer, independent of role and billing attribution. Absence means unknown. */
+export type UserMessageProducer =
+	| { type: "human" }
+	| { type: "tool"; name: string; toolCallId?: string }
+	| { type: "extension"; name?: string }
+	| { type: "generated"; name?: string };
+
+declare module "@oh-my-pi/pi-ai" {
+	interface UserMessage {
+		/** Local provenance only; never a provider role, retention rule, or human-authorship inference. */
+		producer?: UserMessageProducer;
+	}
+}
+
 export const SKILL_PROMPT_MESSAGE_TYPE = "skill-prompt";
 export const LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE = "lsp-late-diagnostic";
 export const BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE = "background-tan-dispatch";
