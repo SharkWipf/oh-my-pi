@@ -445,7 +445,7 @@ function sanitizeOpenAIResponsesImageGenerationCallForReplay(
 	if (typeof item.id !== "string" || typeof item.result !== "string" || item.result.length === 0) {
 		return undefined;
 	}
-	return transferSourceOrigin(item, {
+	return transferSourceOrigin<ResponseInputItem.ImageGenerationCall>(item, {
 		id: truncateResponseItemId(item.id, "ig"),
 		type: "image_generation_call",
 		status: "completed",

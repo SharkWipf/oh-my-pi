@@ -14,6 +14,7 @@ export interface NativeSourcePart {
 	/** Current correspondence after controlled rewrites; sourceSpan stays immutable. */
 	currentSourceSpan?: { start: number; end: number };
 	currentBlockIndex?: number | string;
+	currentSourceLength?: number;
 	/** Omission denotes an untouched capture, not an unresolved rewrite. */
 	status?: "exact-current" | "historical-not-current" | "unknown";
 	/** Actual emitted item.content position, not the original source block index. */
@@ -28,6 +29,12 @@ export type NativeItemOrigin =
 
 const origins = new WeakMap<object, NativeItemOrigin>();
 const unknownOrigin: NativeItemOrigin = { kind: "unknown", reason: "legacy-map-absent" };
+let sourceBindingGeneration = 0;
+
+/** O(1) cache guard; ordinary emission transfers do not change source bindings. */
+export function getSourceOriginBindingGeneration(): number {
+	return sourceBindingGeneration;
+}
 
 export function getSourceOrigin(value: object): NativeItemOrigin | undefined {
 	return origins.get(value);
@@ -97,6 +104,7 @@ export function transferMessageSourceOrigin<T extends Message>(from: Message, to
 }
 
 export function bindMessageSource(message: Message, entryId: string, order: number): void {
+	sourceBindingGeneration++;
 	const parts: NativeSourcePart[] = [];
 	const bind = (block: object, blockIndex: number | string, text?: string, image = false): void => {
 		const part: NativeSourcePart = {
@@ -121,7 +129,13 @@ export function bindMessageSource(message: Message, entryId: string, order: numb
 			bind(block, index, block.type === "text" ? block.text : block.type === "thinking" ? block.thinking : undefined, block.type === "image");
 		}
 	}
-	if (message.role === "toolResult" && message.providerMetadata) bind(message.providerMetadata, "metadata");
+	if (message.role === "toolResult" && message.providerMetadata) {
+		bind(message.providerMetadata, "metadata");
+		bind(message.providerMetadata.screenshot, "metadata.screenshot", undefined, true);
+		for (let index = 0; index < message.providerMetadata.acknowledgedSafetyChecks.length; index++) {
+			bind(message.providerMetadata.acknowledgedSafetyChecks[index]!, `metadata.acknowledgedSafetyChecks.${index}`);
+		}
+	}
 	setSourceOrigin(message, { kind: "source", parts });
 }
 
@@ -166,6 +180,7 @@ export function cloneWithSourceOrigins<T>(value: T): T {
 /** Arbitrary hooks can mutate in place: invalidate the actual returned tree, not an index-aligned copy. */
 export function invalidateSourceOrigins(value: unknown, reason = "externally-mutated"): void {
 	const seen = new WeakSet<object>();
+	sourceBindingGeneration++;
 	const visit = (node: unknown): void => {
 		if (!node || typeof node !== "object" || seen.has(node)) return;
 		seen.add(node);
@@ -188,7 +203,8 @@ function occurrenceKey(item: object): string | object {
 	return JSON.stringify(origin.parts.map(part => [
 		part.entryId, part.order, part.blockIndex, part.coverage, part.representation,
 		part.sourceSpan?.start, part.sourceSpan?.end, part.transportSpan?.start, part.transportSpan?.end,
-		part.transportBlockIndex,
+		part.transportBlockIndex, part.status ?? "exact-current", part.currentBlockIndex ?? part.blockIndex,
+		(part.currentSourceSpan ?? part.sourceSpan)?.start, (part.currentSourceSpan ?? part.sourceSpan)?.end,
 	]));
 }
 
@@ -241,7 +257,7 @@ export function remapNativeItemOrigins(itemOrigins: readonly NativeItemOrigin[],
 		const rewrite = byEntry.get(part.entryId);
 		if (!rewrite || part.status === "historical-not-current" || part.status === "unknown") return [part];
 		const historical = (status: "historical-not-current" | "unknown"): NativeSourcePart[] => {
-			const { currentSourceSpan: _current, currentBlockIndex: _block, ...captured } = part;
+			const { currentSourceSpan: _current, currentBlockIndex: _block, currentSourceLength: _length, ...captured } = part;
 			return [{ ...captured, status }];
 		};
 		if (!rewrite.blocks) return historical("unknown");
@@ -250,7 +266,9 @@ export function remapNativeItemOrigins(itemOrigins: readonly NativeItemOrigin[],
 		if (!block) return typeof currentBlock === "number" ? [part] : historical("unknown");
 		if (block.newBlockIndex === null) return historical("historical-not-current");
 		const edits = block.textEdits;
-		if (!edits?.length) return [{ ...part, currentBlockIndex: block.newBlockIndex, status: "exact-current" }];
+		const priorLength = part.currentSourceLength ?? part.sourceLength;
+		if (!edits?.length) return [{ ...part, currentBlockIndex: block.newBlockIndex, currentSourceLength: priorLength, status: "exact-current" }];
+		const currentSourceLength = priorLength === undefined ? undefined : priorLength + edits.reduce((sum, edit) => sum + edit.replacementLength - (edit.end - edit.start), 0);
 		const current = part.currentSourceSpan ?? part.sourceSpan;
 		const capture = part.sourceSpan;
 		if (!current || !capture || current.end - current.start !== capture.end - capture.start) return historical("unknown");
@@ -271,6 +289,7 @@ export function remapNativeItemOrigins(itemOrigins: readonly NativeItemOrigin[],
 				transportSpan,
 				currentBlockIndex: retained ? block.newBlockIndex! : undefined,
 				currentSourceSpan: retained ? { start: start + shift, end: end + shift } : undefined,
+				currentSourceLength: retained ? currentSourceLength : undefined,
 				status: retained ? "exact-current" : "historical-not-current",
 			});
 		};
