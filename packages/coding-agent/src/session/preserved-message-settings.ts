@@ -150,7 +150,7 @@ export function readPreservationPolicySettings(settings: { get<P extends Setting
 		hardRecent: parsePreservationLimit(settings.get("compaction.keepRecentUserMessagesLimit")) ?? { mode: "tokens", value: 0 },
 		alwaysCap: settings.get("compaction.keepUserMessagesFilterKeepCap"),
 		prune: settings.get("compaction.pruneLongUserMessages"),
-		maxTokens: Number.isSafeInteger(maxTokens) && maxTokens > 0 ? maxTokens : DEFAULT_MAX_TOKENS_PER_USER_MESSAGE,
+		maxTokens: Number.isFinite(maxTokens) && maxTokens > 0 ? maxTokens : DEFAULT_MAX_TOKENS_PER_USER_MESSAGE,
 		heuristics: settings.get("compaction.keepUserMessagesHeuristic"),
 		regexRules: settings.get("compaction.keepUserMessagesRegex") ? compilePreservedUserMessageRegexRules(settings.get("compaction.keepUserMessagesRegexRules")) : [],
 		classifier: settings.get("compaction.keepUserMessagesClassifierFilter"),

@@ -252,6 +252,9 @@ export interface PreservationSelection {
 	/** Complete non-user sources, precharged inside the method's ordinary budget. */
 	N: PreservationMembership;
 	H: PreservationMembership;
+	/** Missing effective model maximum leaves percentage-derived selection provisional. */
+	unavailableLimits: readonly ("first" | "recent" | "hardRecent" | "always")[];
+	blockers: Partial<Record<"first" | "recent" | "hardRecent" | "always", string>>;
 	quota: Record<"P" | "N" | "H" | "first" | "recent" | "always", { count: number; tokens: number }>;
 	reasons(id: string): PreservationReasons;
 	positions(id: string): { first?: number; recent?: number };
@@ -261,7 +264,7 @@ export interface PreservationSelection {
 }
 
 export interface PreservationSelectionOptions {
-	maximumContext: number;
+	maximumContext?: number;
 	enabled?: boolean;
 	first?: PreservationLimit;
 	recent?: PreservationLimit;
@@ -280,7 +283,7 @@ export class PreservedMessageQuery {
 	readonly #overrides = new Map<string, Exclude<PreservationAction, "auto">>();
 	readonly #classifications = new Map<string, number>();
 	readonly #classificationProblems = new Map<string, "unsupported" | "malformed" | "invalidated">();
-	readonly #overrideRevisions = new Map<string, string>();
+	readonly #overrideRevisions = new Map<string, { id: string; position: number }>();
 	readonly #nonAutoGroups = new Set<number>();
 	readonly #appended: SessionEntry[] = [];
 	readonly #baseLength: number;
@@ -348,7 +351,7 @@ export class PreservedMessageQuery {
 			if (entry.customType === MESSAGE_OVERRIDE_CUSTOM_TYPE) {
 				const data = decodeCompactionMessageOverride(entry.data);
 				if (data) for (const id of data.messageIds) {
-					this.#overrideRevisions.set(id, entry.id);
+					this.#overrideRevisions.set(id, { id: entry.id, position });
 					if (data.state === "auto") this.#overrides.delete(id);
 					else this.#overrides.set(id, data.state);
 				}
@@ -370,7 +373,7 @@ export class PreservedMessageQuery {
 		if (entry.type !== "message") return;
 		this.#positions.set(entry.id, position);
 		const initial = (entry as SessionMessageEntry & { compactionOverride?: PreservationAction }).compactionOverride;
-		if (initial === "keep" || initial === "exclude") { this.#overrides.set(entry.id, initial); this.#overrideRevisions.set(entry.id, entry.id); }
+		if (initial === "keep" || initial === "exclude") { this.#overrides.set(entry.id, initial); this.#overrideRevisions.set(entry.id, { id: entry.id, position }); }
 		if (isPreservationUser(entry)) this.#users.push(position);
 		if (entry.message.role === "assistant") {
 			const calls = entry.message.content.filter(block => block.type === "toolCall");
@@ -425,7 +428,7 @@ export class PreservedMessageQuery {
 		const manual = this.#manual(members);
 		if (isPreservationUser(entry)) {
 			const stages = evaluatePreservationPolicy(entry.message, this.#policy, manual, this.#classifications.get(entry.id));
-			const candidate = preservationCandidate(entry, this.#policy, this.#tokenizer, manual === "keep");
+			const candidate = stages.resolved === "exclude" ? undefined : preservationCandidate(entry, this.#policy, this.#tokenizer, manual === "keep");
 			this.#index.update(position, { user: true, raw: this.#tokenizer.countMessage(entry.message),
 				candidate: candidate?.quotaTokens ?? NaN, eligible: stages.resolved !== "exclude", always: stages.resolved === "keep", manual: manual === "keep", nonUserCount: 0 });
 		} else {
@@ -502,7 +505,12 @@ export class PreservedMessageQuery {
 		this.#assertCurrent();
 		if (entries) {
 			this.#entries = entries;
-			for (let index = 0; index < this.#appended.length; index++) this.#appended[index] = entries[this.#baseLength + index]!;
+			for (const id of ids) {
+				const position = this.#positions.get(id);
+				if (position === undefined) continue;
+				const index = position + this.#offset;
+				if (index >= this.#baseLength) this.#appended[index - this.#baseLength] = entries[index]!;
+			}
 		}
 		const positions = new Set<number>();
 		for (const id of ids) { const position = this.#positions.get(this.#groups.get(id)?.[0] ?? id); if (position !== undefined) positions.add(position); }
@@ -550,13 +558,39 @@ export class PreservedMessageQuery {
 		const row = this.rowAt(this.rowIndexOf(id, "all"), "all");
 		if (!row) return undefined;
 		return { id: row.id, memberIds: row.memberIds, members: row.memberIds.map(sourceId => ({ sourceId,
-			state: this.#overrides.get(sourceId) ?? "auto", revisionId: this.#overrideRevisions.get(sourceId) ?? null })) };
+			state: this.#overrides.get(sourceId) ?? "auto", revisionId: this.#overrideRevisions.get(sourceId)?.id ?? null })) };
 	}
 
-	*getManualGroups(options: { nonAutoOnly?: boolean } = {}): IterableIterator<PreservationManualGroup> {
+	getManualGroups(options: { nonAutoOnly?: boolean } = {}): IterableIterator<PreservationManualGroup> {
 		this.#assertCurrent();
-		const positions = options.nonAutoOnly ? [...this.#nonAutoGroups].sort((a, b) => a - b) : this.#rows;
-		for (const position of positions) { const group = this.getManualGroup(this.#entry(position)!.id); if (group) yield group; }
+		const sourceEnd = this.#index.length;
+		let remaining = this.#nonAutoGroups.size;
+		const sparse = this.#nonAutoGroups.values();
+		const owner = this;
+		return (function* () {
+			let after = -1;
+			for (;;) {
+				owner.#assertCurrent();
+				let position: number;
+				if (options.nonAutoOnly) {
+					if (remaining-- <= 0) return;
+					const next = sparse.next();
+					if (next.done) return;
+					position = next.value;
+				} else {
+					let low = 0, high = owner.#rows.length;
+					while (low < high) { const middle = (low + high) >>> 1; if (owner.#rows[middle]! <= after) low = middle + 1; else high = middle; }
+					position = owner.#rows[low] ?? sourceEnd;
+					if (position >= sourceEnd) return;
+					after = position;
+				}
+				if (position >= sourceEnd) continue;
+				const group = owner.getManualGroup(owner.#entry(position)!.id);
+				if (!group || group.memberIds.some(id => owner.#positions.get(id)! >= sourceEnd || (owner.#overrideRevisions.get(id)?.position ?? -1) >= sourceEnd)) continue;
+				if (options.nonAutoOnly && !group.members.some(member => member.state !== "auto")) continue;
+				yield group;
+			}
+		})();
 	}
 
 	classificationStatus(id: string): PreservationRow["categoryStatus"] {
@@ -588,20 +622,25 @@ export class PreservedMessageQuery {
 	select(options: PreservationSelectionOptions): PreservationSelection {
 		this.#assertCurrent();
 		const enabled = options.enabled ?? this.#policy.enabled;
-		const resolve = (limit: PreservationLimit): PolicyLimit => {
-			if (limit.mode === "context-percent") return { mode: "tokens", value: options.maximumContext * limit.value / 100 };
-			return limit as PolicyLimit;
+		const unavailableLimits: ("first" | "recent" | "hardRecent" | "always")[] = [];
+		const resolve = (limit: PreservationLimit, group: "first" | "recent" | "hardRecent" | "always"): PolicyLimit => {
+			if (limit.mode !== "context-percent") return limit as PolicyLimit;
+			if (options.maximumContext === undefined || !Number.isFinite(options.maximumContext) || options.maximumContext <= 0) {
+				unavailableLimits.push(group);
+				return { mode: "off" };
+			}
+			return { mode: "tokens", value: options.maximumContext * limit.value / 100 };
 		};
 		const firstLimit = options.first ?? this.#policy.first;
 		const recentLimit = options.recent ?? this.#policy.recent;
 		const cap = options.alwaysCap ?? this.#policy.alwaysCap;
-		const H = this.#index.query(resolve(options.hardRecent ?? this.#policy.hardRecent), "recent", "raw", this.#index.length, enabled);
+		const H = this.#index.query(enabled ? resolve(options.hardRecent ?? this.#policy.hardRecent, "hardRecent") : { mode: "off" }, "recent", "raw", this.#index.length, enabled);
 		const h = H.count ? H.start : this.#index.length;
 		const linked = cap === "keep-first" ? firstLimit : recentLimit;
-		const alwaysLimit = cap === "uncapped" || linked.mode === "off" || linked.mode === "all" ? { mode: "all" as const } : resolve(linked);
+		const alwaysLimit = cap === "uncapped" || linked.mode === "off" || linked.mode === "all" ? { mode: "all" as const } : resolve(linked, "always");
 		const always = this.#index.query(alwaysLimit, cap === "keep-first" ? "first" : "recent", "always", h, enabled);
-		const first = this.#index.query(resolve(firstLimit), "first", "eligible", h, enabled);
-		const recent = this.#index.query(resolve(recentLimit), "recent", "eligible", h, enabled);
+		const first = this.#index.query(enabled ? resolve(firstLimit, "first") : { mode: "off" }, "first", "eligible", h, enabled);
+		const recent = this.#index.query(enabled ? resolve(recentLimit, "recent") : { mode: "off" }, "recent", "eligible", h, enabled);
 		const ranges: { range: PolicyRange; kind: PolicyKind }[] = [{ range: H, kind: "raw" }, { range: first, kind: "eligible" }, { range: recent, kind: "eligible" }, { range: always, kind: "always" }];
 		const totalP = this.#index.measureUnion(ranges, h, enabled);
 		const allAlways = { start: 0, end: this.#index.length, count: 0, tokens: 0 };
@@ -643,6 +682,11 @@ export class PreservedMessageQuery {
 			return preservationCandidate(owner.#entry(position)!, owner.#policy, owner.#tokenizer, N.has(id) || hard.has(id) || owner.#overrides.get(id) === "keep");
 		};
 		return { P, N, H: hard, quota: { P: totalP, N: totalN, H, first, recent, always },
+			unavailableLimits,
+			blockers: { first: first.blocker === undefined ? undefined : owner.#entry(first.blocker)?.id,
+				recent: recent.blocker === undefined ? undefined : owner.#entry(recent.blocker)?.id,
+				hardRecent: H.blocker === undefined ? undefined : owner.#entry(H.blocker)?.id,
+				always: always.blocker === undefined ? undefined : owner.#entry(always.blocker)?.id },
 			positions(id) {
 				owner.#assertCurrent();
 				const position = owner.#positions.get(id);
@@ -657,7 +701,7 @@ export class PreservedMessageQuery {
 				const position = owner.#positions.get(owner.#groups.get(id)?.[0] ?? id);
 				if (position === undefined) return { first: false, recent: false, hardRecent: false, always: false, capDenied: false };
 				const admitted = included(position, always, "always");
-				return { first: included(position, first, "eligible"), recent: included(position, recent, "eligible"), hardRecent: included(position, H, "raw"), always: admitted, capDenied: !admitted && included(position, allAlways, "always") };
+				return { first: included(position, first, "eligible"), recent: included(position, recent, "eligible"), hardRecent: included(position, H, "raw"), always: admitted, capDenied: !unavailableLimits.includes("always") && !admitted && included(position, allAlways, "always") };
 			}, candidate,
 			*candidates() {
 				const users = P.values(); const others = N.values(); let u = users.next(), n = others.next();

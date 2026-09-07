@@ -166,4 +166,24 @@ describe("source preservation policy", () => {
 		expect(q.classificationStatus("u")).toBe("valid");
 		expect(q.rowAt(0)!.categoryMask).toBe(0);
 	});
+
+	it("reports unavailable percentages without making an unknown model a finite-zero cap", async () => {
+		const q = await query([user("u", "instruction", "keep")], policy({ recent: { mode: "context-percent", value: 10 }, first: { mode: "messages", value: 1 } }));
+		const unavailable = q.select({});
+		expect(unavailable.unavailableLimits).toEqual(["always", "recent"]);
+		expect(unavailable.reasons("u").capDenied).toBe(false);
+		expect(unavailable.reasons("u").first).toBe(true);
+		expect(q.inspectCandidate("u")!.quotaTokens).toBe(tokenizer.countMessage(user("u", "instruction").message));
+		const available = q.select({ maximumContext: 1000 });
+		expect(available.unavailableLimits).toEqual([]);
+		expect(available.reasons("u").always).toBe(true);
+	});
+
+	it("keeps reset capture finite and excludes later overrides and source appends", async () => {
+		const q = await query([user("u1", "first", "keep"), user("u2", "second", "keep"), user("u3", "third")]);
+		const capture = q.getManualGroups({ nonAutoOnly: true });
+		expect(q.appendEntries(link([control("change", MESSAGE_OVERRIDE_CUSTOM_TYPE, { messageIds: ["u2", "u3"], state: "exclude" }), user("u4", "new", "keep")], "u3"))).toBe(true);
+		expect([...capture].map(group => group.id)).toEqual(["u1"]);
+		expect([...q.getManualGroups({ nonAutoOnly: true })].map(group => group.id)).toEqual(["u1", "u2", "u3", "u4"]);
+	});
 });
