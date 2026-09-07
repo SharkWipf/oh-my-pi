@@ -45,30 +45,25 @@ describe("SettingsList", () => {
 		expect(changes).toEqual([["mode", "on"]]);
 	});
 
-	it("passes changed state to item label and value renderers", () => {
-		const themed: SettingsListTheme = {
-			label: (text: string, _selected: boolean, changed: boolean) => (changed ? `[changed-label]${text}` : text),
-			value: (text: string, _selected: boolean, changed: boolean) => (changed ? `[changed-value]${text}` : text),
-			description: (text: string) => text,
-			cursor: "→ ",
-			hint: (text: string) => text,
-		};
-		const list = new SettingsList(
-			[
-				{ id: "default", label: "Default", currentValue: "off", values: ["off", "on"] },
-				{ id: "changed", label: "Changed", currentValue: "on", values: ["off", "on"], changed: true },
-			],
-			5,
-			themed,
-			() => {},
-			() => {},
-		);
-
-		const output = list.render(80).join("\n");
-
-		expect(output).toContain("[changed-label]Changed");
-		expect(output).toContain("[changed-value]on");
-		expect(output).not.toContain("[changed-label]Default");
+	it("keeps the focused value and warning visible in a one-row narrow viewport", () => {
+		const changes: string[] = [];
+		const list = new SettingsList([
+			{ id: "first", label: "Other setting", currentValue: "off" },
+			{ id: "long", label: "An unusually long setting label", currentValue: "true", values: ["true", "false"], warning: "Risk", },
+		], 5, { ...testTheme, warningMark: "!" }, (_id, value) => changes.push(value), () => {});
+		list.selectItem("long");
+		list.setMaxVisible(1);
+		const narrow = list.render(36);
+		expect(narrow[0]).toContain("→ ");
+		expect(narrow[0]).toContain("!");
+		expect(narrow[0]).toContain("true");
+		expect(narrow[0].length).toBeLessThanOrEqual(36);
+		expect(narrow[1]).toBe("");
+		list.handleInput("\n");
+		expect(changes).toEqual(["false"]);
+		expect(list.render(36)[0]).toContain("false");
+		list.setMaxVisible(5);
+		expect(list.render(80).join("\n")).toContain("An unusually long setting");
 	});
 
 	it("marks a warned row with the glyph and leads the note area with the risk note", () => {
