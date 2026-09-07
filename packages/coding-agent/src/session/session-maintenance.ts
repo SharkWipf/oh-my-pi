@@ -2599,6 +2599,32 @@ export class SessionMaintenance {
 			settings.remoteEnabled === false ||
 			!hasNativeHistorySourceMapping(nativeHistory.replacementHistory, nativeHistory.replacementOrigins)
 		);
+		if (previous && (legacyArchive || rematerializeNative)) {
+			// A fresh suffix cannot establish that the original archive sources survived.
+			const activeEntries = new Map<string, SessionEntry>();
+			for (let index = entries.length - 1; index >= 0; index--) {
+				const entry = entries[index]!;
+				if (entry.type === "reset_boundary") break;
+				activeEntries.set(entry.id, entry);
+			}
+			if (activeEntries.has(previous.id)) {
+				if (!activeEntries.has(previous.firstKeptEntryId)) {
+					throw new Error(`Cannot migrate compacted history: original source boundary ${previous.firstKeptEntryId} is unavailable on the active branch. Restore the original session history before compacting.`);
+				}
+				for (const origin of nativeHistory?.replacementOrigins ?? []) {
+					const parts = origin.kind === "source" ? origin.parts : origin.kind === "aggregate" ? origin.coveredSources : undefined;
+					for (const part of parts ?? []) {
+						if (part.representation !== "original-image" || part.status === "historical-not-current" || part.status === "unknown") continue;
+						const source = activeEntries.get(part.entryId);
+						const blockIndex = part.currentBlockIndex ?? part.blockIndex;
+						const content = source?.type === "custom_message" ? source.content : source?.type === "message" && "content" in source.message ? source.message.content : undefined;
+						if (!source || (content !== undefined && typeof blockIndex === "number" && (!Array.isArray(content) || content[blockIndex]?.type !== "image"))) {
+							throw new Error(`Cannot migrate compacted history: original image source ${part.entryId}, block ${blockIndex}, is unavailable on the active branch. Restore the original image before compacting.`);
+						}
+					}
+				}
+			}
+		}
 		return prepareCompaction(
 			entries,
 			settings,
