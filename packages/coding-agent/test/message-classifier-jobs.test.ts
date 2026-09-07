@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Agent, type StreamFn } from "@oh-my-pi/pi-agent-core";
-import { type AssistantMessage, type Context, createAssistantMessageEventStream } from "@oh-my-pi/pi-ai";
+import { type AssistantMessage, type Context, createAssistantMessageEventStream, type Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../src/config/model-registry";
 import { Settings } from "../src/config/settings";
+import { ExtensionRuntime, loadExtensionFromFactory } from "../src/extensibility/extensions/loader";
+import { ExtensionRunner } from "../src/extensibility/extensions/runner";
 import { AgentSession } from "../src/session/agent-session";
 import type { AuthStorage } from "../src/session/auth-storage";
 import {
@@ -13,6 +15,8 @@ import {
 } from "../src/session/preserved-message-settings";
 import { readPreservedUserMessageClassificationMasks } from "../src/session/preserved-messages";
 import { SessionManager } from "../src/session/session-manager";
+import { FileSessionStorage, type WriteTextAtomicOptions } from "../src/session/session-storage";
+import { EventBus } from "../src/utils/event-bus";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 const model = getBundledModel("openai", "gpt-4o")!;
@@ -49,6 +53,43 @@ class ControlledProvider {
 	}
 }
 
+// Real filesystem storage, with only the asynchronous durability boundary held.
+class PausedStorage extends FileSessionStorage {
+	readonly entered = Promise.withResolvers<void>();
+	readonly released = Promise.withResolvers<void>();
+	armed = false;
+	constructor(readonly point: "ensureOnDisk" | "flush") { super(); }
+	override async writeTextAtomic(path: string, content: string, options?: WriteTextAtomicOptions): Promise<void> {
+		if (this.armed && this.point === "ensureOnDisk") {
+			this.armed = false;
+			this.entered.resolve();
+			await this.released.promise;
+		}
+		await super.writeTextAtomic(path, content, options);
+	}
+	override async drain(): Promise<void> {
+		if (this.armed && this.point === "flush") {
+			this.armed = false;
+			this.entered.resolve();
+			await this.released.promise;
+		}
+		await super.drain();
+	}
+}
+
+class PausedRegistry extends ModelRegistry {
+	readonly entered = Promise.withResolvers<void>();
+	readonly released = Promise.withResolvers<void>();
+	armed = false;
+	override async getApiKey(model: Model, sessionId?: string, options?: { signal?: AbortSignal }): Promise<string | undefined> {
+		if (this.armed) {
+			this.entered.resolve();
+			await this.released.promise;
+		}
+		return super.getApiKey(model, sessionId, options);
+	}
+}
+
 async function until(predicate: () => boolean): Promise<void> {
 	const deadline = Date.now() + 3000;
 	while (!predicate()) {
@@ -67,7 +108,7 @@ describe("message classifier session jobs", () => {
 	const sessions: AgentSession[] = [];
 	const managers: SessionManager[] = [];
 
-	function createSession(source: SessionManager, live = false): AgentSession {
+	function createSession(source: SessionManager, live = false, extensionRunner?: ExtensionRunner): AgentSession {
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"compaction.keepUserMessages": true,
@@ -81,7 +122,7 @@ describe("message classifier session jobs", () => {
 		};
 		const created = new AgentSession({
 			agent: new Agent({ initialState: { model, systemPrompt: [], tools: [], messages: [] }, streamFn, getApiKey: () => "synthetic-key" }),
-			sessionManager: source, settings, modelRegistry: registry, sideStreamFn: provider.stream,
+			sessionManager: source, settings, modelRegistry: registry, sideStreamFn: provider.stream, extensionRunner,
 		});
 		sessions.push(created);
 		return created;
@@ -302,5 +343,146 @@ describe("message classifier session jobs", () => {
 		await expect(session.startMessageClassification(id)).rejects.toThrow();
 		expect(provider.requests).toEqual([]);
 		expect((await facts()).has(id)).toBe(false);
+	});
+	it("deduplicates concurrent selections before authentication preflight has settled", async () => {
+		await session.dispose();
+		const paused = new PausedRegistry(auth, dir.join("models.yml"));
+		registry = paused;
+		manager = SessionManager.create(dir.path(), dir.path());
+		session = createSession(manager);
+		const id = user("synthetic concurrent selected source");
+		paused.armed = true;
+		try {
+			const firstStart = session.startMessageClassification(id);
+			await paused.entered.promise;
+			const secondStart = session.startMessageClassification(id);
+			expect(provider.requests).toEqual([]);
+			paused.released.resolve();
+			const [first, second] = await Promise.all([firstStart, secondStart]);
+			expect(second).toBe(first);
+			await until(() => provider.requests.length === 1);
+			provider.requests[0]!.finish();
+			await settled(first);
+			expect(provider.requests).toHaveLength(1);
+			expect((await facts(await reopen())).get(id)).toBe(0);
+		} finally { paused.released.resolve(); }
+	});
+
+	it("does not report a missing-only backfill complete when overlapping selected classification fails", async () => {
+		const id = user("synthetic overlapping selected failure");
+		const sentinel = user("synthetic backfill scan sentinel");
+		const selected = await session.startMessageClassification(id);
+		await until(() => provider.requests.length === 1);
+		const backfill = await session.startMessageClassificationBackfill(2);
+		await until(() => provider.requests.length === 2);
+		provider.forSource("synthetic overlapping selected failure").finish("invalid classifier response");
+		provider.forSource("synthetic backfill scan sentinel").finish();
+		await settled(selected);
+		await until(() => job(backfill).state !== "running" || provider.requests.length === 3);
+		if (provider.requests.length === 3) provider.requests[2]!.finish("invalid classifier response");
+		await settled(backfill);
+		expect((await facts(await reopen())).get(sentinel)).toBe(0);
+		expect((await facts()).has(id)).toBe(false);
+		expect(job(backfill).state).toBe("failed");
+	});
+	for (const point of ["ensureOnDisk", "flush"] as const) {
+		it(`canceling during ${point} preflight prevents provider admission`, async () => {
+			await session.dispose();
+			const storage = new PausedStorage(point);
+			manager = SessionManager.create(dir.path(), dir.path(), storage);
+			session = createSession(manager);
+			const canceled = user("synthetic canceled preflight source");
+			const next = user("synthetic subsequent preflight source");
+			storage.armed = true;
+			try {
+				const started = await session.startMessageClassification(canceled);
+				await storage.entered.promise;
+				session.cancelMessageClassification(started);
+				expect(job(started).state).toBe("canceled");
+				expect(provider.requests).toEqual([]);
+				storage.released.resolve();
+				const subsequent = await session.startMessageClassification(next);
+				await until(() => provider.requests.length === 1);
+				provider.forSource("synthetic subsequent preflight source").finish();
+				await settled(subsequent);
+				expect(provider.requests).toHaveLength(1);
+				expect(await facts(await reopen())).toEqual(new Map([[next, 0]]));
+			} finally { storage.released.resolve(); }
+		});
+	}
+	it("actual tree navigation rejects a sibling late result without moving its selected leaf", async () => {
+		const root = user("synthetic navigation ancestor");
+		const target = manager.appendMessage(reply("synthetic target sibling"));
+		manager.branch(root);
+		const old = user("synthetic abandoned sibling");
+		const started = await session.startMessageClassification(old);
+		await until(() => provider.requests.length === 1);
+		expect((await session.navigateTree(target, { summarize: false })).cancelled).toBe(false);
+		expect(job(started).state).toBe("interrupted");
+		// Plain tree selection is not itself a durable append; compare the journal
+		// before/after the late reply rather than changing navigation semantics.
+		const durableLeafBeforeReply = (await reopen()).getLeafId();
+		provider.requests[0]!.finish();
+		await until(() => job(started).running === 0);
+		expect(manager.getLeafId()).toBe(target);
+		const persisted = await reopen();
+		expect(persisted.getLeafId()).toBe(durableLeafBeforeReply);
+		expect(persisted.getEntries().filter(entry => entry.type === "custom" && entry.customType === USER_MESSAGE_CLASSIFICATION_CUSTOM_TYPE)).toEqual([]);
+	});
+
+	for (const transition of ["tree", "branch"] as const) {
+		it(`a vetoed ${transition} transition resumes classification without losing its original scope`, async () => {
+			await session.dispose();
+			manager = SessionManager.create(dir.path(), dir.path());
+			const entered = Promise.withResolvers<void>();
+			const released = Promise.withResolvers<void>();
+			const runtime = new ExtensionRuntime();
+			const extension = await loadExtensionFromFactory(pi => {
+				pi.on(transition === "tree" ? "session_before_tree" : "session_before_branch", async () => {
+					entered.resolve();
+					await released.promise;
+					return { cancel: true };
+				});
+			}, dir.path(), new EventBus(), runtime, "synthetic-classifier-veto");
+			const runner = new ExtensionRunner([extension], runtime, dir.path(), manager, registry);
+			session = createSession(manager, false, runner);
+			const target = user("synthetic veto navigation target");
+			const current = user("synthetic veto classifier source");
+			const started = await session.startMessageClassification(current);
+			await until(() => provider.requests.length === 1);
+			const originalSessionId = manager.getSessionId();
+			try {
+				const navigating = transition === "tree" ? session.navigateTree(target, { summarize: false }) : session.branch(target);
+				await entered.promise;
+				provider.requests[0]!.finish();
+				expect((await facts()).has(current)).toBe(false);
+				released.resolve();
+				expect((await navigating).cancelled).toBe(true);
+				await settled(started);
+				expect(job(started).state).toBe("completed");
+				expect(manager.getSessionId()).toBe(originalSessionId);
+				expect((await facts(await reopen())).get(current)).toBe(0);
+			} finally { released.resolve(); }
+		});
+	}
+	it("allows immediate retry after source invalidation without letting the old result replace the new fact", async () => {
+		const id = user("synthetic source before explicit invalidation");
+		const original = await session.startMessageClassification(id);
+		await until(() => provider.requests.length === 1);
+		const entry = manager.getEntry(id)!;
+		if (entry.type !== "message" || entry.message.role !== "user") throw new Error("Missing fixture source");
+		entry.message.content = "synthetic source after explicit invalidation";
+		await manager.rewriteEntries();
+		session.interruptMessageClassificationInputs([id]);
+		const retry = await session.startMessageClassification(id);
+		expect(retry).not.toBe(original);
+		await until(() => provider.requests.length === 2);
+		expect(session.getMessageClassificationRowStatus(id)?.jobId).toBe(retry);
+		provider.forSource("synthetic source after explicit invalidation").finish();
+		await settled(retry);
+		expect((await facts(await reopen())).get(id)).toBe(0);
+		provider.forSource("synthetic source before explicit invalidation").finish("<labels>00000000001</labels>");
+		await until(() => job(original).running === 0);
+		expect((await facts(await reopen())).get(id)).toBe(0);
 	});
 });
