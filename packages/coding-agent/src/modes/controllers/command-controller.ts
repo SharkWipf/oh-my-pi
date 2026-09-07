@@ -31,6 +31,7 @@ import {
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../../memory-backend";
 import { BashExecutionComponent, bashPtyViewport } from "../../modes/components/bash-execution";
 import { BorderedLoader } from "../../modes/components/bordered-loader";
+import { ContextDetailsOverlay } from "../../modes/components/context-details-overlay";
 import { DynamicBorder } from "../../modes/components/dynamic-border";
 import { EvalExecutionComponent } from "../../modes/components/eval-execution";
 import { MoveOverlay, type MoveOverlayResult } from "../../modes/components/move-overlay";
@@ -670,7 +671,24 @@ export class CommandController {
 		showMarkdownPanel(this.ctx, "Available Tools", tools);
 	}
 
-	handleContextCommand(): void {
+	handleContextCommand(argument: "usage" | "details" = "usage"): void {
+		if (argument === "details") {
+			const current = this.ctx.session.getCompactionDiagnostics("current");
+			const recorded = this.ctx.session.getCompactionDiagnostics("recorded");
+			const prepared = this.ctx.session.getPreparedCompactionDiagnostics();
+			const component = new ContextDetailsOverlay(this.ctx.ui, this.ctx.keybindings, current, recorded, () => {
+				handle.hide();
+				component.dispose();
+				this.ctx.ui.setFocus(this.ctx.editorContainer.children[0] ?? this.ctx.editor);
+				this.ctx.ui.requestRender();
+			}, prepared);
+			const handle = this.ctx.ui.showOverlay(component, {
+				anchor: "bottom-center", width: "100%", maxHeight: "100%", margin: 0, fullscreen: true,
+			});
+			this.ctx.ui.setFocus(component);
+			this.ctx.ui.requestRender();
+			return;
+		}
 		const breakdown = computeContextBreakdown(this.ctx.session, { snapcompactSavings: true });
 		if (breakdown.contextWindow <= 0) {
 			this.ctx.showWarning("Context usage is unavailable: no model is selected for this session.");
