@@ -139,16 +139,45 @@ Including `shake` in `compaction.methodOrder` performs an inline, local reductio
 
 Threshold, incomplete-output, and overflow recovery advance to the next configured method when shake cannot reclaim enough context to get below the recovery band; this prevents repeated no-op shake loops. Idle shake does not use that fallback because the idle timer rechecks usage before running again. Manual `/shake` is a separate, more aggressive command that can target all eligible history.
 
+Automatic region selection and dead-end image-drop rescue exclude currently
+protected sources and their complete assistant/tool atoms. Image-drop rescue
+still removes unselected images; if protected content prevents sufficient
+headroom, normal no-progress handling applies rather than deleting it. Explicit
+image removal (including `/shake images`) overrides preservation: it removes
+original-image references and updates every referencing current-coverage
+descriptor with the journal rewrite; it does not silently regenerate historical
+PNG pixels.
+
 ### Snapcompact method
 
 Including `snapcompact` in `compaction.methodOrder` replaces the LLM summarization call with a local, deterministic archival pass (`compact` from `@oh-my-pi/snapcompact`):
 
 - The discarded history is serialized, whitespace-collapsed, and printed onto model-aware PNG frames (frame width fixed per shape; frame height hugs the rows actually printed) using bundled public-domain pixel fonts. The shape — and frame size — resolve from the **model id** when the model line was measured: Claude reads X.org `8x13` glyphs on an 11px advance (extra letter-spacing, black ink — `11on16-bw`; high-res lines — Opus 4.7+, Fable, Mythos — get 1932px frames under Anthropic's 4,784 visual-token cap, older lines stay at 1568px), Gemini reads `8x13` glyphs on a 22px pitch (extra leading, black ink — `8on22-bw` at 2048px, since Gemini 3.x bills a fixed 1,120-token budget per image at any pixel size), GPT/Codex read the same `8on22-bw` shape at 1568px (patch billing is area-proportional, so larger frames cannot improve chars per token), and Kimi/GLM read `8x13` glyphs on a 16px pitch (`8on16-bw` at 1568px — kimi's processor downscales past 1792px). A Claude routed through Vertex or OpenRouter keeps its Claude shape. Auto selection is also font-aware (`resolveShapeForText`): when the model-default font cannot safely render the transcript, or wide CJK glyphs dominate it and the `silver16-bw` grid can render it safely, auto switches to `silver16-bw`; forced variants are never overridden. Unmeasured models fall back to their wire API family (Anthropic-family/unknown → `11on16-bw`, Google → `8on22-bw`, OpenAI-compatible → `8on22-bw`); billing (per-family patch/budget formulas, OpenAI's `detail: "original"` hint) always follows the API carrying the request, computed for the resolved frame size. The `snapcompact.shape` setting (default `auto`) forces one of the research-eval variants instead: square grids (`8x8r`/`8x8u`/`6x6u`/`5x8` × sentence-hue/black ink) or the per-model eval winners (`6x12-dim`, `8x13-bw`, `8on16-bw`, `8on22-bw`, `11on16-bw`, `silver16-bw` — the embedded Silver TrueType font on a 16px grid for CJK and other non-Latin text — and the two-column word-wrapped `doc-8on16-bw`/`-sent`/`-sent-dim`, where `dim` prints stopwords in gray). A forced variant keeps its geometry but is re-priced for the target provider's image billing. The same setting governs inline system-prompt/tool-result imaging (`snapcompact.systemPrompt`, `snapcompact.toolResults`).
 - Serialization keeps the archive conversation-dense: tool results are truncated head+tail (default 2,000 chars at a 0.6 head ratio), tool-call argument values are capped per value (500) and per call (2,000), and tool output is printed in dim gray ink so conversation reads louder than tool noise. All budgets and the dimming are configurable via `SerializeOptions` (`toolResultMaxChars`, `toolArgMaxChars`, `toolCallMaxChars`, `truncateHeadRatio`, `dimToolResults`).
-- The snapcompact archive persists under `CompactionEntry.preserveData.snapcompact` as bounded source text plus rendered frames. On each context rebuild it is reconstructed into ordered compaction blocks: plain text at the oldest edge, an imaged middle, then plain text at the newest edge. The entry's `summary` is just the short resume lead-in plus the usual file-operation list.
-- Later compactions re-render from that bounded source text (`Archive.text`), not by carrying old PNGs forward blindly. `maxFrames` now defaults to `MAX_FRAMES_DEFAULT` (80) and acts only as an upper limit; when the imaged middle is large it foveates internally (HQ/LQ/HQ), while both chronological edges stay verbatim text.
+- Those lossy content budgets apply to ordinary serialization. Complete admitted non-user atoms bypass argument and tool-output truncation while retaining standard role formatting and assistant/tool grouping; selected source bytes cannot disappear behind an ordinary serializer cap.
+- The archive persists under `CompactionEntry.preserveData.snapcompact` as retained normalized source text and rendered frames. Source IDs, raw block spans, current versus historical correspondence, and physical layout live alongside it in `preserveData.sourceRepresentation`; they are local metadata, not provider wire fields. Authored images remain original image references interleaved at their source positions, not text-raster frame slots.
+- Ordinary archive selection and the ordinary recent-history cut run first. Selected user spans add only missing coverage in chronological position; they do not refund user costs or move the cut. The existing frame window and text-edge anchors stay fixed. At the first frame-count or measured PNG-byte nonfit, that page and every later admitted text span spill into the chronological text tail before the ordinary suffix; a newer small frame never fills an older spill hole.
+- Later real compactions consume the actual committed `Archive.text`, including formerly protected content, and re-render rather than stack old PNGs. A same-operation retry reuses the frozen input/result. Opening a session, toggling policy, or previewing never rerenders installed archives. An unmapped legacy archive is rematerialized from available active post-clear originals only on the next real compaction, with the new baseline disclosed rather than claimed as recovered old coverage.
+- If that real migration names an original source boundary or a current original-image source/block that is unavailable on the active post-clear branch, it reports the missing source ID and leaves the installed history unchanged. A source on a sibling branch does not satisfy this prerequisite. Historical image coverage does not require restoring an explicitly deleted current image.
+- Automatic frame-overflow rescue keeps the actual prior archive source fixed. Fewer frames can mean a larger plain-text spill, so a replacement is committed only when its reconstructed local context is strictly smaller, excluding encrypted reasoning on both sides. A useful reduction may still leave the session above the maintenance headroom band; the existing warning and fallback behavior remain in effect.
 - No model, API key, or network is involved, so snapcompact is also safe for overflow recovery. It requires a vision-capable current model (`model.input` includes `"image"`); otherwise automatic maintenance skips it and advances to the next configured method. Manual `/compact` honors the method order unless custom instructions are given (those imply a directed LLM summary).
 - Rationale: the shape table comes from the snapcompact 200k-token evals in `packages/snapcompact`, where bitmap frames preserved QA recall at lower billed-token cost than raw text for vision-capable models.
+
+Local summary and handoff generators remain unchanged. Their synthetic recap is
+separate from the single chronological stream of ordinary and selected original
+source spans. Complete admitted assistant/tool atoms are precharged once inside
+the calibrated ordinary target before the normal residual cut walk, including
+its zero-residual boundary behavior. Repeated sparse retention records a captured
+source frontier so retaining an older sparse source cannot resurrect intervening
+omitted originals. Partial text gaps receive truncation markers; whole-message
+notices count only positively known missing original messages, never metadata or
+frame continuations.
+
+Local accounting charges each emitted physical image once: authored images use
+the original-image estimate, while transcript frames use the named frame-estimate
+domain. Mixed-source frames are one physical charge, not one charge per selection
+reason. Source quota prices remain independent of these physical representation
+costs; neither is an exact provider invoice.
 
 ### Display transcript
 
@@ -258,6 +287,17 @@ Remote summarization modes, consulted in order (each stage falls back to the nex
 
 When a native remote compaction (V2 or V1) succeeds, local LLM summarization is skipped entirely — the durable history lives in the provider replay payload and the stored `summary` is a placeholder lead-in plus the file-operation list.
 
+Native preservation uses local journal source identities, not message text or provider IDs. Selected historical users join the actual input and retained window in source chronology. Selecting a user already retained does not refund its ordinary charge or move the ordinary retention boundary. V2 charges complete admitted assistant/tool atoms before its own retained-message allocator, including call names, arguments, results, and original images; its existing minimum-one budget clamp remains in force. Partial ordinary text and independently selected text spans are unioned in one source slot, preserving ordinary source bytes and marking only genuine remaining omissions.
+
+V2 captures its complete-atom quote from the original admitted sources through the shared tokenizer, before the first message conversion or provider transform. It deducts that fixed quote before the ordinary retained-message walk; rendered wrappers, secret replacement, and provider formatting do not reprice the admitted atoms. Ordinary retained history keeps its existing pricing and minimum-one clamp. Operation results expose the resolved target, captured complete-atom charge, and actual allocator residual as local facts, not provider-wire fields. V1 reports no host target.
+
+V1 has no host retained-history budget. Complete selected non-user atoms are adapted **in the request input** to role-attributed historical JSON text with original images interleaved, including provider-native server-tool context and metadata-only computer screenshots; executable originals are not duplicated. Only current per-response native deltas belong to that source: a saved full-history replay is not reinterpreted as one selected atom. The returned canonical all-user-plus-compaction window is stored unchanged. Individual returned item origins remain unknown unless the endpoint establishes a lawful correspondence; the all-user contract is recorded separately from exact source-span attribution. Controlled serializer and HTTP fixtures exercise these local guarantees, not live endpoint acceptance or private Codex endpoint availability.
+
+Frozen system requirements appear once in each actual native request, including V2-to-V1 fallback; selected-source conversion does not render them again.
+
+Provenance is a local companion (`replacementOrigins` beside stored native history and `origins` beside provider payload items), never an extra provider-wire field. Normal serializers transfer it at actual emission, replay, clone, filter, and truncation operations. Legacy unmapped output remains unknown on replay. Arbitrary context and request hooks retain their existing rewrite authority, including in-place edits; unsupported post-hook attribution becomes unknown, without reinjection or a second hook invocation.
+
+When an original submission differs from its delivered expansion, its optional local `projection: "original"` distinguishes those source coordinates under the same journal entry ID. Native unions retain ordinary delivered bytes and selected original bytes independently; interval overlap is only meaningful within one projection. The companion metadata survives replay and controlled rewrites without appearing on the provider wire. Absent projection remains the ordinary delivered/legacy coordinate space.
 ### Handoff generation
 
 `packages/agent/src/compaction/compaction.ts` also exports `generateHandoff(...)`. Handoff generation uses the same `completeSimple(...)` oneshot style as summarization, but it preserves the live agent cache prefix by sending the active system prompt, tool array, and real LLM message history, then appending one agent-attributed `user` message containing the handoff prompt. It forces `toolChoice: "none"` and returns joined text blocks directly.

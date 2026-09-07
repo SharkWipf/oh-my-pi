@@ -614,8 +614,9 @@ export class SessionMaintenance {
 	}
 
 	/**
-	 * Strip image content blocks from every message on the current branch and
-	 * persist the rewrite. Walks `SessionManager.getBranch()` in place — both
+	 * Strip image content blocks from the current branch and persist the rewrite.
+	 * Automatic rescue preserves selected sources; explicit image removal does not.
+	 * Walks `SessionManager.getBranch()` in place — both
 	 * `SessionMessageEntry.message` and `CustomMessageEntry.content` arrays
 	 * are mutated, then `rewriteEntries` durably commits the new shape. The
 	 * agent's runtime view is rebuilt from the freshly-mutated entries so any
@@ -625,13 +626,16 @@ export class SessionMaintenance {
 	 * No-op when the branch carries no images; returns `{ removed: 0 }` and
 	 * skips the disk rewrite.
 	 */
-	async dropImages(): Promise<{ removed: number }> {
+	async dropImages(options: { protectSelected?: boolean } = {}): Promise<{ removed: number }> {
 		const operation = this.#captureCompactionOperation();
+		const protectedSourceEntryIds = options.protectSelected ? await this.#host.protectedSourceEntryIds() : undefined;
+		if (!this.#compactionOwnerValid(operation)) throw new CompactionCancelledError();
 		const maps: SourceRewrite[] = [];
 		const edits: Array<() => void> = [];
 		let removed = 0;
 		for (const entry of operation.manager.getBranch()) {
 			if (entry.type !== "message" && entry.type !== "custom_message") continue;
+			if (protectedSourceEntryIds?.has(entry.id)) continue;
 			const message = entry.type === "message" ? entry.message : undefined;
 			const content = entry.type === "custom_message" ? entry.content : message && "content" in message ? message.content : undefined;
 			let blocks: SourceBlockRewrite[] | undefined;
@@ -2963,7 +2967,7 @@ export class SessionMaintenance {
 		if (signal.aborted) return false;
 		let imagesDropped = 0;
 		try {
-			imagesDropped = (await this.#host.dropImages()).removed;
+			imagesDropped = (await this.dropImages({ protectSelected: true })).removed;
 			if (imagesDropped > 0) this.#host.rebaseAfterCompaction();
 		} catch (error) {
 			logger.warn("Dead-end image-drop rescue failed", {
