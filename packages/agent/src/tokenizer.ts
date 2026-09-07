@@ -1,4 +1,5 @@
 import type { Model } from "@oh-my-pi/pi-ai";
+import { visitOpenAIResponsesLogicalContent, visitOpenAIResponsesSourceContent } from "@oh-my-pi/pi-ai/utils";
 import type { ModelTokenizer } from "@oh-my-pi/pi-catalog/types";
 import * as natives from "@oh-my-pi/pi-natives";
 import { stringifyJson } from "@oh-my-pi/pi-utils";
@@ -101,7 +102,7 @@ export interface TokenBudgetCheck {
 }
 
 /**
- * Baseline per original image in user, developer, tool and hook messages.
+ * Baseline per original image in user, developer, assistant, tool and hook messages.
  * This local estimate is independent of provider/model/detail, not a bill.
  * A representation-specific projection must replace this charge (add only
  * its effective image estimate minus this baseline), never add a second image.
@@ -238,6 +239,7 @@ export class Tokenizer {
 				break;
 			}
 			case "assistant": {
+				visitOpenAIResponsesSourceContent(message, { sourceText: text => fragments.push(text), image: () => { extra += IMAGE_TOKEN_ESTIMATE; } });
 				for (const block of message.content) {
 					if (block.type === "text") {
 						fragments.push(block.text);
@@ -254,12 +256,13 @@ export class Tokenizer {
 							fragments.push(block.thinkingSignature);
 						}
 					} else if (block.type === "toolCall") {
-						fragments.push(block.name);
-						fragments.push(stringifyJson(block.arguments) ?? "null");
+						visitOpenAIResponsesLogicalContent(block, { sourceText: text => fragments.push(text) });
 					} else if (block.type === "redactedThinking") {
 						// Encrypted reasoning blob the provider still bills for on replay;
 						// excluded from the compaction floor for the same reason as above.
 						if (!excludeEncryptedReasoning) fragments.push(block.data);
+					} else if (block.type === "image") {
+						extra += IMAGE_TOKEN_ESTIMATE;
 					} else if (block.type === "anthropicServerTool") {
 						// Native Anthropic server-tool call/result replayed verbatim on the
 						// wire (server_tool_use input and opaque result content). The provider

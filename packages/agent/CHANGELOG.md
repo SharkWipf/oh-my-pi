@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fixed ordinary source token estimates omitting assistant images and known current native text, code, logs, search context, and computer metadata. Normalized native mirrors are charged once, including after controlled source rewrites and JSON reload.
 - Fixed metadata-only computer screenshots counting as zero before source allocation. Their single image baseline replaces content-image mirrors, matching computer-result serialization.
 - Fixed local token estimates omitting user and developer images; original images now receive the same one-time baseline as tool-result and hook images.
 
