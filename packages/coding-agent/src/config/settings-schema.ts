@@ -4815,6 +4815,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"goal.injectAsUserMessage": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Goal Objective as User Message",
+			description: "Queue the objective of each goal tool create as an ordinary user follow-up",
+		},
+	},
+
 	"goal.statusInFooter": {
 		type: "boolean",
 		default: true,

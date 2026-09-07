@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `goal.injectAsUserMessage` to queue objective-only ordinary user follow-ups after successful goal tool creation, retaining host tool provenance without duplicate lifecycle or `/goal` injection.
+
 ### Fixed
 
 - The startup update notice counts every change in a release: bullets written above a `###` heading now count under `Other`, and `+`/`*` markers and lightly indented bullets count like `-`.

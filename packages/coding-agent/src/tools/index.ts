@@ -26,7 +26,7 @@ import type { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import type { AgentRegistry } from "../registry/agent-registry";
 import type { ArtifactManager } from "../session/artifacts";
 import type { ClientBridge } from "../session/client-bridge";
-import type { CustomMessage } from "../session/messages";
+import type { CustomMessage, UserMessageProducer } from "../session/messages";
 import type { UsageStatistics } from "../session/session-entries";
 import type { SessionManager } from "../session/session-manager";
 import type { ToolChoiceQueue } from "../session/tool-choice-queue";
@@ -369,6 +369,8 @@ export interface ToolSession {
 	getGoalModeState?: () => GoalModeState | undefined;
 	/** Goal runtime for the active agent session. */
 	getGoalRuntime?: () => GoalRuntime | undefined;
+	/** Send ordinary user input through the owning session queue. */
+	sendUserMessage?: (content: string, options: { deliverAs: "followUp"; producer?: UserMessageProducer }) => Promise<void>;
 	/** Get cumulative session usage statistics (input/output tokens, cost). */
 	getUsageStatistics?: () => UsageStatistics;
 	/** Current per-turn token budget {total, spent, hard} for the eval `budget` helper. */
