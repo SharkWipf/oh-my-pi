@@ -840,6 +840,7 @@ class CodexStreamRuntime {
 	currentItem: CodexEventItem | null = null;
 	currentBlock: CodexOutputBlock | null = null;
 	nativeOutputItems: Array<Record<string, unknown>> = [];
+	contentBlocks: Array<{ itemIndex: number; contentIndex: number }> = [];
 	/** Sequential-cutoff summary sections/emitted text, global to the response (indices span reasoning items). */
 	cutoffSummaries: SequentialCutoffSummaryState = createSequentialCutoffSummaryState();
 	/** Summary deltas buffered while waiting to see whether atomic `.done` events arrive. */
@@ -876,6 +877,7 @@ class CodexStreamRuntime {
 		this.currentItem = null;
 		this.currentBlock = null;
 		this.nativeOutputItems.length = 0;
+		this.contentBlocks.length = 0;
 		this.pendingSummaryDeltas.clear();
 		this.cutoffSummaries = createSequentialCutoffSummaryState();
 	}
@@ -2403,7 +2405,7 @@ class CodexStreamProcessor {
 		const contentIndex = entry?.contentIndex ?? output.content.length - 1;
 
 		if (item.type === "image_generation_call" && item.result) {
-			appendResponsesImageResult(output, stream, item.result);
+			runtime.contentBlocks.push({ itemIndex: runtime.nativeOutputItems.length - 1, contentIndex: appendResponsesImageResult(output, stream, item.result) });
 			runtime.closeOpenItem(entry);
 			return;
 		}
@@ -2422,6 +2424,7 @@ class CodexStreamProcessor {
 				content: block.thinking,
 				partial: output,
 			});
+			runtime.contentBlocks.push({ itemIndex: runtime.nativeOutputItems.length - 1, contentIndex });
 			runtime.closeOpenItem(entry);
 			return;
 		}
@@ -2436,6 +2439,7 @@ class CodexStreamProcessor {
 				content: block.text,
 				partial: output,
 			});
+			runtime.contentBlocks.push({ itemIndex: runtime.nativeOutputItems.length - 1, contentIndex });
 			runtime.closeOpenItem(entry);
 			return;
 		}
@@ -2455,6 +2459,7 @@ class CodexStreamProcessor {
 			}
 			// Detach so a late/duplicate arguments.delta cannot append to the
 			// finished block or trip the whitespace-loop guard against it.
+			if (block?.type === "toolCall") runtime.contentBlocks.push({ itemIndex: runtime.nativeOutputItems.length - 1, contentIndex });
 			runtime.closeOpenItem(entry);
 			runtime.canSafelyReplayWebsocketOverSse = false;
 			stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
@@ -2478,6 +2483,7 @@ class CodexStreamProcessor {
 				output.content.push(toolCall);
 				resolvedContentIndex = output.content.length - 1;
 			}
+			runtime.contentBlocks.push({ itemIndex: runtime.nativeOutputItems.length - 1, contentIndex: resolvedContentIndex });
 			runtime.closeOpenItem(entry);
 			runtime.canSafelyReplayWebsocketOverSse = false;
 			stream.push({ type: "toolcall_end", contentIndex: resolvedContentIndex, toolCall, partial: output });
@@ -2498,6 +2504,7 @@ class CodexStreamProcessor {
 				block.arguments = { input: rawInput };
 				clearStreamingPartialJson(block);
 			}
+			if (block?.type === "toolCall") runtime.contentBlocks.push({ itemIndex: runtime.nativeOutputItems.length - 1, contentIndex });
 			runtime.closeOpenItem(entry);
 			runtime.canSafelyReplayWebsocketOverSse = false;
 			stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
@@ -2971,7 +2978,7 @@ class CodexStreamProcessor {
 			throw new CodexProviderStreamError("Codex response failed", false);
 		}
 
-		output.providerPayload = createOpenAIResponsesHistoryPayload(this.model.provider, this.runtime.nativeOutputItems);
+		output.providerPayload = createOpenAIResponsesHistoryPayload(this.model.provider, this.runtime.nativeOutputItems, true, this.runtime.contentBlocks);
 		output.duration = performance.now() - this.startTime;
 		if (completion.firstTokenTime) {
 			output.ttft = completion.firstTokenTime - this.startTime;
