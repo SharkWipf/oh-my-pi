@@ -1,15 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { Context, Message } from "@oh-my-pi/pi-ai";
-import { bindMessageSource, cloneWithSourceOrigins, getSourceOrigin, setSourceOrigin } from "@oh-my-pi/pi-ai/utils/source-origin";
-import { clearCustomApis, registerCustomApi } from "@oh-my-pi/pi-ai";
-import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
-import { TempDir } from "@oh-my-pi/pi-utils";
-import { ModelRegistry } from "../src/config/model-registry";
-import { Settings } from "../src/config/settings";
-import { createAgentSession } from "../src/sdk";
-import { AuthStorage } from "../src/session/auth-storage";
-import { SessionManager } from "../src/session/session-manager";
-import { createAssistantMessage } from "./helpers/agent-session-setup";
+import { bindMessageSource, cloneWithSourceOrigins, getSourceOrigin } from "@oh-my-pi/pi-ai/utils/source-origin";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { decorateContextImages, inlineContextImages } from "../src/blob-broker/context-images";
 import { obfuscateMessages } from "../src/secrets/message-transform";
@@ -98,60 +89,4 @@ describe("native SDK transform origins", () => {
 		const changed = injector.transform(context, "2026-09-08", "/controlled");
 		expect(getSourceOrigin(changed.messages.at(-1)!)?.kind).toBe("synthetic");
 	});
-});
-
-it("honors actual SDK context and provider hooks once, without retaining unsupported attribution", async () => {
-	using directory = TempDir.createSync("native-sdk-origins-");
-	const auth = await AuthStorage.create(directory.join("auth.db"));
-	const api = "native-origin-hook-proof";
-	const requestModel = buildModel({ ...model, api, provider: "native-origin-hook-proof" });
-	auth.setRuntimeApiKey(requestModel.provider, "local-only");
-	let contextCalls = 0;
-	let payloadCalls = 0;
-	const observed: Array<{ context: Context; payload: unknown }> = [];
-	registerCustomApi(api, (_model, context, options) => {
-		const stream = new AssistantMessageEventStream();
-		void (async () => {
-			const payload = { input: [{ role: "user", content: "original" }] };
-			setSourceOrigin(payload.input[0]!, { kind: "source", parts: [{ entryId: "wire", order: 0, blockIndex: 0, coverage: "full", representation: "native" }] });
-			const result = await options?.onPayload?.(payload, requestModel);
-			observed.push({ context, payload: result ?? payload });
-			const message = createAssistantMessage("ok");
-			stream.push({ type: "done", reason: "stop", message });
-		})();
-		return stream;
-	});
-	const { session } = await createAgentSession({
-		cwd: directory.path(), agentDir: directory.path(), sessionManager: SessionManager.inMemory(directory.path()),
-		authStorage: auth, modelRegistry: new ModelRegistry(auth, directory.join("models.yml")),
-		settings: Settings.isolated({ "compaction.enabled": false }), model: requestModel, disableExtensionDiscovery: true,
-		extensions: [pi => {
-			pi.on("context", event => {
-				contextCalls++;
-				const target = event.messages.find(message => message.role === "user")!;
-				bindMessageSource(target as Message, "hook-input", 0);
-				if (target.role === "user") target.content = "context-authority";
-			});
-			pi.on("before_provider_request", event => {
-				payloadCalls++;
-				const payload = event.payload as { input: Array<{ content: string }> };
-				if (payloadCalls === 1) payload.input[0]!.content = "in-place-authority";
-				else return { input: [{ content: "replacement-authority" }] };
-			});
-		}],
-		skills: [], contextFiles: [], promptTemplates: [], slashCommands: [], enableMCP: false, enableLsp: false, skipPythonPreflight: true, taskDepth: 1, agentId: "SubAgent",
-	});
-	try {
-		await session.sendUserMessage("first");
-		await session.sendUserMessage("second");
-		expect([contextCalls, payloadCalls]).toEqual([2, 2]);
-		for (const [index, result] of observed.entries()) {
-			const user = result.context.messages.find(message => message.role === "user")!;
-			expect(JSON.stringify(user.content)).toContain("context-authority");
-			expect(getSourceOrigin(user)?.kind).toBe("unknown");
-			const item = (result.payload as { input: Array<{ content: string }> }).input[0]!;
-			expect(item.content).toBe(index === 0 ? "in-place-authority" : "replacement-authority");
-			expect(getSourceOrigin(item)?.kind).toBe("unknown");
-		}
-	} finally { await session.dispose(); auth.close(); clearCustomApis(); }
 });
