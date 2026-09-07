@@ -879,6 +879,8 @@ export interface OpenAIResponsesHistoryPayload {
 	items: Array<Record<string, unknown>>;
 	/** Local provenance sidecar; never part of a provider wire item. */
 	origins?: NativeItemOrigin[];
+	/** Actual ingress correspondence, consumed into durable origins when the source is bound; never wire data. */
+	contentBlocks?: Array<{ itemIndex: number; contentIndex: number }>;
 }
 
 /** Anthropic-only controls attached to a mid-conversation system message. */

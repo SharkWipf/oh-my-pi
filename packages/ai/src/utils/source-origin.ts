@@ -281,6 +281,15 @@ export function bindMessageSource(
 		if (existing && (existing.kind !== "unknown" || existing.reason !== "legacy-map-absent")) continue;
 		const nativePartsStart = parts.length;
 		const component = `providerPayload.${itemIndex}`;
+		const contentBlock = payload.contentBlocks?.find(mapping => mapping.itemIndex === itemIndex);
+		if (contentBlock) {
+			const block = message.content[contentBlock.contentIndex];
+			if (block) {
+				bind(item, contentBlock.contentIndex, block.type === "text" ? block.text : block.type === "thinking" ? block.thinking : undefined);
+				parts.pop()!.transportSpan = undefined;
+			} else setSourceOrigin(item, { kind: "unknown", reason: "native-content-absent" });
+			continue;
+		}
 		const text = typeof item.content === "string" ? item.content : typeof item.arguments === "string" ? item.arguments : undefined;
 		bind(item, component, text);
 		if (Array.isArray(item.content)) {
@@ -295,6 +304,7 @@ export function bindMessageSource(
 		setSourceOrigin(item, { kind: "source", parts: parts.splice(nativePartsStart) });
 	}
 	payload.origins = exportItemOrigins(payload.items);
+	delete payload.contentBlocks;
 }
 
 /** Serialize the sidecar separately; never put provenance fields inside provider items. */

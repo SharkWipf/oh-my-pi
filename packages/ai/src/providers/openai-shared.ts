@@ -27,7 +27,6 @@ import {
 	extractHttpStatusFromError,
 	isRecord,
 	logger,
-	parseImageMetadata,
 	parseStreamingJson,
 	parseStreamingJsonThrottled,
 	stringifyJson,
@@ -63,6 +62,7 @@ import {
 export type { OpenAIPromptCacheOptions } from "../types";
 
 import {
+	openAIResponsesImageContent,
 	getOpenAIResponsesHistoryItems,
 	getOpenAIResponsesHistoryPayload,
 	normalizeResponsesToolCallId,
@@ -2779,7 +2779,7 @@ function getOpenAIResponsesTerminalEvent(event: ResponseStreamEvent): OpenAIResp
 
 export interface ProcessResponsesStreamOptions {
 	onFirstToken?: () => void;
-	onOutputItemDone?: (item: ResponseOutputItem) => void;
+	onOutputItemDone?: (item: ResponseOutputItem, contentIndex?: number) => void;
 	/**
 	 * Called when a terminal `response.completed`, `response.incomplete`, or
 	 * `response.done` event is successfully processed. Only invoked on the
@@ -2811,12 +2811,8 @@ export function appendResponsesImageResult(
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
 	result: string,
-): void {
-	const image: ImageContent = {
-		type: "image",
-		data: result,
-		mimeType: parseImageMetadata(Buffer.from(result, "base64"))?.mimeType ?? "image/png",
-	};
+): number {
+	const image = openAIResponsesImageContent(result);
 	output.content.push(image);
 	stream.push({
 		type: "image_end",
@@ -2824,6 +2820,7 @@ export function appendResponsesImageResult(
 		content: image,
 		partial: output,
 	});
+	return output.content.length - 1;
 }
 
 export async function processResponsesStream<TApi extends Api>(
@@ -3235,7 +3232,7 @@ export async function processResponsesStream<TApi extends Api>(
 			}
 		} else if (event.type === "response.output_item.done") {
 			const item = structuredCloneJSON(event.item);
-			options?.onOutputItemDone?.(item);
+			let normalizedContentIndex: number | undefined;
 			const entry =
 				item.type === "function_call" || item.type === "custom_tool_call"
 					? lookupOpenItem({ output_index: event.output_index, item_id: item.id ?? item.call_id })
@@ -3253,6 +3250,7 @@ export async function processResponsesStream<TApi extends Api>(
 				if (reasoningBlock) {
 					reasoningBlock.thinking = finalizeReasoningThinking(item, reasoningBlock.thinking);
 					reasoningBlock.thinkingSignature = JSON.stringify(item);
+					normalizedContentIndex = contentIndexOf(reasoningBlock);
 					stream.push({
 						type: "thinking_end",
 						contentIndex: contentIndexOf(reasoningBlock),
@@ -3277,6 +3275,7 @@ export async function processResponsesStream<TApi extends Api>(
 					output.content.push(synthesized);
 					contentIndex = output.content.length - 1;
 				}
+				normalizedContentIndex = contentIndex;
 				stream.push({ type: "text_end", contentIndex, content: text, partial: output });
 				closeOpenItem(event.output_index, item.id, entry);
 			} else if (item.type === "function_call") {
@@ -3310,6 +3309,7 @@ export async function processResponsesStream<TApi extends Api>(
 					output.content.push(toolCall);
 					contentIndex = output.content.length - 1;
 				}
+				normalizedContentIndex = contentIndex;
 				closeOpenItem(event.output_index, item.id, entry, item.call_id, prefixedFunctionCallItemKey(item.call_id));
 				stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
 			} else if (item.type === "computer_call") {
@@ -3331,6 +3331,7 @@ export async function processResponsesStream<TApi extends Api>(
 					output.content.push(toolCall);
 					contentIndex = output.content.length - 1;
 				}
+				normalizedContentIndex = contentIndex;
 				closeOpenItem(event.output_index, item.id, entry, item.call_id);
 				stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
 			} else if (item.type === "custom_tool_call") {
@@ -3354,6 +3355,7 @@ export async function processResponsesStream<TApi extends Api>(
 					output.content.push(toolCall);
 					contentIndex = output.content.length - 1;
 				}
+				normalizedContentIndex = contentIndex;
 				closeOpenItem(event.output_index, item.id, entry, item.call_id, prefixedFunctionCallItemKey(item.call_id));
 				stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
 			} else if (item.type === "web_search_call" && (item.status === undefined || item.status === "completed")) {
@@ -3361,8 +3363,9 @@ export async function processResponsesStream<TApi extends Api>(
 				// the model never surfaced an answer; the agent loop continues from it.
 				sawCompletedWebSearchCall = true;
 			} else if (item.type === "image_generation_call" && item.status === "completed" && item.result) {
-				appendResponsesImageResult(output, stream, item.result);
+				normalizedContentIndex = appendResponsesImageResult(output, stream, item.result);
 			}
+			options?.onOutputItemDone?.(item, normalizedContentIndex);
 		} else if (terminalEvent) {
 			const response = terminalEvent.response;
 			const shouldPromoteIncompleteToolUse =
