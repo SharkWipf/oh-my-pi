@@ -16,6 +16,7 @@ import {
 	applyShakeRegions,
 	CompactionCancelledError,
 	type CompactionDetails,
+	type CompactionDiagnostics,
 	type CompactionPreparation,
 	type CompactionSourceSelection,
 	type CompactionResult,
@@ -49,9 +50,9 @@ import {
 	pruneToolOutputs,
 	readToolSupersedeKey,
 } from "@oh-my-pi/pi-agent-core/compaction/pruning";
-import type { SourceBlockRewrite, SourceRewrite } from "@oh-my-pi/pi-agent-core/compaction/source";
+import { getCompactionSourceRepresentation, type SourceBlockRewrite, type SourceRewrite } from "@oh-my-pi/pi-agent-core/compaction/source";
 import type { ProtectedToolMatcher } from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
-import type { AssistantMessage, CodexCompactionContext, Message, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, CodexCompactionContext, Context, Message, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
@@ -66,12 +67,13 @@ import type { GoalModeState } from "../goals/state";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
 import type { MemoryBackendOperationContext } from "../memory-backend/types";
 import type { NonMessageTokenSource } from "../modes/utils/context-usage";
-import { computeNonMessageTokens } from "../modes/utils/context-usage";
+import { computeNonMessageBreakdown, computeNonMessageTokens } from "../modes/utils/context-usage";
 import { createPlanReadMatcher } from "../plan-mode/plan-protection";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ContextUsageBreakdown, HandoffResult, SessionHandoffOptions } from "./agent-session-types";
 import { findCompactMode } from "./compact-modes";
+import { buildCompactionDiagnostics, describeCompactionSourceRepresentation, type CompactionDiagnosticsInput } from "./compaction-diagnostics";
 import {
 	type CompactionMethod,
 	canUseRemoteCompaction,
@@ -88,7 +90,7 @@ import {
 	resolveRoleModelFull,
 } from "./role-models";
 import type { SessionContext } from "./session-context";
-import { getLatestCompactionEntry, getOpenAiRemoteCompactionPayload } from "./session-context";
+import { buildSessionContext, getLatestCompactionEntry, getOpenAiRemoteCompactionPayload } from "./session-context";
 import type { CompactionEntry, SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 
@@ -252,6 +254,8 @@ interface CompactionOperation {
 	snapshotLeafId: string | null;
 	signal?: AbortSignal;
 	sources: Map<string, string>;
+	diagnosticInput?: Omit<CompactionDiagnosticsInput, "messages" | "method" | "target">;
+	retentionTarget?: CompactionResult["retentionTarget"];
 }
 
 interface CompactionCommit {
@@ -448,6 +452,102 @@ export class SessionMaintenance {
 
 	constructor(host: SessionMaintenanceHost) {
 		this.#host = host;
+	}
+
+	/** Latest installed event on this ancestry; never crosses a clear boundary. */
+	#activeCompactionEntry(): CompactionEntry | undefined {
+		let entry = this.#host.sessionManager.getLeafEntry();
+		while (entry) {
+			if (entry.type === "reset_boundary") return undefined;
+			if (entry.type === "compaction") return entry;
+			entry = entry.parentId ? this.#host.sessionManager.getEntry(entry.parentId) : undefined;
+		}
+		return undefined;
+	}
+
+	/** Materialize only for an explicit detailed view, never on a policy toggle. */
+	getCompactionDiagnostics(snapshot: "current" | "recorded" = "current"): CompactionDiagnostics | undefined {
+		const entry = this.#activeCompactionEntry();
+		if (snapshot === "recorded") return entry?.diagnostics;
+		const model = this.#model;
+		if (!model) return undefined;
+		const context = this.#host.sessionManager.buildSessionContext({ diagnostics: true });
+		const recorded = entry?.diagnostics;
+		const selectionReasons = new Map(Object.entries(recorded?.selection?.sourceReasons ?? {}));
+		const representation = getCompactionSourceRepresentation(entry?.preserveData);
+		const postCompactionSourceIds = this.#postCompactionSourceIds(entry, representation?.throughEntryId);
+		const fixedCosts = computeNonMessageBreakdown(this.#host.nonMessageTokenSource(), this.#tokenizer);
+		const facts = buildCompactionDiagnostics({
+			messages: context.messages,
+			tokenizer: this.#tokenizer,
+			fixedCosts,
+			fixedCounts: fixedCosts.counts,
+			model,
+			method: entry?.method ?? "uncompacted",
+			settings: {
+				installed: recorded?.settings ?? null,
+				livePolicy: structuredClone(this.#host.settings.getGroup("compaction")),
+			},
+			before: recorded?.before ?? { tokens: null, basis: "unknown", description: "No recorded pre-compaction measurement" },
+			target: recorded?.target ?? {},
+			snapshot: "current-reconstruction",
+			sourceRepresentation: representation,
+			sourceRepresentationEntryId: entry?.id,
+			postCompactionSourceIds,
+			messageSourceIds: context.messageSourceIds,
+			sourceLocations: context.sourceLocations,
+			selectionReasons,
+		});
+		facts.selection = recorded?.selection;
+		facts.notes.push("Current reconstruction uses the active model and fixed context. Installed archive/native bytes and selection reasons remain those of the recorded operation; live policy is a separate next-operation input.");
+		return facts;
+	}
+
+	#postCompactionSourceIds(entry: CompactionEntry | undefined, throughEntryId?: string): Set<string> {
+		const ids = new Set<string>();
+		if (!entry) return ids;
+		let cursor = this.#host.sessionManager.getLeafEntry();
+		const frontier = throughEntryId ?? entry.id;
+		while (cursor && cursor.id !== frontier && cursor.type !== "reset_boundary") {
+			if (cursor.type === "message") ids.add(cursor.id);
+			cursor = cursor.parentId ? this.#host.sessionManager.getEntry(cursor.parentId) : undefined;
+		}
+		return ids;
+	}
+
+	/** Observe the existing post-inband gate; never re-run transforms or retain Context. */
+	capturePreparedCompactionDiagnostics(context: Context, model: Model, sourceContext: Context): CompactionDiagnostics {
+		const entry = this.#activeCompactionEntry();
+		const representation = getCompactionSourceRepresentation(entry?.preserveData);
+		const recorded = entry?.diagnostics;
+		const facts = buildCompactionDiagnostics({
+			messages: sourceContext.messages, preparedContext: context, tokenizer: this.#tokenizer, model,
+			fixedCosts: computeNonMessageBreakdown(this.#host.nonMessageTokenSource(), this.#tokenizer),
+			method: entry?.method ?? "uncompacted", snapshot: "OMP-prehook", target: {},
+			before: { tokens: null, basis: "unknown", description: "No same-domain before-preparation measurement was captured" },
+			settings: { installed: recorded?.settings ?? null, observedAtPreparationBoundary: structuredClone({ compaction: this.#host.settings.getGroup("compaction"), snapcompact: { systemPrompt: this.#host.settings.get("snapcompact.systemPrompt"), toolResults: this.#host.settings.get("snapcompact.toolResults"), shape: this.#host.settings.get("snapcompact.shape") } }) },
+			sourceRepresentation: representation, sourceRepresentationEntryId: entry?.id,
+			postCompactionSourceIds: this.#postCompactionSourceIds(entry, representation?.throughEntryId),
+			selectionReasons: new Map(Object.entries(recorded?.selection?.sourceReasons ?? {})),
+		});
+		facts.selection = recorded?.selection;
+		facts.notes.push(`Actual prepared request observed ${new Date().toISOString()} after OMP transforms and inband tool encoding. This receipt does not confirm provider dispatch, acceptance, or billing.`,
+			"Later arbitrary provider hooks remain unobserved. Observed settings are boundary-time values; installed archive settings and selection reasons remain separately frozen.");
+		return facts;
+	}
+
+	/** Source inspect does not tokenize or materialize the physical inventory. */
+	getSourceRepresentationDetails(sourceId: string): string[] {
+		const entry = this.#activeCompactionEntry();
+		const representation = getCompactionSourceRepresentation(entry?.preserveData);
+		const lines = entry ? describeCompactionSourceRepresentation(representation, sourceId) : ["No compaction archive in the current post-clear context."];
+		const context = this.#host.sessionManager.buildSessionContext({ diagnostics: true });
+		const positions: number[] = [];
+		for (let index = 0; index < (context.messageSourceIds?.length ?? 0); index++) {
+			if (context.messageSourceIds![index] === sourceId) positions.push(index);
+		}
+		if (positions.length) lines.unshift(`Current source text/original content at emitted message position${positions.length === 1 ? "" : "s"} ${positions.join(", ")}.`);
+		return lines;
 	}
 
 	/** Clears per-prompt recovery counters when a new user prompt starts. */
@@ -1167,6 +1267,7 @@ export class SessionMaintenance {
 					tokensBefore = result.tokensBefore;
 					details = result.details;
 					preserveData = mergeLlmCompactionPreserveData(compactionPrep.preserveData, result.preserveData);
+					operation.retentionTarget = selectedMethod === "remote" ? result.retentionTarget : result.retentionTarget ?? operation.retentionTarget;
 				} catch (err) {
 					if (err instanceof CompactionCancelledError) {
 						if (!compactionAbortController.signal.aborted || err.cause !== undefined) throw err;
@@ -1212,6 +1313,8 @@ export class SessionMaintenance {
 				tokensBefore,
 				details,
 				preserveData: snapcompact.stripPreservedArchive(preserveData),
+				diagnostics: installed.diagnostics,
+				retentionTarget: operation.retentionTarget,
 			};
 			options?.onComplete?.(compactionResult);
 			return compactionResult;
@@ -1539,6 +1642,7 @@ export class SessionMaintenance {
 				},
 				candidates,
 			);
+			operation.retentionTarget = method === "remote" ? result.retentionTarget : result.retentionTarget ?? operation.retentionTarget;
 			armed = {
 				operation,
 				result: {
@@ -1610,6 +1714,9 @@ export class SessionMaintenance {
 	#captureCompactionOperation(signal?: AbortSignal): CompactionOperation {
 		if (this.#pendingCompaction) throw new Error("Recover the pending compaction persistence before compacting again.");
 		const manager = this.#host.sessionManager;
+		const model = this.#model;
+		const current = model ? this.getCompactionDiagnostics("current") : undefined;
+		const fixedCosts = model && current ? computeNonMessageBreakdown(this.#host.nonMessageTokenSource(), this.#tokenizer) : undefined;
 		return {
 			manager,
 			sessionId: this.#host.sessionId(),
@@ -1619,6 +1726,14 @@ export class SessionMaintenance {
 			snapshotLeafId: manager.getLeafId(),
 			signal,
 			sources: new Map(),
+			diagnosticInput: model && current ? {
+				tokenizer: this.#tokenizer,
+				model: { provider: model.provider, id: model.id, contextWindow: model.contextWindow },
+				fixedCosts: { ...fixedCosts! },
+				fixedCounts: { ...fixedCosts!.counts },
+				settings: structuredClone({ compaction: this.#host.settings.getGroup("compaction"), snapcompact: { systemPrompt: this.#host.settings.get("snapcompact.systemPrompt"), toolResults: this.#host.settings.get("snapcompact.toolResults"), shape: this.#host.settings.get("snapcompact.shape") } }),
+				before: current.total,
+			} : undefined,
 		};
 	}
 
@@ -1656,6 +1771,7 @@ export class SessionMaintenance {
 	/** Capture source content before hooks/generators can await or mutate their input. */
 	#captureCompactionSources(operation: CompactionOperation, entries: SessionEntry[], preparation?: CompactionPreparation): void {
 		operation.snapshotLeafId = preparation ? (entries.at(-1)?.id ?? null) : operation.manager.getLeafId();
+		operation.retentionTarget = preparation?.retentionTarget;
 		operation.sources.clear();
 		const inputs = preparation && new Set([
 			...preparation.messagesToSummarize, ...preparation.turnPrefixMessages, ...preparation.recentMessages,
@@ -1684,6 +1800,35 @@ export class SessionMaintenance {
 		return true;
 	}
 
+	#recordCompactionDiagnostics(args: CompactionCommit): CompactionDiagnostics | undefined {
+		const { operation } = args;
+		const input = operation.diagnosticInput;
+		if (!input) return undefined;
+		const branch = operation.manager.getBranch();
+		const prospective: CompactionEntry = {
+			type: "compaction", id: Snowflake.next(), parentId: branch.at(-1)?.id ?? null,
+			timestamp: new Date().toISOString(), summary: args.summary, shortSummary: args.shortSummary,
+			firstKeptEntryId: args.firstKeptEntryId, tokensBefore: args.tokensBefore, preserveData: args.preserveData,
+			method: args.method, providerReplayThroughEntryId: args.providerReplayThroughEntryId,
+		};
+		const context = buildSessionContext([...branch, prospective], prospective.id, undefined, { diagnostics: true });
+		const target = operation.retentionTarget;
+		const facts = buildCompactionDiagnostics({
+			...input, messages: context.messages, method: args.method ?? "extension", snapshot: "recorded-at-compaction",
+			target: target ? { ordinaryTokens: target.configuredTokens, calibratedOrdinaryTokens: target.calibratedTokens, manualNonUserTokens: target.manualNonUserTokens, residualOrdinaryTokens: target.residualTokens } : {},
+			sourceRepresentation: getCompactionSourceRepresentation(args.preserveData),
+			sourceRepresentationEntryId: prospective.id,
+			messageSourceIds: context.messageSourceIds, sourceLocations: context.sourceLocations,
+			selectionReasons: new Map(Object.entries(operation.selection.selectionReasons ?? {})),
+			selectedUserSourceIds: new Set(operation.selection.selectedSources?.map(source => source.entryId)),
+			manualNonUserSourceIds: new Set(operation.selection.admittedNonUserSources?.map(source => source.entryId)),
+		});
+		facts.selection = { sourceReasons: operation.selection.selectionReasons ?? {}, quota: operation.selection.selectionQuota ?? {} };
+		facts.notes.push("Frozen reconstructed output at commit; not a later provider invoice or an observation after arbitrary provider hooks.");
+		if (args.method === "remote" && !target) facts.notes.push("This native result exposes no ordinary retention allocator target; local cut targets do not apply.");
+		return facts;
+	}
+
 	/** Publish once, then retain precisely that event if durability needs explicit repair. */
 	async #commitCompactionEntry(args: CompactionCommit): Promise<CompactionEntry | undefined> {
 		const { operation, onCommitted, ...result } = args;
@@ -1691,7 +1836,10 @@ export class SessionMaintenance {
 		if (frozen.preserveData?.openaiRemoteCompaction && !frozen.providerReplayThroughEntryId) {
 			frozen.providerReplayThroughEntryId = operation.snapshotLeafId ?? undefined;
 		}
-		const tokensAfter = this.#projectCompactedContextTokens(frozen);
+		frozen.diagnostics = this.#recordCompactionDiagnostics(frozen);
+		const tokensAfter = frozen.diagnostics
+			? frozen.diagnostics.rows.some(row => row.quantity.tokens === null) ? undefined : frozen.diagnostics.total.tokens ?? undefined
+			: this.#projectCompactedContextTokens(frozen);
 		// No await (including hook work) may separate this validation from append.
 		if (this.#pendingCompaction || !this.#compactionInputValid(operation)) throw new CompactionCancelledError();
 		const entryId = operation.manager.appendCompaction(
@@ -3939,6 +4087,7 @@ export class SessionMaintenance {
 				tokensBefore = compactResult.tokensBefore;
 				details = compactResult.details;
 				preserveData = mergeLlmCompactionPreserveData(compactionPrep.preserveData, compactResult.preserveData);
+				operation.retentionTarget = method === "remote" ? compactResult.retentionTarget : compactResult.retentionTarget ?? operation.retentionTarget;
 			}
 
 			return await this.#commitAutoCompactionResult({
@@ -4098,6 +4247,8 @@ export class SessionMaintenance {
 			tokensBefore: args.tokensBefore,
 			details: args.details,
 			preserveData: snapcompact.stripPreservedArchive(args.preserveData),
+			retentionTarget: args.operation.retentionTarget,
+			diagnostics: savedCompactionEntry.diagnostics,
 		};
 		// Post-maintenance progress guard — evaluated BEFORE emitting
 		// auto_compaction_end so the TUI rebuild triggered by that event

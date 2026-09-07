@@ -45,6 +45,7 @@ import {
 } from "@oh-my-pi/pi-agent-core";
 import {
 	CompactionCancelledError,
+	type CompactionDiagnostics,
 	type CompactionPreparation,
 	type CompactionResult,
 	calculatePromptTokens,
@@ -799,6 +800,8 @@ export class AgentSession {
 	#sessionGeneration = 0;
 	/** Active history ownership; ordinary appends and policy changes leave it intact. */
 	#compactionOwnership: object = {};
+	#preparedCompactionDiagnostics?: { ownership: object; facts: CompactionDiagnostics };
+	readonly #disposePreparedCompactionDiagnostics: () => void;
 	/** Resolves when the currently in-flight `switchSession()` transition settles (success or
 	 *  rollback). newSession() never rolls #sessionGeneration back so it leaves this unset. An
 	 *  aside-queueing call that hits a #sessionGeneration mismatch awaits this (via
@@ -1453,6 +1456,10 @@ export class AgentSession {
 			memoryAgentDir: config.memoryAgentDir,
 			memoryTaskDepth: config.memoryTaskDepth,
 			createMemoryTools: config.createMemoryTools,
+		});
+		this.#disposePreparedCompactionDiagnostics = this.agent.addBeforeModelCall((context, signal, request) => {
+			if (signal?.aborted) return;
+			this.#preparedCompactionDiagnostics = { ownership: this.#compactionOwnership, facts: this.#maintenance.capturePreparedCompactionDiagnostics(context, request.model, request.sourceContext) };
 		});
 		// Resolve the wire service-tier per request so the Fireworks Priority
 		// toggle scopes priority to Fireworks alone, without mutating the shared
@@ -4547,6 +4554,8 @@ export class AgentSession {
 		this.#preservedMessageListeners.clear();
 		this.#preservedQuery = undefined;
 		this.#messageClassifier.dispose();
+		this.#disposePreparedCompactionDiagnostics();
+		this.#preparedCompactionDiagnostics = undefined;
 		this.#modelDiscoveryAbortController.abort();
 		this.#queuedMessageDrainBlocked = false;
 		this.#usagePreflightReadyForNextModelCall = false;
@@ -5667,11 +5676,14 @@ export class AgentSession {
 		const query = await this.preparePreservedMessages();
 		const selected = this.#preservationSelection(query);
 		const selectedSources: NonNullable<CompactionSourceSelection["selectedSources"]>[number][] = [];
+		const selectionReasons: Record<string, string[]> = {};
 		for (const id of selected.P) {
 			const candidate = selected.candidate(id);
 			const entry = this.sessionManager.getEntry(id);
 			const order = query.positionOf(id);
 			if (!candidate || entry?.type !== "message" || order === undefined) throw new Error("Selected source is no longer available.");
+			const reasons = selected.reasons(id);
+			selectionReasons[id] = Object.entries(reasons).filter(([, active]) => active).map(([reason]) => reason);
 			const message = query.inspectCandidate(id, true)!.message;
 			selectedSources.push({ entryId: id, order, message, projection: message !== entry.message ? "original" : undefined,
 				spans: candidate.spans.map(span => ({ blockIndex: span.blockIndex, start: span.text?.start ?? 0, end: span.text?.end ?? 1 })) });
@@ -5680,10 +5692,11 @@ export class AgentSession {
 		for (const atom of selected.nonUserAtoms()) for (const entry of atom.entries) {
 			const order = query.positionOf(entry.id);
 			if (order === undefined) throw new Error("Selected source is no longer available.");
+			selectionReasons[entry.id] = ["manual-nonuser", "always"];
 			admittedNonUserSources.push({ entryId: entry.id, order, message: entry.message,
 				atomicGroup: { id: atom.id, entryIds: [...atom.memberIds] } });
 		}
-		return { selectedSources, admittedNonUserSources, originalSourceMessage: getOriginalSourceMessage };
+		return { selectedSources, admittedNonUserSources, selectionReasons, selectionQuota: structuredClone(selected.quota), originalSourceMessage: getOriginalSourceMessage };
 	}
 
 	buildDisplaySessionContext(): SessionContext {
@@ -10439,6 +10452,22 @@ export class AgentSession {
 		pendingMessages?: AgentMessage[];
 	}): ContextUsageBreakdown | undefined {
 		return this.#stats.getContextBreakdown(options);
+	}
+
+	/** Explicit detailed inspection; never materialized by the status-line/toggle hot path. */
+	getCompactionDiagnostics(snapshot: "current" | "recorded" = "current") {
+		return this.#maintenance.getCompactionDiagnostics(snapshot);
+	}
+
+	/** Last observed prepared footprint on this history owner, not a cached request body. */
+	getPreparedCompactionDiagnostics(): CompactionDiagnostics | undefined {
+		const receipt = this.#preparedCompactionDiagnostics;
+		return receipt?.ownership === this.#compactionOwnership ? structuredClone(receipt.facts) : undefined;
+	}
+
+	/** Actual installed source coverage, separate from live preservation policy. */
+	getSourceRepresentationDetails(sourceId: string): string[] {
+		return this.#maintenance.getSourceRepresentationDetails(sourceId);
 	}
 
 	getContextUsage(options?: { contextWindow?: number }): ContextUsage | undefined {
