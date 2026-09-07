@@ -83,7 +83,7 @@ export function isPreservationAction(value: unknown): value is PreservationActio
 export function parsePreservationLimit(value: unknown): PreservationLimit | undefined {
 	if (value === "off" || value === "all") return { mode: value };
 	if (typeof value !== "string") return undefined;
-	const match = /^(messages|tokens|context-percent):([0-9]+(?:\.[0-9]+)?)$/.exec(value);
+	const match = /^(messages|tokens|context-percent):([0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)$/.exec(value);
 	if (!match) return undefined;
 	const mode = match[1] as "messages" | "tokens" | "context-percent";
 	const amount = Number(match[2]);

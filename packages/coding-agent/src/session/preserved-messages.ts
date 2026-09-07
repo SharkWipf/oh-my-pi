@@ -8,6 +8,7 @@ import {
 	USER_MESSAGE_CLASSIFICATION_CUSTOM_TYPE,
 	decodeCompactionMessageOverride,
 	unpackPreservedUserMessageClassifications,
+	decodePreservedUserMessageClassifications,
 	type PreservationLimit,
 	type PreservationAction,
 	type PreservationPolicySettings,
@@ -221,7 +222,14 @@ export interface PreservationRow {
 	memberIds: readonly string[];
 	entry: SessionMessageEntry;
 	manual: PreservationAction;
+	categoryStatus: "absent" | "valid" | "unsupported" | "invalidated";
 	categoryMask?: number;
+}
+
+export interface PreservationManualGroup {
+	id: string;
+	memberIds: readonly string[];
+	members: readonly { sourceId: string; state: PreservationAction; revisionId: string | null }[];
 }
 
 export interface PreservationMembership extends Iterable<string> {
@@ -246,6 +254,7 @@ export interface PreservationSelection {
 	H: PreservationMembership;
 	quota: Record<"P" | "N" | "H" | "first" | "recent" | "always", { count: number; tokens: number }>;
 	reasons(id: string): PreservationReasons;
+	positions(id: string): { first?: number; recent?: number };
 	candidate(id: string): PreservationCandidate | undefined;
 	candidates(): IterableIterator<PreservationCandidate>;
 	nonUserAtoms(): IterableIterator<PreservationAtom>;
@@ -270,6 +279,11 @@ export class PreservedMessageQuery {
 	readonly #rows: number[] = [];
 	readonly #overrides = new Map<string, Exclude<PreservationAction, "auto">>();
 	readonly #classifications = new Map<string, number>();
+	readonly #classificationProblems = new Map<string, "unsupported" | "malformed" | "invalidated">();
+	readonly #overrideRevisions = new Map<string, string>();
+	readonly #nonAutoGroups = new Set<number>();
+	readonly #appended: SessionEntry[] = [];
+	readonly #baseLength: number;
 	readonly #groups = new Map<string, readonly string[]>();
 	readonly #pending = new Map<string, PendingExchange[]>();
 	readonly #manualAtoms = new Map<number, readonly string[]>();
@@ -282,6 +296,7 @@ export class PreservedMessageQuery {
 
 	private constructor(entries: readonly SessionEntry[], offset: number, policy: PreservationPolicySettings, tokenizer: Tokenizer, options: PreservationBuildOptions) {
 		this.#entries = entries;
+		this.#baseLength = entries.length;
 		this.#offset = offset;
 		this.#policy = policy;
 		this.#tokenizer = tokenizer;
@@ -320,29 +335,42 @@ export class PreservedMessageQuery {
 	}
 
 	#entry(position: number): SessionMessageEntry | undefined {
-		const entry = this.#entries[position + this.#offset];
+		const index = position + this.#offset;
+		const entry = index < this.#baseLength ? this.#entries[index] : this.#appended[index - this.#baseLength];
 		return entry?.type === "message" ? entry : undefined;
 	}
 
 	#appendEntry(position: number): void {
-		const entry = this.#entries[position + this.#offset]!;
+		const index = position + this.#offset;
+		const entry = (index < this.#baseLength ? this.#entries[index] : this.#appended[index - this.#baseLength])!;
 		this.#index.append({ user: false, raw: 0, candidate: 0, eligible: false, always: false, manual: false, nonUserCount: 0 });
 		if (entry.type === "custom") {
 			if (entry.customType === MESSAGE_OVERRIDE_CUSTOM_TYPE) {
 				const data = decodeCompactionMessageOverride(entry.data);
 				if (data) for (const id of data.messageIds) {
+					this.#overrideRevisions.set(id, entry.id);
 					if (data.state === "auto") this.#overrides.delete(id);
 					else this.#overrides.set(id, data.state);
 				}
 			} else if (entry.customType === USER_MESSAGE_CLASSIFICATION_CUSTOM_TYPE) {
-				for (const { id, mask } of unpackPreservedUserMessageClassifications(entry.data)) this.#classifications.set(id, mask);
+				const decoded = decodePreservedUserMessageClassifications(entry.data);
+				if (decoded.status === "valid") for (const { id, mask } of decoded.classifications) {
+					this.#classifications.set(id, mask);
+					this.#classificationProblems.delete(id);
+				} else {
+					const packed = entry.data as { c?: unknown } | undefined;
+					if (Array.isArray(packed?.c)) for (let i = 0; i < packed.c.length; i += 2) {
+						const id = packed.c[i];
+						if (typeof id === "string" && this.#positions.has(id)) this.#classificationProblems.set(id, decoded.status);
+					}
+				}
 			}
 			return;
 		}
 		if (entry.type !== "message") return;
 		this.#positions.set(entry.id, position);
 		const initial = (entry as SessionMessageEntry & { compactionOverride?: PreservationAction }).compactionOverride;
-		if (initial === "keep" || initial === "exclude") this.#overrides.set(entry.id, initial);
+		if (initial === "keep" || initial === "exclude") { this.#overrides.set(entry.id, initial); this.#overrideRevisions.set(entry.id, entry.id); }
 		if (isPreservationUser(entry)) this.#users.push(position);
 		if (entry.message.role === "assistant") {
 			const calls = entry.message.content.filter(block => block.type === "toolCall");
@@ -391,6 +419,9 @@ export class PreservedMessageQuery {
 		const members = this.#groups.get(entry.id) ?? [entry.id];
 		const anchor = this.#positions.get(members[0]!)!;
 		if (anchor !== position) { this.#refreshPosition(anchor); return; }
+		if (entry.message.role === "toolResult" || (entry.message.role === "assistant" && entry.message.content.some(block => block.type === "toolCall") && !this.#groups.has(entry.id))) return;
+		if (members.some(id => this.#overrides.has(id))) this.#nonAutoGroups.add(position);
+		else this.#nonAutoGroups.delete(position);
 		const manual = this.#manual(members);
 		if (isPreservationUser(entry)) {
 			const stages = evaluatePreservationPolicy(entry.message, this.#policy, manual, this.#classifications.get(entry.id));
@@ -398,8 +429,6 @@ export class PreservedMessageQuery {
 			this.#index.update(position, { user: true, raw: this.#tokenizer.countMessage(entry.message),
 				candidate: candidate?.quotaTokens ?? NaN, eligible: stages.resolved !== "exclude", always: stages.resolved === "keep", manual: manual === "keep", nonUserCount: 0 });
 		} else {
-			// Incomplete tool exchanges never become executable half-atoms.
-			if (entry.message.role === "toolResult" || (entry.message.role === "assistant" && entry.message.content.some(block => block.type === "toolCall") && !this.#groups.has(entry.id))) return;
 			let raw = 0;
 			if (manual === "keep") {
 				this.#manualAtoms.set(position, members);
@@ -417,7 +446,7 @@ export class PreservedMessageQuery {
 		if (position === undefined) return undefined;
 		const entry = this.#entry(position)!;
 		const memberIds = this.#groups.get(entry.id) ?? [entry.id];
-		return { id: entry.id, memberIds, entry, manual: this.#manual(memberIds), categoryMask: isPreservationUser(entry) ? this.#classifications.get(entry.id) : undefined };
+		return { id: entry.id, memberIds, entry, manual: this.#manual(memberIds), categoryMask: isPreservationUser(entry) ? this.#classifications.get(entry.id) : undefined, categoryStatus: this.classificationStatus(entry.id) };
 	}
 
 	rowIndexOf(id: string, role: "user" | "all" = "user"): number {
@@ -462,6 +491,7 @@ export class PreservedMessageQuery {
 			if (!entry || !isPreservationUser(entry) || !Number.isInteger(mask) || mask < 0 || mask > 2047) continue;
 			this.#classifications.set(id, mask);
 			this.#refreshPosition(position!);
+			this.#classificationProblems.delete(id);
 			affected.push(id);
 		}
 		return affected;
@@ -470,32 +500,89 @@ export class PreservedMessageQuery {
 	/** Known source rewrites retain IDs; tokenizer invalidation and classification dependency clearing belong to the journal writer. */
 	refreshSources(ids: readonly string[], entries?: readonly SessionEntry[]): void {
 		this.#assertCurrent();
-		if (entries) this.#entries = entries;
+		if (entries) {
+			this.#entries = entries;
+			for (let index = 0; index < this.#appended.length; index++) this.#appended[index] = entries[this.#baseLength + index]!;
+		}
 		const positions = new Set<number>();
 		for (const id of ids) { const position = this.#positions.get(this.#groups.get(id)?.[0] ?? id); if (position !== undefined) positions.add(position); }
 		for (const position of positions) this.#refreshPosition(position);
 	}
 
-	/** Hot same-branch extension. Reset/rollback/divergence requests a cooperative replacement build. */
+	/** Hot same-branch extension; source rewrites or divergent suffixes require rebuild. */
 	append(entries: readonly SessionEntry[]): boolean {
 		this.#assertCurrent();
-		const oldLength = this.#entries.length;
-		if (entries.length < oldLength || (oldLength > 0 && entries[oldLength - 1] !== this.#entries[oldLength - 1])) return false;
-		for (let index = oldLength; index < entries.length; index++) if (entries[index]!.type === "reset_boundary") return false;
-		this.#entries = entries;
+		const oldLength = this.#baseLength + this.#appended.length;
+		const previous = this.#appended.at(-1) ?? this.#entries[this.#baseLength - 1];
+		if (entries.length < oldLength || (oldLength > 0 && entries[oldLength - 1] !== previous)) return false;
+		return this.appendEntries(entries.slice(oldLength));
+	}
+
+	/** Bounded source-owner delta: no fresh getBranch allocation on ordinary sends. */
+	appendEntries(entries: readonly SessionEntry[]): boolean {
+		this.#assertCurrent();
+		let parentId = (this.#appended.at(-1) ?? this.#entries[this.#baseLength - 1])?.id ?? null;
+		for (const entry of entries) { if (entry.type === "reset_boundary" || entry.parentId !== parentId) return false; parentId = entry.id; }
 		const affected = new Set<number>();
-		for (let index = oldLength; index < entries.length; index++) {
-			const entry = entries[index]!;
-			this.#appendEntry(index - this.#offset);
+		for (const entry of entries) {
+			const position = this.#index.length;
+			this.#appended.push(entry);
+			this.#appendEntry(position);
 			if (entry.type === "message") affected.add(this.#positions.get(this.#groups.get(entry.id)?.[0] ?? entry.id)!);
 			else if (entry.type === "custom" && entry.customType === MESSAGE_OVERRIDE_CUSTOM_TYPE) {
-				for (const id of decodeCompactionMessageOverride(entry.data)?.messageIds ?? []) { const position = this.#positions.get(this.#groups.get(id)?.[0] ?? id); if (position !== undefined) affected.add(position); }
+				for (const id of decodeCompactionMessageOverride(entry.data)?.messageIds ?? []) { const target = this.#positions.get(this.#groups.get(id)?.[0] ?? id); if (target !== undefined) affected.add(target); }
 			} else if (entry.type === "custom" && entry.customType === USER_MESSAGE_CLASSIFICATION_CUSTOM_TYPE) {
-				for (const { id } of unpackPreservedUserMessageClassifications(entry.data)) { const position = this.#positions.get(id); if (position !== undefined) affected.add(position); }
+				for (const { id } of unpackPreservedUserMessageClassifications(entry.data)) { const target = this.#positions.get(id); if (target !== undefined) affected.add(target); }
 			}
 		}
 		for (const position of affected) this.#refreshPosition(position);
 		return true;
+	}
+
+	get resetId(): string | null { return this.#offset > 0 ? this.#entries[this.#offset - 1]!.id : null; }
+
+	nonAutoCount(): number { this.#assertCurrent(); return this.#nonAutoGroups.size; }
+
+	positionOf(id: string): number | undefined { this.#assertCurrent(); return this.#positions.get(id); }
+
+	getManualGroup(id: string): PreservationManualGroup | undefined {
+		this.#assertCurrent();
+		const row = this.rowAt(this.rowIndexOf(id, "all"), "all");
+		if (!row) return undefined;
+		return { id: row.id, memberIds: row.memberIds, members: row.memberIds.map(sourceId => ({ sourceId,
+			state: this.#overrides.get(sourceId) ?? "auto", revisionId: this.#overrideRevisions.get(sourceId) ?? null })) };
+	}
+
+	*getManualGroups(options: { nonAutoOnly?: boolean } = {}): IterableIterator<PreservationManualGroup> {
+		this.#assertCurrent();
+		const positions = options.nonAutoOnly ? [...this.#nonAutoGroups].sort((a, b) => a - b) : this.#rows;
+		for (const position of positions) { const group = this.getManualGroup(this.#entry(position)!.id); if (group) yield group; }
+	}
+
+	classificationStatus(id: string): PreservationRow["categoryStatus"] {
+		this.#assertCurrent();
+		if (this.#classifications.has(id)) return "valid";
+		const problem = this.#classificationProblems.get(id);
+		return problem === "invalidated" ? "invalidated" : problem ? "unsupported" : "absent";
+	}
+
+	invalidateClassifications(ids: readonly string[]): void {
+		this.#assertCurrent();
+		for (const id of ids) {
+			const position = this.#positions.get(id);
+			if (position === undefined) continue;
+			this.#classifications.delete(id);
+			this.#classificationProblems.set(id, "invalidated");
+			this.#refreshPosition(position);
+		}
+	}
+
+	/** Inspect configured source pricing even when no window/cap currently admits the source. */
+	inspectCandidate(id: string, raw = false): PreservationCandidate | undefined {
+		this.#assertCurrent();
+		const position = this.#positions.get(id);
+		const entry = position === undefined ? undefined : this.#entry(position);
+		return entry ? preservationCandidate(entry, this.#policy, this.#tokenizer, raw || this.#overrides.get(id) === "keep") : undefined;
 	}
 
 	select(options: PreservationSelectionOptions): PreservationSelection {
@@ -520,13 +607,8 @@ export class PreservedMessageQuery {
 		const allAlways = { start: 0, end: this.#index.length, count: 0, tokens: 0 };
 		const included = (position: number, range: PolicyRange, kind: PolicyKind) => this.#index.includes(position, range, kind, h, enabled);
 		const selectedUser = (position: number) => { const entry = this.#entry(position); return !!entry && isPreservationUser(entry) && ranges.some(({ range, kind }) => included(position, range, kind)); };
-		const selectedAtoms = new Map<number, readonly string[]>();
-		const nonUserIds = new Set<string>();
-		let nonUserTokens = 0;
-		for (const [position, members] of this.#manualAtoms) if (included(position, always, "always")) {
-			selectedAtoms.set(position, members);
-			for (const id of members) { nonUserIds.add(id); nonUserTokens += this.#tokenizer.countMessage(this.#entry(this.#positions.get(id)!)!.message); }
-		}
+		const userAlways = this.#index.measureUnion([{ range: always, kind: "always" }], h, enabled);
+		const totalN = { count: always.count - userAlways.count, tokens: always.tokens - userAlways.tokens };
 		const owner = this;
 		const membership = (size: number, has: (id: string) => boolean, values: () => IterableIterator<string>): PreservationMembership => ({ size, has, values, [Symbol.iterator]: values });
 		const P = membership(totalP.count, id => { owner.#assertCurrent(); const position = owner.#positions.get(id); return position !== undefined && selectedUser(position); }, function* () {
@@ -543,14 +625,33 @@ export class PreservedMessageQuery {
 			}
 		});
 		const hard = membership(H.count, id => { owner.#assertCurrent(); const position = owner.#positions.get(id); return position !== undefined && included(position, H, "raw"); }, function* () { owner.#assertCurrent(); for (const position of owner.#index.iterate(H, "raw", h, enabled)) yield owner.#entry(position)!.id; });
-		const N = membership(nonUserIds.size, id => { owner.#assertCurrent(); return nonUserIds.has(id); }, function* () { owner.#assertCurrent(); const positions = [...nonUserIds].map(id => owner.#positions.get(id)!).sort((a, b) => a - b); for (const position of positions) yield owner.#entry(position)!.id; });
+		const N = membership(totalN.count, id => {
+			owner.#assertCurrent();
+			const position = owner.#positions.get(owner.#groups.get(id)?.[0] ?? id);
+			return position !== undefined && owner.#manualAtoms.has(position) && included(position, always, "always");
+		}, function* () {
+			owner.#assertCurrent();
+			const positions: number[] = [];
+			for (const anchor of owner.#index.iterate(always, "always", h, enabled)) for (const id of owner.#manualAtoms.get(anchor) ?? []) positions.push(owner.#positions.get(id)!);
+			positions.sort((a, b) => a - b);
+			for (const position of positions) yield owner.#entry(position)!.id;
+		});
 		const candidate = (id: string): PreservationCandidate | undefined => {
 			owner.#assertCurrent();
 			const position = owner.#positions.get(id);
 			if (position === undefined || (!P.has(id) && !N.has(id))) return undefined;
 			return preservationCandidate(owner.#entry(position)!, owner.#policy, owner.#tokenizer, N.has(id) || hard.has(id) || owner.#overrides.get(id) === "keep");
 		};
-		return { P, N, H: hard, quota: { P: totalP, N: { count: nonUserIds.size, tokens: nonUserTokens }, H, first, recent, always },
+		return { P, N, H: hard, quota: { P: totalP, N: totalN, H, first, recent, always },
+			positions(id) {
+				owner.#assertCurrent();
+				const position = owner.#positions.get(id);
+				if (position === undefined) return {};
+				const rank: { first?: number; recent?: number } = {};
+				if (included(position, first, "eligible")) rank.first = owner.#index.measureUnion([{ range: { ...first, end: position + 1 }, kind: "eligible" }], h, enabled).count;
+				if (included(position, recent, "eligible")) rank.recent = owner.#index.measureUnion([{ range: { ...recent, start: position }, kind: "eligible" }], h, enabled).count;
+				return rank;
+			},
 			reasons(id) {
 				owner.#assertCurrent();
 				const position = owner.#positions.get(owner.#groups.get(id)?.[0] ?? id);
@@ -567,10 +668,34 @@ export class PreservedMessageQuery {
 			},
 			*nonUserAtoms() {
 				owner.#assertCurrent();
-				for (const [position, memberIds] of [...selectedAtoms].sort(([a], [b]) => a - b)) {
+				for (const position of owner.#index.iterate(always, "always", h, enabled)) {
+					const memberIds = owner.#manualAtoms.get(position);
+					if (!memberIds) continue;
 					const entries = memberIds.map(id => owner.#entry(owner.#positions.get(id)!)!);
 					yield { id: owner.#entry(position)!.id, memberIds, entries, quotaTokens: entries.reduce((sum, entry) => sum + owner.#tokenizer.countMessage(entry.message), 0) };
 				}
 			} };
 	}
+}
+
+/** Successful active-branch facts for backfill, without pricing sources or constructing UI rows. */
+export async function readPreservedUserMessageClassificationMasks(
+	entries: readonly SessionEntry[], options: PreservationBuildOptions,
+): Promise<ReadonlyMap<string, number> | undefined> {
+	let deadline = performance.now() + (options.sliceMs ?? 4);
+	const users = new Set<string>();
+	const masks = new Map<string, number>();
+	for (const entry of entries) {
+		if (entry.type === "reset_boundary") { users.clear(); masks.clear(); }
+		else if (isPreservationUser(entry)) users.add(entry.id);
+		else if (entry.type === "custom" && entry.customType === USER_MESSAGE_CLASSIFICATION_CUSTOM_TYPE) {
+			for (const { id, mask } of unpackPreservedUserMessageClassifications(entry.data)) if (users.has(id)) masks.set(id, mask);
+		}
+		if (performance.now() >= deadline) {
+			await (options.yieldControl?.() ?? new Promise<void>(resolve => setTimeout(resolve, 0)));
+			if (!options.isCurrent()) return undefined;
+			deadline = performance.now() + (options.sliceMs ?? 4);
+		}
+	}
+	return options.isCurrent() ? masks : undefined;
 }

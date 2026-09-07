@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { Settings } from "../src/config/settings";
+import { AgentStorage } from "../src/session/agent-storage";
 import {
 	compilePreservedUserMessageRegexRules,
 	decodeCompactionMessageOverride,
@@ -10,6 +11,8 @@ import {
 	migrateLegacyCompactionPin,
 	packPreservedUserMessageClassifications,
 	parsePreservationLimit,
+	parseCompactionOverridePrompt,
+	restoreCompactionOverridePrompt,
 	readPreservationPolicySettings,
 	serializePreservationLimit,
 	unpackPreservedUserMessageClassifications,
@@ -18,6 +21,15 @@ import {
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
 describe("preservation limits and durable codecs", () => {
+	it("parses only one semantic prefix and distinguishes empty commands from ordinary text", () => {
+		expect(parseCompactionOverridePrompt("/keep /once literal")).toEqual({ text: "/once literal", compactionOverride: "keep" });
+		expect(parseCompactionOverridePrompt("/once: line one\nline two")).toEqual({ text: "line one\nline two", compactionOverride: "exclude" });
+		expect(parseCompactionOverridePrompt("/keep")).toEqual({ text: "", compactionOverride: "keep" });
+		expect(parseCompactionOverridePrompt("/once:   ")).toEqual({ text: "", compactionOverride: "exclude" });
+		expect(parseCompactionOverridePrompt("/keeper body")).toBeUndefined();
+		expect(restoreCompactionOverridePrompt("/once literal", "keep")).toBe("/keep /once literal");
+	});
+
 	it("distinguishes disabled, unbounded, and finite zero without accepting invalid canonical counts", () => {
 		expect(parsePreservationLimit("off")).toEqual({ mode: "off" });
 		expect(parsePreservationLimit("all")).toEqual({ mode: "all" });
@@ -30,6 +42,7 @@ describe("preservation limits and durable codecs", () => {
 		expect(parsePreservationLimit("tokens:NaN")).toBeUndefined();
 		expect(serializePreservationLimit({ mode: "tokens", value: Number.MAX_SAFE_INTEGER })).toBe("tokens:9007199254740991");
 		expect(serializePreservationLimit({ mode: "context-percent", value: 12.5 })).toBe("context-percent:12.5");
+		expect(parsePreservationLimit(serializePreservationLimit({ mode: "context-percent", value: 1e-7 }))).toEqual({ mode: "context-percent", value: 1e-7 });
 	});
 
 	it("preserves successful all-false and eleven-bit tags but rejects the entire malformed record", () => {
@@ -73,6 +86,7 @@ describe("effective layered preservation migration", () => {
 	});
 	afterEach(async () => {
 		restoreSettingsTestState(state);
+		AgentStorage.close();
 		await temp.remove();
 	});
 
@@ -127,5 +141,45 @@ describe("effective layered preservation migration", () => {
 		expect(policy.enabled).toBe(false);
 		expect(policy.classifier).toBe(true);
 		expect(policy.categoryActions.longTermRule).toBe("keep");
+	});
+
+	it("materializes the effective legacy pair on edit without intermediate policy or repeated migration writes", async () => {
+		const configPath = `${agentDir}/config.yml`;
+		await Bun.write(configPath, YAML.stringify({ compaction: { keepFirstNMessages: 0, keepLastNMessages: 0 }, setupVersion: 7 }));
+		const settings = await Settings.loadIsolated({ cwd, agentDir });
+		const observed: string[][] = [];
+		const unsubscribe = settings.onEffectiveChange(path => {
+			if (path.startsWith("compaction.keep")) observed.push([settings.get("compaction.keepFirstLimit"), settings.get("compaction.keepLastLimit")]);
+		});
+		settings.set("compaction.keepFirstLimit", "messages:3");
+		expect(observed).toEqual([["messages:3", "all"]]);
+		await settings.flush();
+		const saved = await Bun.file(configPath).text();
+		expect(YAML.parse(saved)).toMatchObject({ compaction: { keepFirstLimit: "messages:3", keepLastLimit: "all" }, setupVersion: 7 });
+		expect((YAML.parse(saved) as {compaction: Record<string, unknown>}).compaction.keepFirstNMessages).toBeUndefined();
+		expect((YAML.parse(saved) as {compaction: Record<string, unknown>}).compaction.keepLastNMessages).toBeUndefined();
+		await settings.reloadFromDisk();
+		await settings.flush();
+		expect(await Bun.file(configPath).text()).toBe(saved);
+		expect(observed).toEqual([["messages:3", "all"]]);
+		unsubscribe();
+	});
+
+	it("notifies instance policy observers after external reload and project-scope changes", async () => {
+		const configPath = `${agentDir}/config.yml`;
+		await Bun.write(configPath, YAML.stringify({ compaction: { keepFirstLimit: "all", keepUserMessagesLlmModel: "@tiny" } }));
+		const settings = await Settings.loadIsolated({ cwd, agentDir });
+		const observed: Array<[string, unknown]> = [];
+		const unsubscribe = settings.onEffectiveChange((path, value) => observed.push([path, value]));
+		await Bun.write(configPath, YAML.stringify({ compaction: { keepFirstLimit: "off", keepUserMessagesLlmModel: "@smol" } }));
+		await settings.reloadFromDisk();
+		expect(observed).toContainEqual(["compaction.keepFirstLimit", "off"]);
+		expect(observed).toContainEqual(["compaction.keepUserMessagesLlmModel", "@smol"]);
+		const nextCwd = temp.join("other-project");
+		fs.mkdirSync(getProjectAgentDir(nextCwd), { recursive: true });
+		await Bun.write(`${getProjectAgentDir(nextCwd)}/config.yml`, YAML.stringify({ compaction: { keepFirstLimit: "tokens:0" } }));
+		await settings.reloadForCwd(nextCwd);
+		expect(observed).toContainEqual(["compaction.keepFirstLimit", "tokens:0"]);
+		unsubscribe();
 	});
 });

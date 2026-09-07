@@ -177,6 +177,10 @@ const SETTING_PATH_SEGMENTS: Record<SettingPath, readonly string[]> = Object.fro
 	(Object.keys(SETTINGS_SCHEMA) as SettingPath[]).map(settingPath => [settingPath, settingPath.split(".")]),
 ) as unknown as Record<SettingPath, readonly string[]>;
 
+const PRESERVATION_SETTING_PATHS = (Object.keys(SETTINGS_SCHEMA) as SettingPath[]).filter(path =>
+	path.startsWith("compaction.keep") || path === "compaction.pruneLongUserMessages" || path === "compaction.maxTokensPerUserMessage",
+);
+
 /**
  * Set a nested value in an object by path segments.
  * Creates intermediate objects as needed.
@@ -400,6 +404,13 @@ function updateCanonicalPreservationLimitOperation(
 	);
 	if (present) {
 		operations.push({ leaf: spec.canonicalLeaf, kind: "canonical", value });
+		const compaction = isRecord(raw.compaction) ? raw.compaction : undefined;
+		if (compaction) {
+			delete compaction[spec.countLeaf];
+			delete compaction[spec.percentLeaf];
+		}
+		delete raw[`compaction.${spec.countLeaf}`];
+		delete raw[`compaction.${spec.percentLeaf}`];
 	} else {
 		const compaction = isRecord(raw.compaction) ? raw.compaction : undefined;
 		const count = readLayerSettingValue(raw, compaction, spec.countLeaf);
@@ -460,11 +471,25 @@ function applyPreservationLimitMigrationOperations(raw: RawSettings): void {
 	raw.compaction = compaction;
 }
 
+/** Whether either effective edge still uses the old paired message-zero convention. */
+function hasLegacyPreservationPair(raw: RawSettings): boolean {
+	const operations = preservationLimitMigrationOperations.get(raw);
+	if (!operations) return false;
+	for (const leaf of ["keepFirstLimit", "keepLastLimit"] as const) {
+		for (let index = operations.length - 1; index >= 0; index--) {
+			const operation = operations[index];
+			if (operation.leaf !== leaf) continue;
+			if (operation.kind === "legacy" || operation.value === "messages:0") return true;
+			break;
+		}
+	}
+	return false;
+}
+
 /** Normalize the effective legacy pair, never each contributing layer. */
 function normalizeEffectivePreservationLimits(raw: RawSettings): void {
 	const compaction = isRecord(raw.compaction) ? { ...raw.compaction } : {};
-	const legacy = compaction.keepFirstLimit === "messages:0" || compaction.keepLastLimit === "messages:0" ||
-		preservationLimitMigrationOperations.get(raw)?.some(operation => operation.kind === "legacy" && operation.leaf !== "keepRecentUserMessagesLimit");
+	const legacy = hasLegacyPreservationPair(raw);
 	const first = compaction.keepFirstLimit ?? (legacy ? "messages:0" : "all");
 	const recent = compaction.keepLastLimit ?? (legacy ? "messages:0" : "all");
 	const bothLegacyZero = first === "messages:0" && recent === "messages:0";
@@ -838,6 +863,15 @@ export class Settings {
 	 */
 	set<P extends SettingPath>(path: P, value: SettingValue<P>): void {
 		const prev = this.get(path);
+		// The first explicit legacy edit saves both effective edges together; opening settings writes nothing.
+		if ((path === "compaction.keepFirstLimit" || path === "compaction.keepLastLimit") && hasLegacyPreservationPair(this.#merged)) {
+			const counterpart = path === "compaction.keepFirstLimit" ? "compaction.keepLastLimit" : "compaction.keepFirstLimit";
+			const counterpartValue = this.get(counterpart);
+			this.#captureGlobalMutation(counterpart, this.#modifiedPathMutations, mutationComparableSettingValue(this.#global, counterpart));
+			setByPath(this.#global, counterpart.split("."), counterpartValue);
+			updateCanonicalPreservationLimitOperation(this.#global, counterpart, counterpartValue, true);
+			this.#modified.add(counterpart);
+		}
 		const segments = path.split(".");
 		this.#captureGlobalMutation(path, this.#modifiedPathMutations, mutationComparableSettingValue(this.#global, path));
 		setByPath(this.#global, segments, value);
@@ -1027,6 +1061,7 @@ export class Settings {
 				sessionAccent: this.get("statusLine.sessionAccent"),
 			};
 			const previousCodeModeValues = this.#codeModeSignalSnapshot();
+			const previousPreservationValues = PRESERVATION_SETTING_PATHS.map(path => this.get(path));
 			const previousHookValues = new Map<SettingPath, unknown>();
 			for (const key of Object.keys(SETTING_HOOKS) as SettingPath[]) {
 				previousHookValues.set(key, this.get(key));
@@ -1064,6 +1099,7 @@ export class Settings {
 				);
 			}
 			this.#fireCodeModeChangeIfNeeded(previousCodeModeValues);
+			this.#firePreservationChanges(previousPreservationValues);
 			for (const [key, previous] of previousHookValues) {
 				const next = this.get(key);
 				if (!Bun.deepEquals(next, previous)) {
@@ -1093,6 +1129,7 @@ export class Settings {
 		this.#restoreRuntimeModelRoleOverrides();
 		const prevModelRoles = this.get("modelRoles");
 		const prevCodeModeValues = this.#codeModeSignalSnapshot();
+		const previousPreservationValues = PRESERVATION_SETTING_PATHS.map(path => this.get(path));
 		this.#cwd = normalized;
 		if (this.#persist) {
 			this.#project = await this.#loadProjectSettings();
@@ -1100,6 +1137,7 @@ export class Settings {
 		this.#rebuildMerged();
 		this.#fireEffectiveSettingChanged("modelRoles", this.get("modelRoles"), prevModelRoles);
 		this.#fireCodeModeChangeIfNeeded(prevCodeModeValues);
+		this.#firePreservationChanges(previousPreservationValues);
 		this.#fireAllHooks();
 	}
 
@@ -2897,6 +2935,7 @@ export class Settings {
 			sessionAccent: this.get("statusLine.sessionAccent"),
 		};
 		const previousCodeModeValues = this.#codeModeSignalSnapshot();
+		const previousPreservationValues = PRESERVATION_SETTING_PATHS.map(path => this.get(path));
 		const previousHookValues = new Map<SettingPath, unknown>();
 		for (const key of Object.keys(SETTING_HOOKS) as SettingPath[]) {
 			previousHookValues.set(key, this.get(key));
@@ -3058,6 +3097,7 @@ export class Settings {
 			);
 		}
 		this.#fireCodeModeChangeIfNeeded(previousCodeModeValues);
+		this.#firePreservationChanges(previousPreservationValues);
 		for (const [key, previous] of previousHookValues) {
 			const next = this.get(key);
 			if (!Bun.deepEquals(next, previous)) {
@@ -3159,6 +3199,15 @@ export class Settings {
 				const value = this.get(key);
 				hook(value, value);
 			}
+		}
+	}
+
+	/** Publish reload/save-driven policy changes through the same instance-owned observer as explicit edits. */
+	#firePreservationChanges(previous: unknown[]): void {
+		for (let index = 0; index < PRESERVATION_SETTING_PATHS.length; index++) {
+			const path = PRESERVATION_SETTING_PATHS[index];
+			const next = this.get(path);
+			if (!Bun.deepEquals(next, previous[index])) this.#fireEffectiveSettingChanged(path, next, previous[index]);
 		}
 	}
 
