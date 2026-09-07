@@ -17,14 +17,13 @@ import {
 	CompactionCancelledError,
 	type CompactionDetails,
 	type CompactionPreparation,
-	type CompactionSourceSelection,
 	type CompactionResult,
+	type CompactionSourceSelection,
 	calculateContextTokens,
 	collectShakeRegions,
 	compact,
 	compactionContextTokens,
 	computeFileLists,
-	createCompactionSummaryMessage,
 	DEFAULT_SHAKE_CONFIG,
 	type CompactionSettings as EngineCompactionSettings,
 	effectiveReserveTokens,
@@ -49,7 +48,7 @@ import {
 	pruneToolOutputs,
 	readToolSupersedeKey,
 } from "@oh-my-pi/pi-agent-core/compaction/pruning";
-import type { SourceBlockRewrite, SourceRewrite } from "@oh-my-pi/pi-agent-core/compaction/source";
+import { getCompactionSourceRepresentation, type SourceBlockRewrite, type SourceRewrite } from "@oh-my-pi/pi-agent-core/compaction/source";
 import type { ProtectedToolMatcher } from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
 import type { AssistantMessage, CodexCompactionContext, Message, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
@@ -88,7 +87,7 @@ import {
 	resolveRoleModelFull,
 } from "./role-models";
 import type { SessionContext } from "./session-context";
-import { getLatestCompactionEntry, getOpenAiRemoteCompactionPayload } from "./session-context";
+import { buildSessionContext, getLatestCompactionEntry, getOpenAiRemoteCompactionPayload } from "./session-context";
 import type { CompactionEntry, SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 
@@ -289,11 +288,12 @@ function mergeLlmCompactionPreserveData(
 function handoffSummaryFromDocument(
 	document: string,
 	preparation: CompactionPreparation,
-): { summary: string; details: CompactionDetails } {
+): { summary: string; details: CompactionDetails; preserveData: Record<string, unknown> | undefined } {
 	const { readFiles, modifiedFiles } = computeFileLists(preparation.fileOps);
 	return {
 		summary: upsertFileOperations(document, readFiles, modifiedFiles, preparation.fileOps.read),
 		details: { readFiles, modifiedFiles },
+		preserveData: preparation.sourcePreserveData,
 	};
 }
 
@@ -1081,14 +1081,14 @@ export class SessionMaintenance {
 						ctxWindow > 0
 							? ctxWindow - effectiveReserveTokens(ctxWindow, effectiveSettings)
 							: Number.POSITIVE_INFINITY;
-					const projected = this.#projectSnapcompactContextTokens(preparation, snapcompactResult);
+					const projected = this.#projectSnapcompactContextTokens(snapcompactResult);
 					// No-reduction decision runs in the encrypted-reasoning-excluded domain
 					// on both sides: opaque replay signatures (thinkingSignature /
 					// redactedThinking) have no trustworthy local token price, so counting
 					// them in the archived region's baseline while the imaged projection
 					// drops them lets an inflating result pass the guard (#10716). The
 					// window-fit check below keeps the conservative `projected`.
-					const projectedForReduction = this.#projectSnapcompactContextTokens(preparation, snapcompactResult, {
+					const projectedForReduction = this.#projectSnapcompactContextTokens(snapcompactResult, {
 						excludeEncryptedReasoning: true,
 					});
 					const reductionBaseline = this.#projectPreSnapcompactContextTokens(preparation);
@@ -1343,7 +1343,7 @@ export class SessionMaintenance {
 		this.#captureCompactionSources(operation, entries, preparation);
 		const result = await this.#host.generateHandoffDocument(customInstructions, options);
 		if (!result) return undefined;
-		const { summary, details } = handoffSummaryFromDocument(result.document, preparation);
+		const { summary, details, preserveData } = handoffSummaryFromDocument(result.document, preparation);
 		const installed = await this.#commitCompactionEntry({
 			operation,
 			summary,
@@ -1352,7 +1352,7 @@ export class SessionMaintenance {
 			tokensBefore: preparation.tokensBefore,
 			details,
 			fromExtension: false,
-			preserveData: undefined,
+			preserveData,
 			method: "handoff",
 			codexCompaction: undefined,
 			advisorResetReason: "handoff",
@@ -1487,7 +1487,7 @@ export class SessionMaintenance {
 				signal,
 			});
 			if (!generated) return clear();
-			const { summary, details } = handoffSummaryFromDocument(generated.document, preparation);
+			const { summary, details, preserveData } = handoffSummaryFromDocument(generated.document, preparation);
 			armed = {
 				operation,
 				result: {
@@ -1496,6 +1496,7 @@ export class SessionMaintenance {
 					firstKeptEntryId: preparation.firstKeptEntryId,
 					tokensBefore: preparation.tokensBefore,
 					details,
+					preserveData,
 				},
 				action: "handoff",
 				method,
@@ -2566,6 +2567,26 @@ export class SessionMaintenance {
 		throw this.#buildCompactionAuthError();
 	}
 
+	/** Only a real compaction upgrades an unmapped archive from durable originals. */
+	#prepareSourceCompaction(
+		entries: SessionEntry[],
+		settings: EngineCompactionSettings,
+		model: Model | undefined,
+		selection: CompactionSourceSelection,
+	): CompactionPreparation | undefined {
+		const previous = getLatestCompactionEntry(entries);
+		const legacyArchive =
+			snapcompact.getPreservedArchive(previous?.preserveData) &&
+			!getCompactionSourceRepresentation(previous?.preserveData);
+		return prepareCompaction(
+			entries,
+			settings,
+			model,
+			this.#tokenizer,
+			legacyArchive ? { ...selection, rematerializeOriginals: true } : selection,
+		);
+	}
+
 	async #prepareCompactionFromHooks(
 		preparation: CompactionPreparation,
 		hookCompaction: CompactionResult | undefined,
@@ -2728,62 +2749,40 @@ export class SessionMaintenance {
 	 * window or should fall back to an LLM summary.
 	 */
 	#projectSnapcompactContextTokens(
-		preparation: CompactionPreparation,
 		result: snapcompact.CompactionResult,
 		options?: MessageCountOptions,
 	): number {
-		const archive = snapcompact.getPreservedArchive(result.preserveData);
-		const blocks = archive
-			? snapcompact.historyBlocks(archive, { maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET })
-			: undefined;
-		const summaryMessage = createCompactionSummaryMessage(
-			result.summary,
-			result.tokensBefore,
-			new Date().toISOString(),
-			{
-				shortSummary: result.shortSummary,
-				blocks,
-			},
-		);
-		let tokens =
-			computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer) +
-			this.#tokenizer.countMessage(summaryMessage);
-		tokens += this.#tokenizer.countMessages(preparation.recentMessages, options);
-		return tokens;
+		return this.#projectCompactedContextTokens(result, options);
 	}
 
 	/**
-	 * Estimated context tokens after a compaction commit: fixed non-message
-	 * overhead + the summary message (with any snapcompact frames re-attached)
-	 * + every message from `firstKeptEntryId` to the branch leaf. Mirrors the
-	 * post-commit context rebuild; persisted as `tokensAfter` on the entry so
-	 * the transcript divider can show the before → after amounts.
+	 * Measure the same prospective reconstruction used after commit, including
+	 * sparse source originals, archive layout, and provider replacement history.
 	 */
-	#projectCompactedContextTokens(args: {
-		summary: string;
-		shortSummary: string | undefined;
-		tokensBefore: number;
-		firstKeptEntryId: string;
-		preserveData: Record<string, unknown> | undefined;
-	}): number {
-		const archive = snapcompact.getPreservedArchive(args.preserveData);
-		const blocks = archive
-			? snapcompact.historyBlocks(archive, { maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET })
-			: undefined;
-		const summaryMessage = createCompactionSummaryMessage(args.summary, args.tokensBefore, new Date().toISOString(), {
-			shortSummary: args.shortSummary,
-			blocks,
-		});
-		let tokens =
+	#projectCompactedContextTokens(
+		args: {
+			summary: string;
+			shortSummary?: string;
+			tokensBefore: number;
+			firstKeptEntryId: string;
+			preserveData?: Record<string, unknown>;
+			providerReplayThroughEntryId?: string;
+		},
+		options?: MessageCountOptions,
+	): number {
+		const branch = this.#host.sessionManager.getBranch();
+		const prospective: CompactionEntry = {
+			...args,
+			type: "compaction",
+			id: Snowflake.next(),
+			parentId: branch.at(-1)?.id ?? null,
+			timestamp: new Date().toISOString(),
+		};
+		const context = buildSessionContext([...branch, prospective]);
+		return (
 			computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer) +
-			this.#tokenizer.countMessage(summaryMessage);
-		let inKeptRegion = false;
-		for (const entry of this.#host.sessionManager.getBranch()) {
-			if (entry.id === args.firstKeptEntryId) inKeptRegion = true;
-			if (!inKeptRegion) continue;
-			if (entry.type === "message") tokens += this.#tokenizer.countMessage(entry.message);
-		}
-		return tokens;
+			this.#tokenizer.countMessages(context.messages, options)
+		);
 	}
 
 	/**
@@ -3668,13 +3667,12 @@ export class SessionMaintenance {
 								ctxWindow > 0
 									? ctxWindow - effectiveReserveTokens(ctxWindow, effectiveSettings)
 									: Number.POSITIVE_INFINITY;
-							const projected = this.#projectSnapcompactContextTokens(preparation, snapcompactResult);
+							const projected = this.#projectSnapcompactContextTokens(snapcompactResult);
 							// Reduction check in the encrypted-reasoning-excluded domain so opaque
 							// replay signatures cannot inflate the removable baseline (#10716);
 							// `triggerContextTokens` is already an encrypted-excluded stored
 							// estimate, and `#projectPreSnapcompactContextTokens` now matches it.
 							const projectedForReduction = this.#projectSnapcompactContextTokens(
-								preparation,
 								snapcompactResult,
 								{
 									excludeEncryptedReasoning: true,
@@ -3745,7 +3743,7 @@ export class SessionMaintenance {
 				firstKeptEntryId = preparation.firstKeptEntryId;
 				tokensBefore = preparation.tokensBefore;
 				details = handoffSummary.details;
-				preserveData = compactionPrep.preserveData;
+				preserveData = mergeLlmCompactionPreserveData(compactionPrep.preserveData, handoffSummary.preserveData);
 			} else if (snapcompactResult) {
 				summary = snapcompactResult.summary;
 				shortSummary = snapcompactResult.shortSummary;
