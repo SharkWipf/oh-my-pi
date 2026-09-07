@@ -1,6 +1,6 @@
 import { type FluentType, type } from "@oh-my-pi/omptype";
 import type { SourceRewrite } from "../compaction-source";
-import type { ImageContent, Message } from "../types";
+import type { ImageContent, Message, UserMessage } from "../types";
 
 export interface NativeSourcePart {
 	entryId: string;
@@ -195,7 +195,11 @@ export function transferMessageSourceOrigin<T extends Message>(from: Message, to
 	return setSourceOrigin(to, combineContentSourceOrigins(to.content));
 }
 
-export function bindMessageSource(message: Message, entryId: string, order: number): void {
+export function bindMessageSource(
+	message: Message | { role: "custom"; content: UserMessage["content"] },
+	entryId: string,
+	order: number,
+): void {
 	sourceBindingGeneration++;
 	const parts: NativeSourcePart[] = [];
 	const bind = (block: object, blockIndex: number | string, text?: string, image = false): void => {
