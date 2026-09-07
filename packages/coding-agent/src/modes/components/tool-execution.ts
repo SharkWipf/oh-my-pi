@@ -67,7 +67,8 @@ function imageBlocksFromDetails(details: unknown): ToolImageBlock[] {
 	);
 }
 
-function displaceableToolName(
+/** Shared by concrete tool blocks and source-backed transcript replay descriptors. */
+export function displaceableToolName(
 	toolName: string,
 	result: { details?: unknown; isError?: boolean },
 	isPartial: boolean,

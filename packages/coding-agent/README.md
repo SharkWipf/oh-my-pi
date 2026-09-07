@@ -13,6 +13,12 @@ Package-specific references:
 - [MCP server/tool authoring](../../docs/mcp-server-tool-authoring.md)
 - [DEVELOPMENT](./DEVELOPMENT.md)
 
+## Rewind viewport
+
+With an empty editor, press Escape twice to open rewind at the recent tail. Up/Down choose rendered turns; Left/Right move between sibling branches at a fork or between user turns otherwise. Enter rewinds to the outlined source entry; Escape cancels. Home/End, PageUp/PageDown, and the mouse wheel inspect history without changing the selected rewind destination.
+
+Rewind uses journal-entry anchors rather than guessed global row numbers. Edge arrows indicate more history; cold history remains accessible without pre-rendering it. The first open indexes source descriptors cooperatively with a cancellable loading view. Only demanded transcript components are instantiated, and offscreen components are released. Reopening unchanged history reuses the source index and bounded last-visible window; source rewrites, branch changes, and relevant presentation changes invalidate that view. A single large message or grouped tool card still costs the work required by its own renderer.
+
 ## Memory backends
 
 The agent supports three mutually-exclusive memory backends, selected via the `memory.backend` setting (Settings → Memory tab, or `~/.omp/config.yml`):
