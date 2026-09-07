@@ -181,14 +181,7 @@ interface NonMessageTokenCache {
 	// so instance identity doubles as the encoding key.
 	tokenizerRef: Tokenizer;
 	tokens: number | undefined;
-	breakdown:
-		| {
-				skillsTokens: number;
-				toolsTokens: number;
-				systemContextTokens: number;
-				systemPromptTokens: number;
-		  }
-		| undefined;
+	breakdown: ReturnType<typeof computeNonMessageBreakdown> | undefined;
 }
 
 const NON_MESSAGE_TOKEN_CACHE = Symbol("non-message-token-cache");
@@ -243,19 +236,29 @@ export function computeNonMessageBreakdown(
 	toolsTokens: number;
 	systemContextTokens: number;
 	systemPromptTokens: number;
+	/** Source structure matching these categories, not final provider wire block counts. */
+	counts: { systemPrompt: number; tools: number; context: number; skills: number };
 } {
 	const entry = nonMessageTokenCacheEntry(session, tokenizer);
 	if (entry.breakdown) return entry.breakdown;
 	const tools = session.agent?.state?.tools ?? EMPTY_TOOLS;
-	const skillsTokens =
-		session.settings?.get("skillful") === false
-			? 0
-			: estimateSkillsTokens(renderedSkills(session.skills ?? EMPTY_SKILLS, tools), tokenizer);
+	const visibleSkills = session.settings?.get("skillful") === false
+		? EMPTY_SKILLS
+		: renderedSkills(session.skills ?? EMPTY_SKILLS, tools);
+	const skillsTokens = visibleSkills.length === 0 ? 0 : estimateSkillsTokens(visibleSkills, tokenizer);
 	const toolsTokens = estimateToolSchemaTokens(tools, tokenizer);
 	const systemPromptParts = session.systemPrompt ?? EMPTY_STRING_PARTS;
 	const systemContextTokens = tokenizer.countTokens(Array.from(systemPromptParts.slice(1), part => part ?? ""));
 	const systemPromptTokens = Math.max(0, tokenizer.countTokens(systemPromptParts[0] ?? "") - skillsTokens);
-	const breakdown = { skillsTokens, toolsTokens, systemContextTokens, systemPromptTokens };
+	const breakdown = {
+		skillsTokens, toolsTokens, systemContextTokens, systemPromptTokens,
+		counts: {
+			systemPrompt: systemPromptParts.length > 0 ? 1 : 0,
+			tools: tools.length,
+			context: Math.max(0, systemPromptParts.length - 1),
+			skills: visibleSkills.length,
+		},
+	};
 	entry.breakdown = breakdown;
 	return breakdown;
 }
