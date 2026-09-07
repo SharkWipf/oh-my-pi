@@ -1,6 +1,6 @@
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
 import type { Context, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { resolveModelOverride } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
@@ -58,6 +58,8 @@ export interface SessionMessageClassifierHost {
 	readMasks(entries: readonly SessionEntry[], isCurrent: () => boolean): Promise<ReadonlyMap<string, number> | undefined>;
 }
 interface Job {
+	targetId?: string;
+	startPromise?: Promise<string>;
 	epoch: number;
 	validationLeafId: string | null;
 	status: MessageClassificationJobStatus;
@@ -66,6 +68,7 @@ interface Job {
 	controller: AbortController;
 	model: Model;
 	iterator: Iterator<ClassifierTarget> | AsyncIterator<ClassifierTarget>;
+	sharedResults: Set<Promise<void>>;
 	finishedScanning: boolean;
 }
 interface Work {
@@ -73,6 +76,7 @@ interface Work {
 	entryId: string;
 	controller: AbortController;
 	input: PreservedUserMessageClassifierInput;
+	completion: { promise: Promise<boolean>; resolve: (saved: boolean) => void };
 }
 interface ClassifierTarget { entryId: string; input: PreservedUserMessageClassifierInput }
 interface ClassifierScope { entries: SessionEntry[]; boundaryId: string | null; anchorId: string | null; sessionId: string; generation: number; epoch: number }
@@ -83,6 +87,7 @@ export class SessionMessageClassifier {
 	readonly #jobs = new Map<string, Job>();
 	readonly #rows = new Map<string, MessageClassificationRowStatus>();
 	readonly #pending = new Map<string, Work>();
+	readonly #starts = new Map<string, Promise<string>>();
 	readonly #listeners = new Set<MessageClassificationListener>();
 	readonly #live = new Set<string>();
 	#liveActive = false;
@@ -183,13 +188,20 @@ export class SessionMessageClassifier {
 		return false;
 	}
 
-	async start(entryId: string, kind: "selected" | "live" = "selected"): Promise<string> {
+	start(entryId: string, kind: "selected" | "live" = "selected"): Promise<string> {
+		const starting = this.#starts.get(entryId);
+		if (starting) return starting;
 		const existing = this.#pending.get(entryId);
-		if (existing && this.#current(existing.job)) return existing.job.status.id;
-		const scope = await this.#scope(entryId);
-		const input = this.#input(entryId);
-		if (!input) throw new Error("Only real user source messages can be classified.");
-		return this.#start(kind, 1, scope, () => [{ entryId, input }][Symbol.iterator]());
+		if (existing && this.#current(existing.job)) return Promise.resolve(existing.job.status.id);
+		const start = (async () => {
+			const scope = await this.#scope(entryId);
+			const input = this.#input(entryId);
+			if (!input) throw new Error("Only real user source messages can be classified.");
+			return this.#start(kind, 1, scope, () => [{ entryId, input }][Symbol.iterator](), entryId);
+		})();
+		this.#starts.set(entryId, start);
+		void start.catch(() => { if (this.#starts.get(entryId) === start) this.#starts.delete(entryId); });
+		return start;
 	}
 	async startBackfill(workers: number): Promise<string> {
 		if (!Number.isSafeInteger(workers) || workers <= 0) throw new Error("Classifier workers must be a positive integer.");
@@ -212,10 +224,13 @@ export class SessionMessageClassifier {
 		}
 		return this.#start("backfill", workers, scope, missing);
 	}
-	async #start(kind: Job["status"]["kind"], workers: number, scope: ClassifierScope, createIterator: (isCurrent: () => boolean) => Job["iterator"]): Promise<string> {
+	async #start(kind: Job["status"]["kind"], workers: number, scope: ClassifierScope, createIterator: (isCurrent: () => boolean) => Job["iterator"], targetId?: string): Promise<string> {
 		if (this.#host.isDisposed()) throw new Error("Session disposed.");
 		const model = this.#resolveModel();
 		const job: Job = {
+			targetId,
+			startPromise: targetId ? this.#starts.get(targetId) : undefined,
+			sharedResults: new Set(),
 			validationLeafId: scope.anchorId, epoch: scope.epoch,
 			status: { id: Bun.randomUUIDv7(), kind, state: "running", sessionId: scope.sessionId,
 				anchorId: scope.anchorId, model: `${model.provider}/${model.id}`, workers,
@@ -225,6 +240,10 @@ export class SessionMessageClassifier {
 		const apiKey = await this.#host.modelRegistry.getApiKey(model, job.status.sessionId, { signal: job.controller.signal });
 		if (!this.#current(job)) throw new Error("Classifier launch interrupted by a session or branch transition.");
 		if (!apiKey) throw new Error(`Classifier credentials unavailable for ${model.provider}. Configure Model.`);
+		// A new explicit/live attempt supersedes the prior settled status, not its durable facts.
+		for (const [id, previous] of this.#jobs) {
+			if (previous.status.kind === kind && previous.status.state !== "running") this.#jobs.delete(id);
+		}
 		this.#jobs.set(job.status.id, job);
 		this.#notify();
 		void this.#launch(job);
@@ -244,10 +263,13 @@ export class SessionMessageClassifier {
 				workers.push(this.#worker(job, work));
 			}
 			await Promise.all(workers);
+			await Promise.all(job.sharedResults);
 			if (job.status.state === "running") job.status.state = job.status.failed ? "failed" : "completed";
 		} catch (error) {
 			if (job.status.state === "running") { job.status.state = "failed"; job.status.error = String(error instanceof Error ? error.message : error); }
 		} finally {
+			if (job.targetId && this.#starts.get(job.targetId) === job.startPromise) this.#starts.delete(job.targetId);
+			job.startPromise = undefined;
 			if (job.status.kind === "live") { this.#liveActive = false; this.drainLive(); }
 			this.#notify();
 		}
@@ -257,9 +279,23 @@ export class SessionMessageClassifier {
 		for (;;) {
 			const next = await job.iterator.next();
 			if (!(await this.#ready(job))) return undefined;
+			if (!this.#current(job)) { this.#cancel(job, "interrupted", "Classifier source scope changed before queueing."); return undefined; }
 			if (next.done) { job.finishedScanning = true; return undefined; }
-			if (this.#pending.has(next.value.entryId)) continue;
-			const work = { job, ...next.value, controller: new AbortController() };
+			const shared = this.#pending.get(next.value.entryId);
+			if (shared) {
+				job.status.queued++;
+				const observed = untilAborted(job.controller.signal, shared.completion.promise).then(saved => {
+					if (!this.#current(job)) return;
+					if (saved && preservedUserMessageClassifierInputsEqual(shared.input, this.#input(shared.entryId))) job.status.saved++;
+					else job.status.failed++;
+				}).catch(() => { if (!job.controller.signal.aborted) job.status.failed++; }).finally(() => {
+					job.sharedResults.delete(observed);
+					job.status.queued--; job.status.completed++; this.#notify();
+				});
+				job.sharedResults.add(observed);
+				continue;
+			}
+			const work: Work = { job, ...next.value, controller: new AbortController(), completion: Promise.withResolvers<boolean>() };
 			this.#pending.set(work.entryId, work);
 			job.status.queued++;
 			this.#rows.set(work.entryId, { entryId: work.entryId, jobId: job.status.id, state: "queued" });
@@ -300,8 +336,8 @@ export class SessionMessageClassifier {
 						sessionId: requestSessionId, promptCacheKey: `${job.status.sessionId}:message-classifier`,
 						preferWebsockets: false, initiatorOverride: "agent", signal, maxTokens,
 					}, job.model);
-					const stream = await this.#host.sideStreamFn(job.model, this.#host.obfuscate(context), options);
-					return stream.result();
+					const stream = await untilAborted(signal, async () => this.#host.sideStreamFn(job.model, this.#host.obfuscate(context), options));
+					return untilAborted(signal, stream.result());
 				},
 			});
 			if (!(await this.#ready(job))) return;
@@ -325,6 +361,7 @@ export class SessionMessageClassifier {
 			}
 		} finally {
 			job.status.running--; job.status.completed++;
+			work.completion.resolve(row.state === "saved");
 			if (this.#pending.get(entryId) === work) this.#pending.delete(entryId);
 			this.#notify([entryId]);
 			if (row.state === "saved" && this.#rows.get(entryId) === row) this.#rows.delete(entryId);
@@ -335,6 +372,7 @@ export class SessionMessageClassifier {
 		if (job.status.state !== "running") return;
 		job.status.state = state; job.status.error = reason;
 		job.controller.abort(new Error(reason));
+		if (job.targetId && this.#starts.get(job.targetId) === job.startPromise) this.#starts.delete(job.targetId);
 		void job.iterator.return?.(); job.finishedScanning = true;
 		const ids: string[] = [];
 		for (const [id, work] of this.#pending) {
@@ -342,6 +380,7 @@ export class SessionMessageClassifier {
 			const row = this.#rows.get(id)!;
 			if (row.state === "queued") job.status.queued--;
 			row.state = state; row.error = reason;
+			work.completion.resolve(false);
 			this.#pending.delete(id); ids.push(id);
 		}
 		this.#notify(ids);
@@ -355,15 +394,19 @@ export class SessionMessageClassifier {
 	interrupt(reason: string): void {
 		this.#epoch++;
 		this.#live.clear();
+		this.#starts.clear();
 		for (const job of this.#jobs.values()) this.#cancel(job, "interrupted", reason);
 	}
 	interruptInputs(ids: readonly string[]): void {
 		for (const id of ids) {
+			this.#starts.delete(id);
 			const work = this.#pending.get(id);
 			if (!work) continue;
 			work.controller.abort(new Error("Classifier source/context changed; retry with current input."));
 			const row = this.#rows.get(id)!;
 			row.state = "interrupted"; row.error = "Source/context changed; explicit retry required.";
+			work.completion.resolve(false);
+			this.#pending.delete(id);
 		}
 		this.#notify(ids);
 	}
@@ -380,7 +423,9 @@ export class SessionMessageClassifier {
 		const entryId = next.value;
 		this.#live.delete(entryId);
 		this.#liveActive = true;
-		void this.start(entryId, "live").catch(error => {
+		void this.start(entryId, "live").then(jobId => {
+			if (this.#jobs.get(jobId)?.status.kind !== "live") { this.#liveActive = false; this.drainLive(); }
+		}).catch(error => {
 			this.#rows.set(entryId, { entryId, jobId: "", state: "failed", error: String(error instanceof Error ? error.message : error) });
 			this.#notify([entryId]);
 			this.#liveActive = false; this.drainLive();
