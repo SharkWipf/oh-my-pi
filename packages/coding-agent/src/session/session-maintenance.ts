@@ -3047,9 +3047,9 @@ export class SessionMaintenance {
 	 *
 	 * Rebuilds the SAME archive locally — no LLM, no network — by re-running
 	 * `snapcompact.compact()` over the entry's carried-forward source text at
-	 * a maxFrames derived from the trigger threshold instead of the window:
-	 * `planArchive` truncates the oldest chars to fit, so the rebuilt entry
-	 * genuinely shrinks. The rebuilt entry keeps the stale entry's
+	 * a maxFrames derived from the trigger threshold instead of the window.
+	 * The retained source stays fixed, so fewer frames may spill more text; the
+	 * prospective context must actually cost less before committing. The entry keeps
 	 * `firstKeptEntryId`, so the kept tail is untouched, and persisting
 	 * through `appendCompaction()` lets the write-time superseded-compaction
 	 * elision drop the stale frame payload from the JSONL automatically.
@@ -3173,6 +3173,9 @@ export class SessionMaintenance {
 		if (signal.aborted) return undefined;
 		const rebuilt = snapcompact.getPreservedArchive(result.preserveData);
 		if (!rebuilt || rebuilt.frames.length >= archive.frames.length) return undefined;
+		// Fewer frames can spill more text; only commit an actual local-context reduction.
+		const projectedTokens = this.#projectSnapcompactContextTokens(result, { excludeEncryptedReasoning: true });
+		if (projectedTokens >= this.#estimateStoredContextTokens()) return undefined;
 
 		const installed = await this.#commitCompactionEntry({
 			operation,
