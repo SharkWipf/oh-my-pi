@@ -36,18 +36,18 @@ const nativeSourcePartSchema: FluentType<NativeSourcePart> = type({
 	blockIndex: nativePositionSchema.or(type("string")),
 	coverage: "'full' | 'partial' | 'derived'",
 	representation: "'native' | 'json-quoted-block' | 'original-image' | 'transformed-text'",
-	"sourceSpan?": nativeRangeSchema,
-	"transportSpan?": nativeRangeSchema,
-	"sourceLength?": nativePositionSchema,
-	"currentSourceSpan?": nativeRangeSchema,
-	"currentBlockIndex?": nativePositionSchema.or(type("string")),
-	"currentSourceLength?": nativePositionSchema,
-	"status?": "'exact-current' | 'historical-not-current' | 'unknown'",
-	"transportBlockIndex?": nativePositionSchema,
+	"sourceSpan?": nativeRangeSchema.or(type("undefined")),
+	"transportSpan?": nativeRangeSchema.or(type("undefined")),
+	"sourceLength?": nativePositionSchema.or(type("undefined")),
+	"currentSourceSpan?": nativeRangeSchema.or(type("undefined")),
+	"currentBlockIndex?": nativePositionSchema.or(type("string | undefined")),
+	"currentSourceLength?": nativePositionSchema.or(type("undefined")),
+	"status?": "'exact-current' | 'historical-not-current' | 'unknown' | undefined",
+	"transportBlockIndex?": nativePositionSchema.or(type("undefined")),
 });
 const nativeItemOriginSchema: FluentType<NativeItemOrigin> = type({ kind: "'source'", parts: nativeSourcePartSchema.array() })
-	.or(type({ kind: "'synthetic'", reason: "string", "anchorEntryId?": "string" }))
-	.or(type({ kind: "'aggregate'", compactionEntryId: "string", "coveredSources?": nativeSourcePartSchema.array() }))
+	.or(type({ kind: "'synthetic'", reason: "string", "anchorEntryId?": "string | undefined" }))
+	.or(type({ kind: "'aggregate'", compactionEntryId: "string", "coveredSources?": nativeSourcePartSchema.array().or(type("undefined")) }))
 	.or(type({ kind: "'unknown'", reason: "string" }));
 const nativeItemOriginsSchema = nativeItemOriginSchema.array();
 const nativeSourcePartsSchema = nativeSourcePartSchema.array();
