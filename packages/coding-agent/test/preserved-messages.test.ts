@@ -173,6 +173,87 @@ function exchange(): SessionMessageEntry[] {
 }
 
 describe("source preservation policy", () => {
+	it("charges metadata-only computer screenshots before admitting complete manual atoms", async () => {
+		const assistant = exchange()[0]!;
+		assistant.message = {
+			...(assistant.message as Extract<AgentMessage, { role: "assistant" }>),
+			api: "openai-responses",
+			provider: "openai",
+			content: [
+				{
+					type: "toolCall",
+					id: "computer-call",
+					name: "computer",
+					arguments: {},
+					providerMetadata: {
+						type: "computer",
+						providerItemId: "computer-item",
+						actions: [{ type: "screenshot" }],
+						pendingSafetyChecks: [],
+					},
+				},
+			],
+		};
+		const resultMessage = {
+			role: "toolResult",
+			toolCallId: "computer-call",
+			toolName: "computer",
+			content: [],
+			isError: false,
+			timestamp: 0,
+			providerMetadata: {
+				type: "computer",
+				screenshot: { type: "computer_screenshot", file_id: "screenshot-file" },
+				acknowledgedSafetyChecks: [],
+			},
+		} satisfies Extract<AgentMessage, { role: "toolResult" }>;
+		const result: SessionMessageEntry = {
+			type: "message",
+			id: "computer-result",
+			parentId: "a",
+			timestamp: "",
+			message: resultMessage,
+		};
+		const keep = control("keep-computer", MESSAGE_OVERRIDE_CUSTOM_TYPE, { messageIds: [result.id], state: "keep" });
+		const q = await query(
+			[assistant, result, keep],
+			policy({ enabled: false, recent: { mode: "tokens", value: 1199 } }),
+		);
+		expect(q.inspectCandidate(result.id)?.quotaTokens).toBe(1200);
+		expect(tokenizer.countMessage(resultMessage, { excludeEncryptedReasoning: true })).toBe(1200);
+		expect([...q.select({ maximumContext: 10000 }).N]).toEqual([]);
+		const raw = tokenizer.countMessage(assistant.message) + 1200;
+		const admitted = q.select({ maximumContext: 10000, recent: { mode: "tokens", value: raw } });
+		expect([...admitted.N]).toEqual(["a", "computer-result"]);
+		expect(admitted.quota.N.tokens).toBe(raw);
+		const charge = prechargeNonUsers(admitted.nonUserAtoms(), raw + 1, entry =>
+			tokenizer.countMessage(entry.message),
+		);
+		expect(charge.tokens).toBe(raw);
+		expect(charge.residualBudget).toBe(1);
+		const mirrored: SessionMessageEntry = {
+			...result,
+			message: {
+				...resultMessage,
+				content: [
+					{
+						type: "image",
+						mimeType: "image/png",
+						data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j2WQAAAAASUVORK5CYII=",
+					},
+				],
+			},
+		};
+		const mirrorQuery = await query(
+			[assistant, mirrored, keep],
+			policy({ enabled: false, recent: { mode: "tokens", value: raw } }),
+		);
+		expect(mirrorQuery.inspectCandidate(mirrored.id)?.quotaTokens).toBe(1200);
+		const mirrorSelection = mirrorQuery.select({ maximumContext: 10000 });
+		expect([...mirrorSelection.N]).toEqual(["a", "computer-result"]);
+		expect(mirrorSelection.quota.N.tokens).toBe(raw);
+	});
+
 	it("keeps Auto neutral across stages and Keep dominant only within one stage", () => {
 		const message = user("u", "fix this").message as Extract<AgentMessage, { role: "user" }>;
 		const settings = policy({
