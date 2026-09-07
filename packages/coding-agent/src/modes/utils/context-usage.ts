@@ -1,5 +1,6 @@
 import type { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type { CompactionSettings } from "@oh-my-pi/pi-agent-core/compaction";
+import type { CompactionDiagnostics, DiagnosticTokenQuantity } from "@oh-my-pi/pi-agent-core/compaction/diagnostics";
 import { effectiveReserveTokens, resolveThresholdTokens } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Tool as AiTool, Model } from "@oh-my-pi/pi-ai";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
@@ -41,6 +42,8 @@ export interface ContextBreakdown {
 	freeTokens: number;
 	/** Estimated snapcompact wire savings; set when requested and a snapcompact.* setting is enabled. */
 	snapcompact?: SnapcompactSavingsEstimate;
+	/** Frozen facts; opening the usage panel does not reconstruct any inventory. */
+	recordedCompaction?: CompactionDiagnostics;
 }
 
 /** Percent positions (0–100 of the context window) for the auto-compaction boundaries. */
@@ -359,6 +362,7 @@ export function computeContextBreakdown(
 		autoCompactBufferTokens,
 		freeTokens,
 		snapcompact: snapcompactSavings,
+		recordedCompaction: session.getCompactionDiagnostics?.("recorded"),
 	};
 }
 
@@ -571,5 +575,94 @@ export function renderContextUsage(breakdown: ContextBreakdown, theme: typeof Th
 		lines.push(line);
 	}
 
+	if (breakdown.recordedCompaction) {
+		lines.push("", "Last compaction (recorded)", renderCompactionDiagnosticsSummary(breakdown.recordedCompaction));
+	}
+	lines.push("", "Use /context details for the ordered inventory, settings and measurement basis.");
+	return lines.join("\n");
+}
+
+/** Compact token notation retains its measurement basis instead of implying an exact bill. */
+function diagnosticTokens(quantity: DiagnosticTokenQuantity): string {
+	if (quantity.tokens === null || quantity.basis === "unknown") return "unknown";
+	const amount = formatNumber(quantity.tokens);
+	switch (quantity.basis) {
+		case "upper-bound": return "≤" + amount;
+		case "tokenizer": return amount;
+		case "provider-reported": return amount + " reported";
+		default: return "~" + amount;
+	}
+}
+
+/** The same frozen two-line breakdown is used by manual and automatic success dividers. */
+export function renderCompactionDiagnosticsSummary(diagnostics: CompactionDiagnostics): string {
+	const target = diagnostics.target.calibratedOrdinaryTokens ?? diagnostics.target.ordinaryTokens;
+	const distribution = diagnostics.distribution;
+	const targetLabel = target === undefined ? diagnostics.method === "remote" ? "No ordinary allocator" : "Target unknown" : "Target " + formatNumber(target);
+	return targetLabel +
+		" · " + diagnosticTokens(diagnostics.before) + "→" + diagnosticTokens(diagnostics.total) + " tokens\n" +
+		"Ordinary " + diagnosticTokens(distribution.ordinary) +
+		" · added " + diagnosticTokens(distribution.addedUser) +
+		" · shared " + diagnosticTokens(distribution.shared) + " (not additive)";
+}
+
+function diagnosticQuantityDetail(quantity: DiagnosticTokenQuantity): string {
+	return diagnosticTokens(quantity) + " tokens [" + quantity.basis + "] — " + quantity.description;
+}
+
+/** Ordered physical rows, never regrouped by role or selection reason. */
+export function renderCompactionDiagnosticsDetails(diagnostics: CompactionDiagnostics): string {
+	const prepared = diagnostics.snapshot === "OMP-prehook";
+	const lines = [
+		prepared
+			? "Snapshot: Actual prepared request (OMP-prehook; not confirmed sent)"
+			: "Snapshot: " + diagnostics.snapshot,
+		"Model: " + diagnostics.model + " · method: " + diagnostics.method,
+		"Maximum context: " + (diagnostics.contextWindow === null ? "unknown" : diagnostics.contextWindow.toLocaleString()) + " tokens",
+	];
+	if (!prepared) lines.push(renderCompactionDiagnosticsSummary(diagnostics), "Before: " + diagnosticQuantityDetail(diagnostics.before));
+	lines.push(
+		(prepared ? "Actual prepared local total: " : "Disjoint local total: ") + diagnosticQuantityDetail(diagnostics.total),
+		"Ordinary: " + diagnosticQuantityDetail(diagnostics.distribution.ordinary),
+		"Added user: " + diagnosticQuantityDetail(diagnostics.distribution.addedUser),
+		"Shared: " + diagnosticQuantityDetail(diagnostics.distribution.shared),
+		"Selected user sources: " + diagnostics.distribution.selectedUserSources +
+			" · added sources: " + diagnostics.distribution.addedUserSources +
+			" · manual non-user sources: " + diagnostics.distribution.manualNonUserSources,
+		"Selection subtotals overlap; shared coverage is counted once, not added again.",
+	);
+	if (diagnostics.target.ordinaryTokens !== undefined) lines.push("Configured ordinary target: " + diagnostics.target.ordinaryTokens.toLocaleString() + " tokens");
+	if (diagnostics.target.calibratedOrdinaryTokens !== undefined) lines.push("Calibrated ordinary target: " + diagnostics.target.calibratedOrdinaryTokens.toLocaleString() + " tokens");
+	if (diagnostics.target.manualNonUserTokens !== undefined) lines.push("Manual non-user reservation inside ordinary target: " + diagnostics.target.manualNonUserTokens.toLocaleString() + " tokens");
+	if (diagnostics.target.residualOrdinaryTokens !== undefined) lines.push("Residual ordinary target after reservation: " + diagnostics.target.residualOrdinaryTokens.toLocaleString() + " tokens");
+	if (diagnostics.target.reserveTokens !== undefined) lines.push("Reserve target: " + diagnostics.target.reserveTokens.toLocaleString() + " tokens");
+	if (diagnostics.providerAnchor) lines.push("Provider anchor: " + diagnosticQuantityDetail(diagnostics.providerAnchor));
+	if (diagnostics.warning) lines.push("Warning: " + diagnostics.warning);
+	lines.push(...diagnostics.notes, "", "Ordered physical inventory");
+	for (const item of diagnostics.rows) {
+		lines.push("", item.location + " · " + item.kind + " · " + item.label);
+		lines.push("  " + diagnosticQuantityDetail(item.quantity));
+		const counts = item.counts;
+		lines.push("  Counts: " + counts.messages + " messages · " + counts.blocks + " blocks · " + counts.frames + " frames · " + counts.images + " image blocks" + (counts.items === undefined ? "" : " · " + counts.items + " native items"));
+		lines.push("  Coverage: " + item.coverage + (item.sourceIds?.length ? " · sources " + item.sourceIds.join(", ") : ""));
+		if (item.selectionReasons.length) lines.push("  Group selection reasons (union): " + item.selectionReasons.join(", "));
+		if (diagnostics.selection && item.sourceIds?.length) {
+			const sourceReasons = diagnostics.selection.sourceReasons;
+			lines.push("  Source reason membership: " + item.sourceIds.map(id => id + ": " + (sourceReasons[id]?.join(", ") || "not recorded")).join("; "));
+		}
+		if (item.contributions?.length) lines.push("  Physical ownership: " + item.contributions.join(" + ") + (item.contributions.length > 1 ? " (shared occurrence; charged once)" : ""));
+		if (item.payloadSize) lines.push("  Payload: " + item.payloadSize.value.toLocaleString() + " " + item.payloadSize.unit);
+		if (item.controls.length) lines.push("  Controls: " + item.controls.join(" · "));
+		if (item.note) lines.push("  " + item.note);
+	}
+	if (diagnostics.selection) {
+		lines.push("", "Selection quotas (source q; non-additive)", "Quota membership overlaps. These policy counters are not additional physical charges or provider billing.");
+		for (const [group, quota] of Object.entries(diagnostics.selection.quota)) {
+			lines.push("  " + group + ": " + quota.count.toLocaleString() + " members · q=" + quota.tokens.toLocaleString() + " tokens");
+		}
+	}
+	lines.push("", diagnostics.snapshot === "recorded-at-compaction" ? "Recorded operation settings (not today’s settings)" : "Settings captured for this snapshot");
+	for (const [name, value] of Object.entries(diagnostics.settings)) lines.push("  " + name + ": " + JSON.stringify(value));
+	lines.push("", "Reconstruction and OMP-prehook values are not a final provider request. Unobserved post-hook shape and opaque/image billing remain unknown.");
 	return lines.join("\n");
 }
