@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed OpenAI, Azure Responses, and Codex thinking summaries arriving only in final snapshots: late text and unseen suffixes now reach streaming clients before completion, while divergent display text remains append-only and replay signatures retain the authoritative provider item.
+- Buffered raw Responses reasoning until completion so readable summaries take precedence, retaining raw-only fallback and completing reasoning when a terminal snapshot omits per-item completion.
+
 ## [18.1.12] - 2026-09-06
 
 ### Added

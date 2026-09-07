@@ -2505,17 +2505,33 @@ function foldReasoningSummary(parts: ResponseReasoningItem["summary"] | undefine
 	return canonical;
 }
 
-/** Chooses final reasoning text without making sequential-cutoff results disagree with emitted deltas. */
+/** Completes append-only display separately from the authoritative replay signature. */
 export function finalizeReasoningThinking(
 	item: ResponseReasoningItem,
-	streamedThinking: string,
+	block: ThinkingContent,
+	stream: AssistantMessageEventStream,
+	output: AssistantMessage,
+	contentIndex: number,
 	cutoff?: SequentialCutoffSummaryState,
-): string {
-	if (cutoff) return finalizeCutoffReasoningThinking(item, streamedThinking, cutoff);
-	const summaryThinking = item.summary?.map(part => part.text).join("\n\n") ?? "";
-	if (summaryThinking) return summaryThinking;
+	rawThinking = "",
+): void {
+	const summaryThinking = cutoff
+		? finalizeCutoffReasoningThinking(item, block.thinking, cutoff)
+		: (item.summary?.map(part => part.text).join("\n\n") ?? "");
 	const contentThinking = item.content?.[0]?.type === "reasoning_text" ? (item.content[0].text ?? "") : "";
-	return contentThinking || streamedThinking || "";
+	const finalThinking =
+		summaryThinking ||
+		(cutoff && item.summary?.some(part => part.text) ? "" : contentThinking || rawThinking);
+	// Delta consumers cannot retract earlier text; replay retains the authoritative item.
+	if (finalThinking.startsWith(block.thinking)) {
+		const delta = finalThinking.slice(block.thinking.length);
+		if (delta) {
+			block.thinking = finalThinking;
+			stream.push({ type: "thinking_delta", contentIndex, delta, partial: output });
+		}
+	}
+	block.thinkingSignature = JSON.stringify(item);
+	stream.push({ type: "thinking_end", contentIndex, content: block.thinking, partial: output });
 }
 
 function finalizeCutoffReasoningThinking(
@@ -2523,23 +2539,21 @@ function finalizeCutoffReasoningThinking(
 	streamedThinking: string,
 	cutoff: SequentialCutoffSummaryState,
 ): string {
-	// The block's streamed deltas are authoritative: final text must never
-	// disagree with what delta consumers already rendered.
-	if (streamedThinking) return streamedThinking;
 	const summaryThinking = foldReasoningSummary(item.summary);
 	if (summaryThinking) {
 		// The done payload carries the response-cumulative summary. Emit only
 		// what no earlier block already emitted; replay-only items finalize empty.
-		if (cutoff.emitted.startsWith(summaryThinking)) return "";
+		if (cutoff.emitted.startsWith(summaryThinking)) return streamedThinking;
 		if (!cutoff.emitted || summaryThinking.startsWith(cutoff.emitted)) {
-			const suffix = summaryThinking.slice(cutoff.emitted.length).replace(/^\n+/, "");
+			let suffix = summaryThinking.slice(cutoff.emitted.length);
+			if (!streamedThinking) suffix = suffix.replace(/^\n+/, "");
 			// Adopt the payload as canonical so later items cannot replay this text.
 			cutoff.summary = item.summary?.map(part => ({ ...part })) ?? [];
 			cutoff.emitted = summaryThinking;
-			return suffix;
+			return streamedThinking + suffix;
 		}
 		// Diverged from streamed text — the deltas already shown win.
-		return "";
+		return streamedThinking;
 	}
 	return item.content?.[0]?.type === "reasoning_text" ? (item.content[0].text ?? "") : "";
 }
@@ -2822,8 +2836,8 @@ export async function processResponsesStream<TApi extends Api>(
 			| ResponseCustomToolCall
 			| ResponseComputerToolCall;
 		block: ThinkingContent | TextContent | StreamingToolCallBlock;
+		rawThinking?: string;
 	}
-
 	// Multiple items (parallel function_calls in particular) can be open at the same
 	// time. OpenAI's spec routes every per-item event by `output_index`/`item_id`;
 	// see https://github.com/can1357/oh-my-pi/issues/1880 — llama.cpp emits parallel
@@ -3146,17 +3160,10 @@ export async function processResponsesStream<TApi extends Api>(
 				appendReasoningSummaryPartDone(entry.item, entry.block, stream, output, contentIndexOf(entry.block));
 			}
 		} else if (event.type === "response.reasoning_text.delta") {
-			// Raw reasoning text delta from local providers that stream thinking
-			// directly rather than via the OpenAI summary tracking protocol.
+			// Buffer raw text until completion: a later readable summary takes precedence.
 			const entry = lookupOpenItem(event);
 			if (entry?.item.type === "reasoning" && entry.block.type === "thinking") {
-				entry.block.thinking += event.delta;
-				stream.push({
-					type: "thinking_delta",
-					contentIndex: contentIndexOf(entry.block),
-					delta: event.delta,
-					partial: output,
-				});
+				entry.rawThinking = (entry.rawThinking ?? "") + event.delta;
 			}
 		} else if (event.type === "response.content_part.added") {
 			const entry = lookupOpenItem(event);
@@ -3227,14 +3234,9 @@ export async function processResponsesStream<TApi extends Api>(
 								| ThinkingContent
 								| undefined);
 				if (reasoningBlock) {
-					reasoningBlock.thinking = finalizeReasoningThinking(item, reasoningBlock.thinking);
-					reasoningBlock.thinkingSignature = JSON.stringify(item);
-					stream.push({
-						type: "thinking_end",
-						contentIndex: contentIndexOf(reasoningBlock),
-						content: reasoningBlock.thinking,
-						partial: output,
-					});
+					finalizeReasoningThinking(
+						item, reasoningBlock, stream, output, contentIndexOf(reasoningBlock), undefined, entry?.rawThinking,
+					);
 				}
 				closeOpenItem(event.output_index, item.id, entry);
 			} else if (item.type === "message") {
@@ -3341,6 +3343,19 @@ export async function processResponsesStream<TApi extends Api>(
 			}
 		} else if (terminalEvent) {
 			const response = terminalEvent.response;
+			// Some transports omit item.done; complete still-open reasoning from the
+			// terminal snapshot, or the accumulated item when no snapshot was supplied.
+			for (const entry of openItemsInOrder) {
+				if (entry.item.type !== "reasoning" || entry.block.type !== "thinking") continue;
+				const finalItem = entry.item.id
+					? response?.output?.find(item => item.type === "reasoning" && item.id === entry.item.id)
+					: undefined;
+				const item = finalItem?.type === "reasoning" ? structuredCloneJSON(finalItem) : entry.item;
+				if (finalItem) options?.onOutputItemDone?.(item);
+				finalizeReasoningThinking(
+					item, entry.block, stream, output, contentIndexOf(entry.block), undefined, entry.rawThinking,
+				);
+			}
 			const shouldPromoteIncompleteToolUse =
 				response?.status === "incomplete" &&
 				response.incomplete_details?.reason === "max_output_tokens" &&

@@ -395,6 +395,8 @@ All streaming events emitted during assistant message generation:
 | `done`           | Stream complete          | `reason`: Stop reason ("stop", "length", "toolUse"), `message`: Final assistant message     |
 | `error`          | Error occurred           | `reason`: Error type ("error" or "aborted"), `error`: AssistantMessage with partial content |
 
+OpenAI, Azure Responses, and Codex thinking display is append-only. A final summary's unseen suffix is emitted as `thinking_delta` before `thinking_end`, including summaries that arrive only at completion. Raw reasoning is buffered until completion so a readable summary can take precedence; raw-only streams still display their reasoning. If the final provider text diverges from an already displayed prefix, the displayed text is retained rather than retracted. The authoritative provider item remains in `thinkingSignature` for replay, independently of that display.
+
 ## Image Input
 
 Models with vision capabilities can process images. You can check if a model supports images via the `input` property. If you pass images to a non-vision model, they are silently ignored.
