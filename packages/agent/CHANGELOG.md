@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fixed normalized custom messages counting as zero tokens. Custom text and original images now consume their ordinary local baseline regardless of attribution or display settings.
 - Fixed local token estimates omitting user and developer images; original images now receive the same one-time baseline as tool-result and hook images.
 
 ## [18.1.10] - 2026-09-04

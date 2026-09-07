@@ -195,7 +195,7 @@ await agent.prompt({ role: "user", content: "Hello", timestamp: Date.now() });
 await agent.continue();
 ```
 
-`Tokenizer.countMessage` includes a local baseline of 1,200 tokens per original image in user, developer, tool-result, and hook messages. The baseline is exported as `IMAGE_TOKEN_ESTIMATE` from `@oh-my-pi/pi-agent-core/tokenizer`. It is not a provider invoice: image detail, dimensions, and model-specific billing remain provider-owned. A projection using a different effective image estimate must replace the included baseline (add only the difference), not charge the image again. Snapcompact frames retain their separate frame estimate.
+`Tokenizer.countMessage` counts normalized custom-message text regardless of attribution or display settings, and includes a local baseline of 1,200 tokens per original image in user, developer, custom, tool-result, and hook messages. The baseline is exported as `IMAGE_TOKEN_ESTIMATE` from `@oh-my-pi/pi-agent-core/tokenizer`. It is not a provider invoice: image detail, dimensions, and model-specific billing remain provider-owned. A projection using a different effective image estimate must replace the included baseline (add only the difference), not charge the image again. Snapcompact frames retain their separate frame estimate.
 
 ### State Management
 

@@ -101,7 +101,7 @@ export interface TokenBudgetCheck {
 }
 
 /**
- * Baseline per original image in user, developer, tool and hook messages.
+ * Baseline per original image in user, developer, custom, tool and hook messages.
  * This local estimate is independent of provider/model/detail, not a bill.
  * A representation-specific projection must replace this charge (add only
  * its effective image estimate minus this baseline), never add a second image.
@@ -221,6 +221,7 @@ export class Tokenizer {
 		}
 
 		switch (message.role) {
+			case "custom":
 			case "developer":
 			case "user": {
 				const content: string | Array<{ type: string; text?: string }> = message.content;

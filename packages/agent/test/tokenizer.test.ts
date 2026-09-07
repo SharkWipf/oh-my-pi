@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import * as natives from "@oh-my-pi/pi-natives";
+import { createCustomMessage } from "../src/compaction/messages";
 import { Tokenizer, tokenizerEncodingForModel } from "../src/tokenizer";
 import type { AgentMessage } from "../src/types";
 
@@ -30,6 +31,19 @@ describe("tokenizerEncodingForModel", () => {
 });
 
 describe("Tokenizer", () => {
+	test("charges normalized custom source text and images an ordinary baseline", () => {
+		const tokenizer = new Tokenizer();
+		const text = "A durable custom source.";
+		const scalar = createCustomMessage("notice", text, false, undefined, "2026-09-07", "agent");
+		const illustrated = createCustomMessage("manual", [
+			{ type: "text", text },
+			{ type: "image", data: "cG5n", mimeType: "image/png", detail: "high" },
+		], true, undefined, "2026-09-07", "user");
+		expect(tokenizer.countMessage(scalar)).toBe(6);
+		expect(tokenizer.countMessage(illustrated)).toBe(1206);
+		expect(tokenizer.countMessage(illustrated, { excludeEncryptedReasoning: true })).toBe(1206);
+		expect(tokenizer.countMessages([scalar, illustrated])).toBe(1212);
+	});
 	test("counts each original image once across user, developer, tool and hook content", () => {
 		const tokenizer = new Tokenizer();
 		const content: (TextContent | ImageContent)[] = [
