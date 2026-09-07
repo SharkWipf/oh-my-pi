@@ -34,6 +34,63 @@ describe("native SDK transform origins", () => {
 		expect(JSON.stringify(output)).not.toContain("entryId");
 	});
 
+	it("redacts typed provider-visible metadata without changing opaque replay state", () => {
+		const secret = "FABRICATED_SECRET_92837";
+		const text = `quoted \"text\" \\ Ω <|channel|> ${secret}`;
+		const opaque = { encrypted_content: secret, signature: secret, image_url: `data:image/png;base64,${PNG}`, extra: { text: secret } };
+		const messages: Message[] = [{
+			role: "assistant", provider: "openai", model: model.id, api: "openai-responses", timestamp: 1, stopReason: "toolUse",
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+			content: [
+				{ type: "toolCall", id: secret, name: "computer", arguments: { text }, providerMetadata: { type: "computer", providerItemId: secret, actions: [{ type: "type", text }, { type: "keypress", keys: [secret] }], pendingSafetyChecks: [{ id: secret, code: secret, message: text }] } },
+				{ type: "anthropicServerTool", block: { type: "server_tool_use", id: secret, name: "web_search", input: { query: text } } },
+				{ type: "anthropicServerTool", block: { type: "web_search_tool_result", tool_use_id: secret, content: [{ type: "web_search_result", title: text, url: `https://example.invalid/${secret}`, encrypted_content: secret }] } },
+			],
+			providerPayload: { type: "openaiResponsesHistory", dt: true, provider: "openai", items: [{ type: "web_search_call", id: secret, status: "completed", action: { type: "search", queries: [text], sources: [{ type: "url", url: `https://example.invalid/${secret}` }] }, opaque }, { type: "reasoning", id: secret, encrypted_content: secret }] },
+		}, {
+			role: "toolResult", toolCallId: secret, toolName: "computer", isError: false, timestamp: 2, content: [], details: { explanation: text, opaque },
+			providerMetadata: { type: "computer", screenshot: { type: "computer_screenshot", file_id: secret }, acknowledgedSafetyChecks: [{ id: secret, code: secret, message: text }] },
+		}];
+		messages.forEach((message, index) => bindMessageSource(message, `metadata-${index}`, index));
+		const original = JSON.stringify(messages);
+		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+		const output = obfuscateMessages(obfuscator, messages);
+		const assistant = output[0]!;
+		const result = output[1]!;
+		if (assistant.role !== "assistant" || result.role !== "toolResult") throw new Error("Expected original roles");
+		const call = assistant.content[0]!;
+		const server = assistant.content[1]!;
+		const search = assistant.content[2]!;
+		if (call.type !== "toolCall" || server.type !== "anthropicServerTool" || server.block.type !== "server_tool_use" || search.type !== "anthropicServerTool" || !Array.isArray(search.block.content)) throw new Error("Expected typed metadata");
+		const payload = assistant.providerPayload;
+		if (payload?.type !== "openaiResponsesHistory") throw new Error("Expected native replay");
+		const action = payload.items[0]!.action as { queries: string[]; sources: { url: string }[] };
+		const details = result.details as { explanation: string; opaque: typeof opaque };
+		const visible = [call.arguments.text, call.providerMetadata!.actions[0]!.type === "type" ? call.providerMetadata!.actions[0]!.text : "", call.providerMetadata!.pendingSafetyChecks[0]!.message, server.block.input!.query, search.block.content[0].title, result.providerMetadata!.acknowledgedSafetyChecks[0]!.message, details.explanation, action.queries[0]];
+		for (const value of visible) {
+			expect(value).not.toContain(secret);
+			expect(obfuscator.deobfuscate(value as string)).toBe(text);
+		}
+		expect(action.sources[0]!.url).not.toContain(secret);
+		expect(search.block.content[0].url).not.toContain(secret);
+		expect(call.id).toBe(secret);
+		expect(call.providerMetadata!.providerItemId).toBe(secret);
+		expect(call.providerMetadata!.actions[1]).toEqual({ type: "keypress", keys: [secret] });
+		expect(call.providerMetadata!.pendingSafetyChecks[0]!.id).toBe(secret);
+		expect(call.providerMetadata!.pendingSafetyChecks[0]!.code).toBe(secret);
+		expect(search.block.content[0].encrypted_content).toBe(secret);
+		expect(result.providerMetadata!.screenshot).toEqual({ type: "computer_screenshot", file_id: secret });
+		expect(parts(result).find(part => part.blockIndex === "metadata.screenshot")?.representation).toBe("original-image");
+		expect(parts(result.providerMetadata!.acknowledgedSafetyChecks[0]!)[0]?.representation).toBe("transformed-text");
+		expect(details.opaque).toBe(opaque);
+		expect(payload.items[0]!.opaque).toBe(opaque);
+		expect(payload.items[1]).toEqual({ type: "reasoning", id: secret, encrypted_content: secret });
+		expect(payload.origins?.[0]?.kind).toBe("source");
+		expect(parts(payload.items[0]!)[0]!.representation).toBe("transformed-text");
+		expect(JSON.stringify(messages)).toBe(original);
+		expect(obfuscateMessages(obfuscator, output)).toBe(output);
+	});
+
 	it("keeps per-source image identity through real encoding, cached normalization and URL round trips", async () => {
 		const webp = await new Bun.Image(Buffer.from(PNG, "base64")).webp().toBase64();
 		const messages = [user([{ type: "image", data: webp, mimeType: "image/webp" }]), user([{ type: "image", data: webp, mimeType: "image/webp" }])];

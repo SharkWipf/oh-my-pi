@@ -6,6 +6,10 @@
 
 - Added guarded transient inline-rendering facts to source-origin metadata. Known clone operations preserve them; changed blocks, unknown hook output, and persisted metadata cannot retain stale physical attribution.
 
+### Fixed
+
+- Escaped reserved Harmony markers in typed native replay text at Responses, Azure Responses, and Codex request boundaries without changing identifiers, schemas, encrypted replay state, or image bytes and original-image provenance.
+
 ## [18.1.12] - 2026-09-06
 
 ### Added

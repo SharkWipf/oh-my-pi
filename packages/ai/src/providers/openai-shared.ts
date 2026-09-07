@@ -89,6 +89,7 @@ import {
 import type { CapturedHttpErrorResponse } from "../utils/http-inspector";
 import { getOpenRouterHeaders } from "../utils/openrouter-headers";
 import { isForcedToolChoice } from "../utils/tool-choice";
+import { getSourceOrigin, setSourceOrigin, transferTransformedSourceOrigin } from "../utils/source-origin";
 import {
 	buildCopilotDynamicHeaders,
 	hasCopilotVisionInput,
@@ -111,6 +112,7 @@ import type {
 	ResponseOutputItem,
 	ResponseOutputMessage,
 	ResponseReasoningItem,
+	Tool as ResponsesTool,
 	ResponseStatus,
 	ResponseStreamEvent,
 } from "./openai-responses-wire";
@@ -1838,9 +1840,9 @@ export interface BuildResponsesInputOptions<TApi extends Api> {
  * previous_response_id, provider fallback) feeds those bytes back as input,
  * which gpt-5.x reject with invalid_prompt / "Request blocked", permanently
  * poisoning the session. `arguments` is a JSON document, so it uses
- * {@link escapeHarmonyControlTokensInJson} to stay parseable. Reasoning items
- * are left untouched: `encrypted_content` is opaque and plaintext summaries
- * are never rendered back into the prompt.
+ * {@link escapeHarmonyControlTokensInJson} to stay parseable. Typed visible native
+ * text is escaped too; encrypted reasoning, signatures, protocol identifiers,
+ * tool schemas and image bytes remain opaque and byte-identical.
  *
  * Native history replay pushes stored `providerPayload` items straight onto the
  * wire, bypassing {@link convertResponsesInputContent}; without this a stored
@@ -1849,68 +1851,90 @@ export interface BuildResponsesInputOptions<TApi extends Api> {
  */
 export function escapeReplayedControlTokens(items: ResponseInput): ResponseInput {
 	return items.map(item => {
-		if (item.type === "function_call_output") {
-			return typeof item.output === "string"
-				? { ...item, output: escapeHarmonyControlTokens(item.output) }
-				: {
-						...item,
-						output: item.output.map(part =>
-							part.type === "input_text" ? { ...part, text: escapeHarmonyControlTokens(part.text) } : part,
-						),
-					};
-		}
-		if (item.type === "custom_tool_call_output") {
-			return typeof item.output === "string"
-				? { ...item, output: escapeHarmonyControlTokens(item.output) }
-				: {
-						...item,
-						output: item.output.map(part =>
-							part.type === "input_text" ? { ...part, text: escapeHarmonyControlTokens(part.text) } : part,
-						),
-					};
-		}
-		if (item.type === "function_call") {
-			return typeof item.arguments === "string"
-				? { ...item, arguments: escapeHarmonyControlTokensInJson(item.arguments) }
-				: item;
-		}
-		if (item.type === "custom_tool_call") {
-			return typeof item.input === "string" ? { ...item, input: escapeHarmonyControlTokens(item.input) } : item;
-		}
-		// EasyInputMessage may omit `type` (`{ role, content }`); the responses
-		// server persists it verbatim, so treat missing type as a message too.
-		const isTypedMessage = item.type === "message" || item.type === undefined;
-		if (!isTypedMessage || !("role" in item) || !("content" in item)) return item;
-		if (item.role === "assistant") {
-			// Assistant output text is model-owned but equally capable of carrying
-			// control tokens as data. `status` discriminates ResponseOutputMessage.
-			if ("status" in item && Array.isArray(item.content)) {
-				return {
-					...item,
-					content: item.content.map(part =>
-						part.type === "output_text"
-							? { ...part, text: escapeHarmonyControlTokens(part.text) }
-							: part.type === "refusal"
-								? { ...part, refusal: escapeHarmonyControlTokens(part.refusal) }
-								: part,
-					),
-				};
+		let changed = false;
+		const text = (value: string, json = false): string => {
+			const next = json ? escapeHarmonyControlTokensInJson(value) : escapeHarmonyControlTokens(value);
+			changed ||= next !== value;
+			return next;
+		};
+		const optionalText = <T extends string | null | undefined>(value: T): T => (typeof value === "string" ? text(value) : value) as T;
+		const part = <T extends { text: string }>(value: T): T => {
+			const next = text(value.text);
+			return next === value.text ? value : transferTransformedSourceOrigin(value, { ...value, text: next });
+		};
+		const safetyCheck = <T extends { message?: string | null }>(check: T): T => {
+			const message = optionalText(check.message);
+			return message === check.message ? check : transferTransformedSourceOrigin(check, { ...check, message });
+		};
+		const toolDescription = <T extends { description?: string | null }>(tool: T): T => {
+			const description = optionalText(tool.description);
+			return description === tool.description ? tool : { ...tool, description };
+		};
+		const definition = (tool: ResponsesTool): ResponsesTool => {
+			if (tool.type === "namespace") return { ...toolDescription(tool), tools: tool.tools.map(toolDescription) };
+			return "description" in tool ? toolDescription(tool) : tool;
+		};
+		const escaped: ResponseInput[number] = (() => {
+			switch (item.type) {
+				case "function_call_output":
+					return { ...item, output: typeof item.output === "string" ? text(item.output) : item.output.map(value => value.type === "input_text" ? part(value) : value) };
+				case "custom_tool_call_output":
+					return { ...item, output: typeof item.output === "string" ? text(item.output) : item.output.map(value => value.type === "input_text" ? part(value) : value) };
+				case "function_call": return { ...item, arguments: text(item.arguments, true) };
+				case "custom_tool_call": return { ...item, input: text(item.input) };
+				case "computer_call": {
+					const action = item.action?.type === "type" ? { ...item.action, text: text(item.action.text) } : item.action;
+					const actions = item.actions?.map(action => action.type === "type" ? { ...action, text: text(action.text) } : action);
+					return { ...item, ...(action !== undefined ? { action } : {}), ...(actions !== undefined ? { actions } : {}), pending_safety_checks: item.pending_safety_checks.map(safetyCheck) };
+				}
+				case "computer_call_output": return { ...item, ...(item.acknowledged_safety_checks ? { acknowledged_safety_checks: item.acknowledged_safety_checks.map(safetyCheck) } : {}) };
+				case "web_search_call": {
+					const action = item.action;
+					if (action.type === "search") return { ...item, action: { ...action, ...(action.query !== undefined ? { query: text(action.query) } : {}), ...(action.queries ? { queries: action.queries.map(query => text(query)) } : {}), ...(action.sources ? { sources: action.sources.map(source => ({ ...source, url: text(source.url) })) } : {}) } };
+					if (action.type === "find_in_page") return { ...item, action: { ...action, url: text(action.url), pattern: text(action.pattern) } };
+					return { ...item, action: { ...action, url: optionalText(action.url) } };
+				}
+				case "file_search_call": return { ...item, queries: item.queries.map(query => text(query)), ...(item.results ? { results: item.results.map(result => ({ ...result, filename: optionalText(result.filename), text: optionalText(result.text) })) } : {}) };
+				case "reasoning": return { ...item, summary: item.summary.map(part), ...(item.content ? { content: item.content.map(part) } : {}) };
+				case "code_interpreter_call": return { ...item, code: optionalText(item.code), ...(item.outputs ? { outputs: item.outputs.map(output => output.type === "logs" ? { ...output, logs: text(output.logs) } : output) } : {}) };
+				case "mcp_call": return { ...item, arguments: text(item.arguments, true), ...(item.output !== undefined ? { output: optionalText(item.output) } : {}), ...(item.error !== undefined ? { error: optionalText(item.error) } : {}) };
+				case "mcp_list_tools": return { ...item, tools: item.tools.map(toolDescription), ...(item.error !== undefined ? { error: optionalText(item.error) } : {}) };
+				case "mcp_approval_request": return { ...item, arguments: text(item.arguments, true) };
+				case "mcp_approval_response": return { ...item, ...(item.reason !== undefined ? { reason: optionalText(item.reason) } : {}) };
+				case "shell_call": return { ...item, action: { ...item.action, commands: item.action.commands.map(command => text(command)) } };
+				case "shell_call_output": return { ...item, output: item.output.map(output => ({ ...output, stdout: text(output.stdout), stderr: text(output.stderr) })) };
+				case "local_shell_call": return { ...item, action: { ...item.action, command: item.action.command.map(command => text(command)), env: Object.fromEntries(Object.entries(item.action.env).map(([key, value]) => [key, text(value)])), ...(item.action.working_directory !== undefined ? { working_directory: optionalText(item.action.working_directory) } : {}) } };
+				case "local_shell_call_output": return { ...item, output: text(item.output, true) };
+				case "apply_patch_call": {
+					const operation = item.operation;
+					return { ...item, operation: operation.type === "delete_file" ? { ...operation, path: text(operation.path) } : { ...operation, path: text(operation.path), diff: text(operation.diff) } };
+				}
+				case "apply_patch_call_output": return { ...item, ...(item.output !== undefined ? { output: optionalText(item.output) } : {}) };
+				case "tool_search_call": {
+					// This field is model-authored arguments, not an unknown metadata tree.
+					const serialized = stringifyJson(item.arguments);
+					if (serialized === undefined) return item;
+					const escaped = text(serialized, true);
+					return escaped === serialized ? item : { ...item, arguments: JSON.parse(escaped) };
+				}
+				case "tool_search_output": case "additional_tools": return { ...item, tools: item.tools.map(definition) };
 			}
-			return item;
+			// EasyInputMessage may omit type; protocol-only and unknown items are not walked.
+			if ((item.type !== "message" && item.type !== undefined) || !("content" in item) || !("role" in item)) return item;
+			if (item.role === "assistant") {
+				if (!("status" in item) || !Array.isArray(item.content)) return item;
+				return { ...item, content: item.content.map(value => value.type === "output_text" ? part(value) : value.type === "refusal" ? { ...value, refusal: text(value.refusal) } : value) };
+			}
+			return { ...item, content: typeof item.content === "string" ? text(item.content) : item.content.map(value => value.type === "input_text" ? part(value) : value) };
+		})();
+		if (!changed) return item;
+		transferTransformedSourceOrigin(item, escaped);
+		const original = getSourceOrigin(item);
+		const transformed = getSourceOrigin(escaped);
+		if (original?.kind === "source" && transformed?.kind === "source" && original.parts.some(part => part.representation === "original-image")) {
+			setSourceOrigin(escaped, { kind: "source", parts: transformed.parts.map((part, index) => original.parts[index]!.representation === "original-image" ? original.parts[index]! : part) });
 		}
-		const content = item.content;
-		if (typeof content === "string") {
-			return { ...item, content: escapeHarmonyControlTokens(content) };
-		}
-		if (Array.isArray(content)) {
-			return {
-				...item,
-				content: content.map(part =>
-					part.type === "input_text" ? { ...part, text: escapeHarmonyControlTokens(part.text) } : part,
-				),
-			};
-		}
-		return item;
+		return escaped;
 	});
 }
 
