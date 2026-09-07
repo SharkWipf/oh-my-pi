@@ -53,12 +53,12 @@ const nativeSourcePartSchema: FluentType<NativeSourcePart> = type({
 });
 const inlinePhysicalSchema: FluentType<InlinePhysical> = type({
 	owner: "'system' | 'context' | 'tool'",
-	"toolCallId?": "string",
+	"toolCallId?": "string | undefined",
 	kind: "'frame'",
 	estimatedTokens: type("number").narrow(value => Number.isFinite(value) && value >= 0),
-}).or(type({ owner: "'system' | 'context' | 'tool'", "toolCallId?": "string", kind: "'note'" }));
+}).or(type({ owner: "'system' | 'context' | 'tool'", "toolCallId?": "string | undefined", kind: "'note'" }));
 const nativeItemOriginSchema: FluentType<NativeItemOrigin> = type({ kind: "'source'", parts: nativeSourcePartSchema.array() })
-	.or(type({ kind: "'synthetic'", reason: "string", "anchorEntryId?": "string | undefined", "inlinePhysical?": inlinePhysicalSchema }))
+	.or(type({ kind: "'synthetic'", reason: "string", "anchorEntryId?": "string | undefined", "inlinePhysical?": inlinePhysicalSchema.or(type("undefined")) }))
 	.or(type({ kind: "'aggregate'", compactionEntryId: "string", "coveredSources?": nativeSourcePartSchema.array().or(type("undefined")) }))
 	.or(type({ kind: "'unknown'", reason: "string" }));
 const nativeItemOriginsSchema = nativeItemOriginSchema.array();
