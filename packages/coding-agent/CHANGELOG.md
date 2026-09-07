@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fixed advisor resets retaining late-aborted prompt state and replaying stale guidance into the next review. Invalidated reviews no longer count as completed; ordinary provider error and abort recovery is unchanged.
 - The startup update notice counts every change in a release: bullets written above a `###` heading now count under `Other`, and `+`/`*` markers and lightly indented bullets count like `-`.
 - Fixed Codex Astra retaining its larger window after disabling Extended Context, including cached models; explicit model overrides still take precedence.
 - Fixed `/copy` link captions showing Markdown delimiters for formatted labels and splitting across two rows for multiline labels ([#11086](https://github.com/can1357/oh-my-pi/pull/11086) by [@mustafaabidali](https://github.com/mustafaabidali)).

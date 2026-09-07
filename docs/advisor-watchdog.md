@@ -83,7 +83,7 @@ When the primary transcript is rewritten, the advisor runtime is reset:
 - branch/fork style history replacement
 - context-maintenance re-prime when the advisor's own context cannot fit
 
-Reset clears the advisor's private in-memory transcript and rewinds its cursor. The next advisor update replays the current bounded primary transcript instead of continuing from stale pre-rewrite context.
+Reset clears the advisor's private in-memory transcript and rewinds its cursor. The next advisor update replays the current bounded primary transcript instead of continuing from stale pre-rewrite context. If a review is still running, its late prompt state is cleared after it settles: aborted guidance cannot leak into the next review, and an invalidated review does not count as completed. Provider failures and interruptions without a reset retain their normal recovery behavior.
 
 When the advisor is enabled mid-session, the cursor seeds to the current primary transcript length. That avoids replaying the whole old conversation on the first enabled turn.
 
