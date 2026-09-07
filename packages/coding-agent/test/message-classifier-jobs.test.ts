@@ -487,4 +487,25 @@ describe("message classifier session jobs", () => {
 		await until(() => job(original).running === 0);
 		expect((await facts(await reopen())).get(id)).toBe(0);
 	});
+	it("skips a not-yet-admitted source made eligible by a rewrite while unaffected backfill continues", async () => {
+		const first = user("synthetic blocking first source");
+		const changed = manager.appendMessage({ role: "user", content: "synthetic newly eligible source", attribution: "agent", timestamp: 1 });
+		const separator = user("synthetic stable neighborhood separator");
+		const unaffected = user("synthetic unaffected later source");
+		save(separator, 0);
+		const backfill = await session.startMessageClassificationBackfill(1);
+		await until(() => provider.requests.length === 1);
+		const entry = manager.getEntry(changed)!;
+		if (entry.type !== "message" || entry.message.role !== "user") throw new Error("Missing fixture source");
+		delete entry.message.attribution;
+		await manager.rewriteEntries();
+		// Lifecycle reports the changed target even though it had no pending job.
+		session.interruptMessageClassificationInputs([changed]);
+		provider.forSource("synthetic blocking first source").finish();
+		await until(() => provider.requests.length === 2);
+		provider.forSource("synthetic unaffected later source").finish();
+		await settled(backfill);
+		expect(provider.requests).toHaveLength(2);
+		expect(await facts(await reopen())).toEqual(new Map([[first, 0], [separator, 0], [unaffected, 0]]));
+	});
 });
