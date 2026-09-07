@@ -20,6 +20,11 @@ type MessageProjection = { role: "user"; content: UserContent } | { role: "assis
 
 /** Only original real-user content and visible assistant text/tool calls are dependencies. */
 export function projectPreservedUserMessageClassifierMessage(message: AgentMessage): MessageProjection | null {
+	return projectClassifierMessage(message, true);
+}
+
+/** Validation borrows arguments only for its synchronous comparison; snapshots own independent arguments. */
+function projectClassifierMessage(message: AgentMessage, cloneArguments: boolean): MessageProjection | null {
 	if (message.role === "user" && message.synthetic !== true && message.attribution !== "agent") {
 		const content = typeof message.content === "string" ? [{ type: "text" as const, text: message.content }] : message.content;
 		return {
@@ -38,7 +43,7 @@ export function projectPreservedUserMessageClassifierMessage(message: AgentMessa
 	for (const part of message.content) {
 		if (part.type === "text" && part.text.length > 0) content.push({ type: "text", text: part.text });
 		else if (part.type === "toolCall") {
-			content.push({ type: "toolCall", name: part.name, arguments: structuredClone(part.arguments) });
+			content.push({ type: "toolCall", name: part.name, arguments: cloneArguments ? structuredClone(part.arguments) : part.arguments });
 		}
 	}
 	return content.length > 0 ? { role: "assistant", content } : null;
@@ -122,7 +127,7 @@ export function buildPreservedUserMessageClassifierInput(
 	return undefined;
 }
 
-/** Bounded by the required neighbor window, without materializing an entire branch. */
+/** Cold synchronous fallback: absent neighbors can require the full prefix. Use cooperative iteration for large scans. */
 export function buildPreservedUserMessageClassifierInputFromLookup(
 	targetId: string,
 	getEntry: (id: string) => SessionEntry | undefined,
@@ -164,7 +169,7 @@ function matchesClassifierSource(
 ): boolean {
 	const entry = getEntry(sourceId);
 	if (entry?.type !== "message" || entry.id !== sourceId) return false;
-	const projection = projectPreservedUserMessageClassifierMessage(entry.message);
+	const projection = projectClassifierMessage(entry.message, false);
 	return projection?.role === role && Bun.deepEquals(content, projection.content);
 }
 
