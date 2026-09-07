@@ -6,6 +6,7 @@ import {
 	DEFAULT_PRESERVATION_CATEGORY_ACTIONS,
 	MESSAGE_OVERRIDE_CUSTOM_TYPE,
 	USER_MESSAGE_CLASSIFICATION_CUSTOM_TYPE,
+	INVALIDATED_USER_MESSAGE_CLASSIFICATION_CUSTOM_TYPE,
 	type PreservationPolicySettings,
 } from "../src/session/preserved-message-settings";
 import {
@@ -185,5 +186,16 @@ describe("source preservation policy", () => {
 		expect(q.appendEntries(link([control("change", MESSAGE_OVERRIDE_CUSTOM_TYPE, { messageIds: ["u2", "u3"], state: "exclude" }), user("u4", "new", "keep")], "u3"))).toBe(true);
 		expect([...capture].map(group => group.id)).toEqual(["u1"]);
 		expect([...q.getManualGroups({ nonAutoOnly: true })].map(group => group.id)).toEqual(["u1", "u2", "u3", "u4"]);
+	});
+
+	it("keeps unsupported and quarantined classification metadata visibly unknown on reload", async () => {
+		const q = await query([user("unknown", "original"), user("invalidated", "replacement"),
+			control("future", USER_MESSAGE_CLASSIFICATION_CUSTOM_TYPE, { v: 2, c: ["unknown", 1] }),
+			control("quarantine", INVALIDATED_USER_MESSAGE_CLASSIFICATION_CUSTOM_TYPE, { v: 2, c: ["invalidated", 1] })]);
+		expect(q.classificationStatus("unknown")).toBe("unsupported");
+		expect(q.classificationStatus("invalidated")).toBe("invalidated");
+		expect(q.rowAt(0)!.categoryMask).toBeUndefined();
+		expect(q.rowAt(1)!.categoryMask).toBeUndefined();
+		expect([...q.select({ maximumContext: 1000 }).P]).toEqual([]);
 	});
 });

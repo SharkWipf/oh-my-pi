@@ -6,6 +6,7 @@ import {
 	PRESERVED_USER_MESSAGE_CATEGORIES,
 	MESSAGE_OVERRIDE_CUSTOM_TYPE,
 	USER_MESSAGE_CLASSIFICATION_CUSTOM_TYPE,
+	INVALIDATED_USER_MESSAGE_CLASSIFICATION_CUSTOM_TYPE,
 	decodeCompactionMessageOverride,
 	unpackPreservedUserMessageClassifications,
 	decodePreservedUserMessageClassifications,
@@ -367,6 +368,12 @@ export class PreservedMessageQuery {
 						if (typeof id === "string" && this.#positions.has(id)) this.#classificationProblems.set(id, decoded.status);
 					}
 				}
+			} else if (entry.customType === INVALIDATED_USER_MESSAGE_CLASSIFICATION_CUSTOM_TYPE) {
+				const packed = entry.data as { c?: unknown } | undefined;
+				if (Array.isArray(packed?.c)) for (let i = 0; i < packed.c.length; i += 2) {
+					const id = packed.c[i];
+					if (typeof id === "string" && this.#positions.has(id)) this.#classificationProblems.set(id, "invalidated");
+				}
 			}
 			return;
 		}
@@ -727,11 +734,20 @@ export async function readPreservedUserMessageClassificationMasks(
 	entries: readonly SessionEntry[], options: PreservationBuildOptions,
 ): Promise<ReadonlyMap<string, number> | undefined> {
 	let deadline = performance.now() + (options.sliceMs ?? 4);
+	let offset = entries.length;
+	while (offset > 0 && entries[offset - 1]!.type !== "reset_boundary") {
+		offset--;
+		if (performance.now() >= deadline) {
+			await (options.yieldControl?.() ?? new Promise<void>(resolve => setTimeout(resolve, 0)));
+			if (!options.isCurrent()) return undefined;
+			deadline = performance.now() + (options.sliceMs ?? 4);
+		}
+	}
 	const users = new Set<string>();
 	const masks = new Map<string, number>();
-	for (const entry of entries) {
-		if (entry.type === "reset_boundary") { users.clear(); masks.clear(); }
-		else if (isPreservationUser(entry)) users.add(entry.id);
+	for (let index = offset; index < entries.length; index++) {
+		const entry = entries[index]!;
+		if (isPreservationUser(entry)) users.add(entry.id);
 		else if (entry.type === "custom" && entry.customType === USER_MESSAGE_CLASSIFICATION_CUSTOM_TYPE) {
 			for (const { id, mask } of unpackPreservedUserMessageClassifications(entry.data)) if (users.has(id)) masks.set(id, mask);
 		}
