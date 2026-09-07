@@ -79,7 +79,7 @@ test("next-real legacy migration preserves installed history and reports unavail
 					? manager.appendMessage({ role: "user", content: "Available original retained tail", timestamp: 9 })
 					: rendered.firstKeptEntryId;
 				const missingId = kind === "original-image" ? imageSourceId : boundary;
-				const importedId = manager.appendCompaction(rendered.summary, rendered.shortSummary, boundary, rendered.tokensBefore, {
+				const importedId: string = manager.appendCompaction(rendered.summary, rendered.shortSummary, boundary, rendered.tokensBefore, {
 					method: kind === "original-image" ? "remote" : "snapcompact",
 					preserveData: structuredClone(kind === "original-image" ? legacyNative : legacyArchive),
 					details: rendered.details,
@@ -90,7 +90,7 @@ test("next-real legacy migration preserves installed history and reports unavail
 				}
 				manager.appendMessage({ role: "user", content: "Fresh ordinary tail", timestamp: 20 });
 				await manager.flush();
-				const installedEntry = JSON.stringify(manager.getEntry(importedId));
+				const installedEntry: string | undefined = JSON.stringify(manager.getEntry(importedId));
 				const installedContext = JSON.stringify(convertToLlm(manager.buildSessionContext().messages));
 				const agent = new Agent({ initialState: { model, messages: manager.buildSessionContext().messages, systemPrompt: [], tools: [] }, streamFn: noProvider });
 				const session = new AgentSession({ agent, sessionManager: manager, settings, modelRegistry: new ModelRegistry(auth) });
