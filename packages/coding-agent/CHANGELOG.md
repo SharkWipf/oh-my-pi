@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in `advisor.compactBeforeGuidance`: active advisors review after ordinary primary context maintenance, including speculative compaction and grace deferral. Successful terminal reviews use the current roster once after final maintenance and are discarded on session invalidation.
+
 ### Fixed
 
 - The startup update notice counts every change in a release: bullets written above a `###` heading now count under `Other`, and `+`/`*` markers and lightly indented bullets count like `-`.

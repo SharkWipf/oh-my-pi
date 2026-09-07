@@ -1410,6 +1410,10 @@ export class AgentSession {
 		this.agent.setRawSseEventInterceptor(this.#onSseEvent);
 		this.agent.setOnTurnEnd(async (messages, signal, context) => {
 			if (signal?.aborted) return;
+			const generation = this.#promptGeneration;
+			const compactBeforeGuidance =
+				this.settings.get("advisor.compactBeforeGuidance") && this.#advisors.isAdvisorActive();
+			this.#deferredTerminalAdvisorReview = undefined;
 			const rewindReport = this.#extractRewindReport(messages);
 			if (rewindReport) {
 				this.#pendingRewindReport = undefined;
@@ -1417,6 +1421,24 @@ export class AgentSession {
 			}
 			this.#loopGuards.recordTurn(messages, context);
 			await this.#prewalk.advanceAtTurnEnd(messages, context);
+			if (compactBeforeGuidance) {
+				if (signal?.aborted || generation !== this.#promptGeneration || this.#abortInProgress || this.#isDisposed)
+					return;
+				if (context?.willContinue) {
+					await this.#maintenance.maintainContextMidRun(messages, signal, context);
+					if (signal?.aborted || generation !== this.#promptGeneration || this.#abortInProgress || this.#isDisposed)
+						return;
+					await this.#advisors.onPrimaryTurnEnd(messages, true, signal);
+				} else if (
+					context?.message.role === "assistant" &&
+					context.message.stopReason !== "error" &&
+					context.message.stopReason !== "aborted"
+				) {
+					// Final maintenance belongs to agent_end, including grace and speculation.
+					this.#deferredTerminalAdvisorReview = { generation, message: context.message, signal };
+				}
+				return;
+			}
 			await this.#advisors.onPrimaryTurnEnd(messages, context?.willContinue, signal);
 			await this.#maintenance.maintainContextMidRun(messages, signal, context);
 		});
@@ -2393,6 +2415,10 @@ export class AgentSession {
 
 	// Track last assistant message for auto-compaction check
 	#lastAssistantMessage: AssistantMessage | undefined = undefined;
+	/** Successful terminal turn awaiting the ordinary agent_end maintenance boundary. */
+	#deferredTerminalAdvisorReview:
+		| { generation: number; message: AssistantMessage; signal: AbortSignal | undefined }
+		| undefined;
 	/**
 	 * Classifier-refusal turn pruned from active context at settle (#3591).
 	 * Retained until the next run starts so post-settle readers
@@ -2793,6 +2819,7 @@ export class AgentSession {
 		// A fresh run supersedes the previously settled (and pruned) refusal
 		// turn: state-based lookups take over again.
 		if (event.type === "agent_start") {
+			this.#deferredTerminalAdvisorReview = undefined;
 			this.#prunedTerminalRefusal = undefined;
 			this.#emitRunState("running");
 		}
@@ -2820,6 +2847,10 @@ export class AgentSession {
 		// toolUse) assistant message and skipping settle-only work.
 		if (event.type === "message_end" && event.message.role === "assistant") {
 			this.#lastAssistantMessage = event.message;
+			if (event.message.stopReason === "error" || event.message.stopReason === "aborted") {
+				// A failed queued follow-up may bypass onTurnEnd after an earlier successful stop.
+				this.#deferredTerminalAdvisorReview = undefined;
+			}
 		}
 		// Expected internal transitions stamp a structural suppression flag on the
 		// persisted message BEFORE the obfuscator's display-side copy below, so the
@@ -3149,6 +3180,23 @@ export class AgentSession {
 			// maintenance can emit agent_end, so preserve the state at settle entry.
 			const ttsrAbortPendingAtAgentEnd = this.#ttsr.abortPending;
 			const emitAgentEndNotification = async (options?: { willContinue?: boolean }) => {
+				const deferred = this.#deferredTerminalAdvisorReview;
+				if (deferred && settledMessages.includes(deferred.message)) {
+					// Consume only this settle's receipt before calling the current roster.
+					this.#deferredTerminalAdvisorReview = undefined;
+					if (
+						deferred.generation === this.#promptGeneration &&
+						!deferred.signal?.aborted &&
+						!this.#abortInProgress &&
+						!this.#isDisposed
+					) {
+						await this.#advisors.onPrimaryTurnEnd(
+							[...this.agent.state.messages],
+							options?.willContinue,
+							this.#postPromptTasksAbortController.signal,
+						);
+					}
+				}
 				this.#emitRunState("idle");
 				// Public agent_end is held out of the eager display pass and emitted
 				// here after maintenance routing, tagged isTerminal so subscribers can
@@ -4370,6 +4418,7 @@ export class AgentSession {
 	 */
 	beginDispose(): void {
 		this.#isDisposed = true;
+		this.#deferredTerminalAdvisorReview = undefined;
 		this.#modelDiscoveryAbortController.abort();
 		this.#queuedMessageDrainBlocked = false;
 		this.#usagePreflightReadyForNextModelCall = false;
@@ -4723,6 +4772,7 @@ export class AgentSession {
 		//     re-deliver stale tool output into the cleared conversation
 		//     (mirrors newSession()).
 		this.#promptGeneration++;
+		this.#deferredTerminalAdvisorReview = undefined;
 		await this.#cancelPostPromptTasks();
 		this.#cancelOwnAsyncJobs();
 
@@ -7495,6 +7545,7 @@ export class AgentSession {
 			for (const controller of this.#usagePreflightAbortControllers) controller.abort();
 			this.abortRetry();
 			this.#promptGeneration++;
+			this.#deferredTerminalAdvisorReview = undefined;
 			this.#scheduledHiddenNextTurnGeneration = undefined;
 			// Abort the handoff first so generic compaction cancellation cannot replace
 			// the harness reason with an unreasoned "Handoff cancelled".
