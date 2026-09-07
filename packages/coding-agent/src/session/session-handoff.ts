@@ -17,6 +17,7 @@ import { obfuscateProviderContext } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { HandoffResult, SessionHandoffOptions } from "./agent-session-types";
 import type { SessionManager } from "./session-manager";
+import { composeProviderRequirements } from "./session-requirements";
 
 function createHandoffFileName(date = new Date()): string {
 	const fileTimestamp = date.toISOString().replace(/[:.]/g, "-");
@@ -154,7 +155,11 @@ export class SessionHandoff {
 			const handoffContext = await this.#host.agent.buildSideRequestContext(
 				handoffLlmMessages,
 				this.#host.baseSystemPrompt(),
+
 			);
+			const requestContext = options?.requirementsSnapshot
+				? composeProviderRequirements(handoffContext, options.requirementsSnapshot, text => this.#host.agent.tokenizer.countTokens(text)).context
+				: handoffContext;
 			const handoffStreamOptions = this.#host.prepareSimpleStreamOptions(
 				{
 					apiKey: this.#host.modelRegistry.resolver(model, cacheSessionId),
@@ -169,7 +174,7 @@ export class SessionHandoff {
 				model.provider,
 			);
 			const rawHandoffText = await generateHandoffFromContext(
-				obfuscateProviderContext(this.#host.obfuscator, handoffContext),
+				obfuscateProviderContext(this.#host.obfuscator, requestContext),
 				model,
 				{
 					streamOptions: handoffStreamOptions,

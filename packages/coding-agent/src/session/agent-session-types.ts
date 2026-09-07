@@ -41,6 +41,7 @@ import type { XdevState } from "../tools/xdev";
 import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
 import type { UserMessageProducer } from "./messages";
 import type { SessionManager } from "./session-manager";
+import type { RequirementsApplicableSnapshot } from "./session-requirements";
 
 /** Maximum time the interactive shutdown path waits for Mnemopi consolidation. */
 export const SHUTDOWN_CONSOLIDATE_BUDGET_MS = 1_500;
@@ -382,6 +383,8 @@ export interface HandoffResult {
 export interface SessionHandoffOptions {
 	autoTriggered?: boolean;
 	signal?: AbortSignal;
+	/** Frozen requirements state for the compaction operation that owns this handoff. */
+	requirementsSnapshot?: RequirementsApplicableSnapshot;
 }
 
 /** Result from cycleModel(). */
