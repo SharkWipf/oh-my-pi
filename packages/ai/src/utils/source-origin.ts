@@ -84,6 +84,18 @@ export function validateNativeItemOrigins(value: unknown): NativeItemOrigin[] | 
 	return nativeItemOriginsSchema.allows(value) ? value : undefined;
 }
 
+/** Whether a native archive has usable source identity, without requiring exact retained spans. */
+export function hasNativeHistorySourceMapping(items: readonly object[], value: unknown): boolean {
+	const itemOrigins = validateNativeItemOrigins(value);
+	if (!itemOrigins || itemOrigins.length !== items.length) return false;
+	for (let index = 0; index < items.length; index++) {
+		if (itemOrigins[index]!.kind !== "unknown") continue;
+		const item = items[index]!;
+		if (!("type" in item) || (item.type !== "compaction" && item.type !== "compaction_summary")) return false;
+	}
+	return true;
+}
+
 type PhysicalSnapshot =
 	| { kind: "note"; text: string }
 	| { kind: "frame"; data: string; mimeType: string; detail: ImageContent["detail"]; url: string | undefined; fileProvider: string | undefined; fileId: string | undefined };
