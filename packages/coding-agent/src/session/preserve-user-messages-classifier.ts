@@ -57,24 +57,57 @@ function inputSnapshot(
 	};
 }
 
-/** Streams a single ancestor-ordered branch; clear boundaries reset all relative context. */
-export function* iteratePreservedUserMessageClassifierInputs(
-	entries: readonly SessionEntry[],
-): Generator<{ entryId: string; input: PreservedUserMessageClassifierInput }> {
-	let previousUser: { id: string; content: UserContent } | null = null;
-	let assistants: { id: string; content: AssistantContent }[] = [];
-	for (const entry of entries) {
-		if (entry.type === "reset_boundary") { previousUser = null; assistants = []; continue; }
-		if (entry.type !== "message") continue;
+class ClassifierInputCursor {
+	#previousUser: { id: string; content: UserContent } | null = null;
+	#assistants: { id: string; content: AssistantContent }[] = [];
+
+	push(entry: SessionEntry): { entryId: string; input: PreservedUserMessageClassifierInput } | undefined {
+		if (entry.type === "reset_boundary") {
+			this.#previousUser = null;
+			this.#assistants = [];
+			return undefined;
+		}
+		if (entry.type !== "message") return undefined;
 		const projection = projectPreservedUserMessageClassifierMessage(entry.message);
-		if (!projection) continue;
+		if (!projection) return undefined;
 		if (projection.role === "user") {
 			const current = { id: entry.id, content: projection.content };
-			yield { entryId: entry.id, input: inputSnapshot(current, previousUser, assistants) };
-			previousUser = current;
-		} else {
-			if (assistants.length === 2) assistants.shift();
-			assistants.push({ id: entry.id, content: projection.content });
+			const input = inputSnapshot(current, this.#previousUser, this.#assistants);
+			this.#previousUser = current;
+			return { entryId: entry.id, input };
+		}
+		if (this.#assistants.length === 2) this.#assistants.shift();
+		this.#assistants.push({ id: entry.id, content: projection.content });
+		return undefined;
+	}
+}
+
+/** Streams a single ancestor-ordered branch; clear boundaries reset all relative context. */
+export function* iteratePreservedUserMessageClassifierInputs(
+	entries: Iterable<SessionEntry>,
+): Generator<{ entryId: string; input: PreservedUserMessageClassifierInput }> {
+	const cursor = new ClassifierInputCursor();
+	for (const entry of entries) {
+		const target = cursor.push(entry);
+		if (target) yield target;
+	}
+}
+
+/** Cooperates even across long stretches with no eligible user; cancellation is checked after every await. */
+export async function* iteratePreservedUserMessageClassifierInputsCooperatively(
+	entries: Iterable<SessionEntry>,
+	isCurrent: () => boolean,
+): AsyncGenerator<{ entryId: string; input: PreservedUserMessageClassifierInput }> {
+	const cursor = new ClassifierInputCursor();
+	let deadline = performance.now() + 4;
+	for (const entry of entries) {
+		if (!isCurrent()) return;
+		const target = cursor.push(entry);
+		if (target) yield target;
+		if (performance.now() >= deadline) {
+			await new Promise<void>(resolve => setImmediate(resolve));
+			if (!isCurrent()) return;
+			deadline = performance.now() + 4;
 		}
 	}
 }
@@ -121,6 +154,36 @@ export function preservedUserMessageClassifierInputsEqual(
 	right: PreservedUserMessageClassifierInput | undefined,
 ): boolean {
 	return Bun.deepEquals(left, right);
+}
+
+function matchesClassifierSource(
+	sourceId: string,
+	role: MessageProjection["role"],
+	content: UserContent | AssistantContent,
+	getEntry: (id: string) => SessionEntry | undefined,
+): boolean {
+	const entry = getEntry(sourceId);
+	if (entry?.type !== "message" || entry.id !== sourceId) return false;
+	const projection = projectPreservedUserMessageClassifierMessage(entry.message);
+	return projection?.role === role && Bun.deepEquals(content, projection.content);
+}
+
+/**
+ * At most four direct source lookups. Caller MUST independently establish active ancestry
+ * and unchanged neighbor selection through the source-mutation invalidation owner.
+ * This compares named source bodies only; it cannot discover newly eligible intervening messages.
+ */
+export function matchesPreservedUserMessageClassifierSources(
+	input: PreservedUserMessageClassifierInput,
+	getEntry: (id: string) => SessionEntry | undefined,
+): boolean {
+	if (!matchesClassifierSource(input.sourceIds.current, "user", input.currentMessage, getEntry)) return false;
+	if (input.sourceIds.previousUser !== null &&
+		!matchesClassifierSource(input.sourceIds.previousUser, "user", input.previousUserMessage!, getEntry)) return false;
+	for (let i = 0; i < input.sourceIds.previousAssistants.length; i++) {
+		if (!matchesClassifierSource(input.sourceIds.previousAssistants[i]!, "assistant", input.previousAssistantMessages[i]!, getEntry)) return false;
+	}
+	return true;
 }
 
 export interface PreservedUserMessageClassifierRequestOptions {

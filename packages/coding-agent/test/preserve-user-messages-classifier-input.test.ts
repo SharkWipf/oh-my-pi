@@ -8,6 +8,8 @@ import {
 	buildPreservedUserMessageClassifierRequest,
 	classifyPreservedUserMessage,
 	iteratePreservedUserMessageClassifierInputs,
+	iteratePreservedUserMessageClassifierInputsCooperatively,
+	matchesPreservedUserMessageClassifierSources,
 	parsePreservedUserMessageCategoryMask,
 	preservedUserMessageClassifierInputsEqual,
 } from "../src/session/preserve-user-messages-classifier";
@@ -106,5 +108,44 @@ describe("classifier request boundary", () => {
 			model,
 			complete: async () => ({ ...assistant([{ type: "text", text: "<labels>00000000000</labels>" }]), stopReason: "length" }),
 		})).rejects.toThrow("length");
+	});
+});
+
+describe("bounded classifier scanning and validation", () => {
+	it("validates only the four named inputs and detects changed source bodies", () => {
+		const entries = branch([
+			user("previous"),
+			assistant([{ type: "text", text: "first assistant" }]),
+			assistant([{ type: "toolCall", id: "call", name: "read", arguments: { path: "source.ts" } }]),
+			user("current"),
+		]);
+		const byId = new Map(entries.map(entry => [entry.id, entry]));
+		const input = buildPreservedUserMessageClassifierInput(entries, "3")!;
+		let lookups = 0;
+		expect(matchesPreservedUserMessageClassifierSources(input, id => { lookups++; return byId.get(id); })).toBe(true);
+		expect(lookups).toBe(4);
+		for (const id of ["0", "1", "2", "3"]) {
+			const entry = byId.get(id)!;
+			if (entry.type !== "message") throw new Error("fixture");
+			const saved = entry.message;
+			entry.message = saved.role === "user" ? user("rewritten") : assistant([{ type: "text", text: "rewritten" }]);
+			expect(matchesPreservedUserMessageClassifierSources(input, key => byId.get(key))).toBe(false);
+			entry.message = saved;
+		}
+		byId.delete("1");
+		expect(matchesPreservedUserMessageClassifierSources(input, id => byId.get(id))).toBe(false);
+	});
+
+	it("keeps cooperative source-neighbor projection identical across empty users, tool calls and resets", async () => {
+		const entries = branch([
+			user("older"), assistant([{ type: "text", text: "visible" }, { type: "thinking", thinking: "excluded" }]),
+			user(""), assistant([{ type: "toolCall", id: "call", name: "read", arguments: { path: "source.ts" } }]),
+			user([image]), user("before reset"), user("ignored"), user("after reset"),
+		]);
+		entries[6] = { type: "reset_boundary", id: "6", parentId: "5", timestamp: "2026-01-01" };
+		const actual = [];
+		for await (const target of iteratePreservedUserMessageClassifierInputsCooperatively(entries, () => true)) actual.push(target);
+		expect(actual).toEqual([...iteratePreservedUserMessageClassifierInputs(entries)]);
+		expect(actual.at(-1)!.input.sourceIds).toEqual({ current: "7", previousUser: null, previousAssistants: [] });
 	});
 });
