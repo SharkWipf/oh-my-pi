@@ -143,7 +143,7 @@ describe("message classifier session jobs", () => {
 	}
 
 	beforeEach(() => {
-		dir = TempDir.createSync("message-classifier-jobs-");
+		dir = TempDir.createSync("@message-classifier-jobs-");
 		auth = createInMemoryAuthStorage();
 		auth.setRuntimeApiKey(model.provider, "synthetic-key");
 		registry = new ModelRegistry(auth, dir.join("models.yml"));
