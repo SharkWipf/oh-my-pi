@@ -47,10 +47,22 @@ describe("SettingsList", () => {
 
 	it("keeps the focused value and warning visible in a one-row narrow viewport", () => {
 		const changes: string[] = [];
-		const list = new SettingsList([
-			{ id: "first", label: "Other setting", currentValue: "off" },
-			{ id: "long", label: "An unusually long setting label", currentValue: "true", values: ["true", "false"], warning: "Risk", },
-		], 5, { ...testTheme, warningMark: "!" }, (_id, value) => changes.push(value), () => {});
+		const list = new SettingsList(
+			[
+				{ id: "first", label: "Other setting", currentValue: "off" },
+				{
+					id: "long",
+					label: "An unusually long setting label",
+					currentValue: "true",
+					values: ["true", "false"],
+					warning: "Risk",
+				},
+			],
+			5,
+			{ ...testTheme, warningMark: "!" },
+			(_id, value) => changes.push(value),
+			() => {},
+		);
 		list.selectItem("long");
 		list.setMaxVisible(1);
 		const narrow = list.render(36);

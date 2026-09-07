@@ -86,6 +86,7 @@ class TextInputSubmenu extends Container {
 		private readonly onSubmit: (value: string) => void,
 		private readonly onCancel: () => void,
 		private readonly getHeight?: () => number,
+		allowUnset = true,
 	) {
 		super();
 
@@ -113,7 +114,18 @@ class TextInputSubmenu extends Container {
 		this.addChild(this.#input);
 		this.addChild(new Spacer(1));
 		this.addChild(this.#error);
-		this.addChild(new Text(theme.fg("dim", "  Enter to save · Esc to cancel · Clear field to unset"), 0, 0));
+		this.addChild(
+			new Text(
+				theme.fg(
+					"dim",
+					allowUnset
+						? "  Enter to save · Esc to cancel · Clear field to unset"
+						: "  Enter to save · Esc to cancel",
+				),
+				0,
+				0,
+			),
+		);
 	}
 
 	handleInput(data: string): void {
@@ -123,7 +135,14 @@ class TextInputSubmenu extends Container {
 	override render(width: number): readonly string[] {
 		if (!this.getHeight) return super.render(width);
 		const title = truncateToWidth(this.children[0]?.render(width).join(" ") ?? "", width);
-		return [title, ...this.#input.render(width), ...this.#error.render(width), ...this.children.filter(child => child instanceof Text && child !== this.children[0] && child !== this.#error).flatMap(child => child.render(width))].slice(0, Math.max(1, this.getHeight()));
+		return [
+			title,
+			...this.#input.render(width),
+			...this.#error.render(width),
+			...this.children
+				.filter(child => child instanceof Text && child !== this.children[0] && child !== this.#error)
+				.flatMap(child => child.render(width)),
+		].slice(0, Math.max(1, this.getHeight()));
 	}
 }
 
@@ -136,23 +155,40 @@ class SettingsSubmenu extends Container {
 		onChange: (id: string, value: string) => void,
 		onCancel: () => void,
 		private readonly getHeight: () => number,
+		private readonly onRender?: () => void,
 	) {
 		super();
-		this.list = new SettingsList(items, 3, getSettingsListTheme(), onChange, onCancel, { layout: "flat", typeToSearch: false, hint: "" });
+		this.list = new SettingsList(items, 3, getSettingsListTheme(), onChange, onCancel, {
+			layout: "flat",
+			typeToSearch: false,
+			hint: "",
+		});
 		this.addChild(this.list);
 	}
 	override render(width: number): readonly string[] {
 		if (this.list.hasOpenSubmenu()) return this.list.render(width);
+		this.onRender?.();
 		this.list.setMaxVisible(Math.max(1, this.getHeight() - 5));
 		return [truncateToWidth(theme.bold(theme.fg("accent", this.title)), width), ...this.list.render(width)];
 	}
-	handleInput(data: string): void { this.list.handleInput(data); }
+	handleInput(data: string): void {
+		this.list.handleInput(data);
+	}
 	routeMouse(event: SgrMouseEvent, line: number, col: number): void {
-		if (this.list.hasOpenSubmenu()) { this.list.routeSubmenuMouse(event, line, col); return; }
+		if (this.list.hasOpenSubmenu()) {
+			this.list.routeSubmenuMouse(event, line, col);
+			return;
+		}
 		line--;
-		if (event.wheel !== null) { this.list.handleWheel(event.wheel); return; }
+		if (event.wheel !== null) {
+			this.list.handleWheel(event.wheel);
+			return;
+		}
 		const id = this.list.hitTest(line, col);
-		if (event.motion) { this.list.setHoverItem(id ?? null); return; }
+		if (event.motion) {
+			this.list.setHoverItem(id ?? null);
+			return;
+		}
 		if (event.leftClick && id !== undefined) {
 			const activate = this.list.getSelectedItem()?.id === id;
 			this.list.selectItem(id);
@@ -171,34 +207,59 @@ class ModelSelectorSubmenu extends Container {
 		private readonly getHeight: () => number,
 	) {
 		super();
-		const roles = () => new SelectSubmenu("Classifier Model", "Automatic uses @tiny; no active-model fallback.", [
-			{ value: "", label: "Automatic (@tiny)" },
-			...getKnownRoleIds(settings).map(role => ({ value: formatModelRoleAlias(role), label: formatModelRoleAlias(role), description: getRoleInfo(role, settings).name })),
-			{ value: "__browse", label: "Browse models…" },
-		], current, value => {
-			if (value !== "__browse") { onSelect(value); return; }
-			const browser = new ModelBrowser(settings, { emptyText: () => "No models available — configure provider credentials." });
-			const available = registry?.getAvailable() ?? [];
-			const assignments = resolveRoleAssignments(settings, registry?.getAll() ?? [], available);
-			const storage = settings.getStorage();
-			const mruOrder = storage?.getModelUsageOrder() ?? [];
-			const items = buildBrowserItems(available);
-			sortModelItems(items, { roles: assignments, mruOrder });
-			browser.setItems(items);
-			browser.setRoles(assignments);
-			browser.setMruOrder(mruOrder);
-			browser.setPerfStats(storage?.getModelPerf() ?? new Map());
-			browser.onActivate = item => onSelect(item.selector);
-			browser.onCancel = () => { this.#active = roles(); };
-			this.#active = browser;
-		}, onCancel, undefined, undefined, undefined, getHeight);
+		const roles = () =>
+			new SelectSubmenu(
+				"Classifier Model",
+				"Automatic uses @tiny; no active-model fallback.",
+				[
+					{ value: "", label: "Automatic (@tiny)" },
+					...getKnownRoleIds(settings).map(role => ({
+						value: formatModelRoleAlias(role),
+						label: formatModelRoleAlias(role),
+						description: getRoleInfo(role, settings).name,
+					})),
+					{ value: "__browse", label: "Browse models…" },
+				],
+				current,
+				value => {
+					if (value !== "__browse") {
+						onSelect(value);
+						return;
+					}
+					const browser = new ModelBrowser(settings, {
+						emptyText: () => "No models available — configure provider credentials.",
+					});
+					const available = registry?.getAvailable() ?? [];
+					const assignments = resolveRoleAssignments(settings, registry?.getAll() ?? [], available);
+					const storage = settings.getStorage();
+					const mruOrder = storage?.getModelUsageOrder() ?? [];
+					const items = buildBrowserItems(available);
+					sortModelItems(items, { roles: assignments, mruOrder });
+					browser.setItems(items);
+					browser.setRoles(assignments);
+					browser.setMruOrder(mruOrder);
+					browser.setPerfStats(storage?.getModelPerf() ?? new Map());
+					browser.onActivate = item => onSelect(item.selector);
+					browser.onCancel = () => {
+						this.#active = roles();
+					};
+					this.#active = browser;
+				},
+				onCancel,
+				undefined,
+				undefined,
+				undefined,
+				getHeight,
+			);
 		this.#active = roles();
 	}
 	override render(width: number): readonly string[] {
 		if (this.#active instanceof ModelBrowser) this.#active.setMaxVisible(Math.max(1, this.getHeight() - 5));
 		return this.#active.render(width);
 	}
-	handleInput(data: string): void { this.#active.handleInput?.(data); }
+	handleInput(data: string): void {
+		this.#active.handleInput?.(data);
+	}
 	routeMouse(event: SgrMouseEvent, line: number, col: number): void {
 		if (this.#active instanceof ModelBrowser) this.#active.routeMouse(event, line);
 		else if (this.#active instanceof SelectSubmenu) this.#active.routeMouse(event, line, col);
@@ -657,6 +718,8 @@ export interface SettingsSelectorOptions {
 export interface SettingsRuntimeContext {
 	/** Registry powering the native classifier role/model browser. */
 	modelRegistry?: ModelRegistry;
+	/** Owner-formatted live selected quota/overflow; undefined means unavailable, never zero. */
+	getPreservationLimitUsage?: (path: SettingPath) => string | undefined;
 	/** Effective selected model maximum context; never subtract reserve. */
 	maxContextTokens?: number;
 	/** Available thinking levels (from session) */
@@ -1110,30 +1173,59 @@ export class SettingsSelectorComponent implements Component {
 		const item = {
 			id: def.path,
 			label: def.label,
-			description: def.path === "compaction.keepUserMessagesLlm" && !settings.get("compaction.keepUserMessages")
-				? `Live tagging inactive while Remember User Messages is off. Saved toggle is preserved. ${def.description}`
-				: def.description,
+			description:
+				def.path === "compaction.keepUserMessagesLlm" && !settings.get("compaction.keepUserMessages")
+					? `Live tagging inactive while Remember User Messages is off. Saved toggle is preserved. ${def.description}`
+					: def.description,
 			warning: def.warning,
 			changed: this.#isChanged(def, currentValue),
 		};
 
 		switch (def.type) {
 			case "preservationLimit":
-				return { ...item, currentValue: this.#limitLabel(currentValue), submenu: (_cv, done) => this.#createLimit(def, done) };
+				return {
+					...item,
+					currentValue: this.#limitLabel(currentValue),
+					submenu: (_cv, done) => this.#createLimit(def, done),
+				};
 			case "preservationCap":
 				return { ...item, currentValue: this.#capSummary(), submenu: (_cv, done) => this.#createCap(done) };
 			case "categoryDispositions":
-				return { ...item, currentValue: this.#categorySummary(), submenu: (_cv, done) => this.#createCategories(done) };
+				return {
+					...item,
+					currentValue: this.#categorySummary(),
+					submenu: (_cv, done) => this.#createCategories(done),
+				};
 			case "regexRules":
-				return { ...item, currentValue: `${Object.keys(settings.get("compaction.keepUserMessagesRegexRules")).length} rules`, submenu: (_cv, done) => this.#createRegexRules(done) };
+				return {
+					...item,
+					currentValue: `${Object.keys(settings.get("compaction.keepUserMessagesRegexRules")).length} rules`,
+					submenu: (_cv, done) => this.#createRegexRules(done),
+				};
 			case "modelSelector":
-				return { ...item, currentValue: String(currentValue || "Automatic (@tiny)"), submenu: (_cv, done) => this.#createModelSelector(def, done) };
+				return {
+					...item,
+					currentValue: String(currentValue || "Automatic (@tiny)"),
+					submenu: (_cv, done) => this.#createModelSelector(def, done),
+				};
 			case "positiveTokens":
-				return { ...item, currentValue: String(currentValue), submenu: (_cv, done) => this.#validatedInput(def.label, "Positive safe integer; no arbitrary maximum.", String(currentValue), value => {
-					if (!Number.isSafeInteger(Number(value)) || Number(value) <= 0) throw new Error("Enter a positive safe integer");
-					this.#save(def.path, Number(value));
-					done(value);
-				}, () => done()) };
+				return {
+					...item,
+					currentValue: String(currentValue),
+					submenu: (_cv, done) =>
+						this.#validatedInput(
+							def.label,
+							"Positive safe integer; no arbitrary maximum.",
+							String(currentValue),
+							value => {
+								if (!Number.isSafeInteger(Number(value)) || Number(value) <= 0)
+									throw new Error("Enter a positive safe integer");
+								this.#save(def.path, Number(value));
+								done(value);
+							},
+							() => done(),
+						),
+				};
 			case "boolean":
 				return { ...item, currentValue: currentValue ? "true" : "false", values: ["true", "false"] };
 
@@ -1178,8 +1270,23 @@ export class SettingsSelectorComponent implements Component {
 		this.callbacks.onChange(path, value);
 	}
 
-	#validatedInput(label: string, description: string, current: string, submit: (value: string) => void, cancel: () => void): TextInputSubmenu {
-		return new TextInputSubmenu(label, description, current, false, submit, cancel, () => this.#contentRowCount);
+	#validatedInput(
+		label: string,
+		description: string,
+		current: string,
+		submit: (value: string) => void,
+		cancel: () => void,
+	): TextInputSubmenu {
+		return new TextInputSubmenu(
+			label,
+			description,
+			current,
+			false,
+			submit,
+			cancel,
+			() => this.#contentRowCount,
+			false,
+		);
 	}
 
 	#limitLabel(value: unknown): string {
@@ -1192,58 +1299,159 @@ export class SettingsSelectorComponent implements Component {
 	#limitSummary(value: unknown): string {
 		const limit = parsePreservationLimit(value);
 		if (!limit) return "Invalid limit — choose a valid mode/value.";
-		if (limit.mode !== "context-percent") return `Effective limit: ${this.#limitLabel(value)}. Whole eligible sources; stop at the first overflow.`;
+		if (limit.mode !== "context-percent")
+			return `Effective limit: ${this.#limitLabel(value)}. Whole eligible sources; stop at the first overflow.`;
 		const maximum = this.context.maxContextTokens;
 		return maximum !== undefined && Number.isFinite(maximum) && maximum > 0
-			? `${limit.value}% of maximum ${maximum} = ${Math.floor(maximum * limit.value / 100)} tokens (no reserve deduction).`
+			? `${limit.value}% of maximum ${maximum} = ${Math.floor((maximum * limit.value) / 100)} tokens (no reserve deduction).`
 			: `${limit.value}% configured; token ceiling unavailable without an effective model maximum.`;
 	}
 
 	#createLimit(def: SettingDef, done: (value?: string) => void): SettingsSubmenu {
-		let menu: SettingsSubmenu;
+		let displayedValue: unknown;
+		let displayedMaximum: number | undefined;
+		const usage: SettingItem = {
+			id: "usage",
+			label: "Selected quota / overflow",
+			currentValue: "Unavailable",
+			description: "Selected quota and overflow unavailable without a source selection snapshot.",
+		};
 		const save = (limit: PreservationLimit) => {
 			this.#save(def.path, serializePreservationLimit(limit));
 			menu.list.setItems(items());
 		};
 		const items = (): SettingItem[] => {
 			const raw = settings.get(def.path);
+			displayedValue = raw;
+			displayedMaximum = this.context.maxContextTokens;
 			const limit = parsePreservationLimit(raw);
-			const rows: SettingItem[] = [{
-				id: "mode", label: "Mode", currentValue: limit?.mode ?? "Invalid", description: `${def.description} Editing a legacy First/Recent limit saves both effective edges in this layer once; later canonical edits are independent.`,
-				submenu: (_cv, close) => new SelectSubmenu("Limit Mode", def.description, [
-					{ value: "off", label: "Off" }, { value: "all", label: "All" },
-					{ value: "messages", label: "Messages" }, { value: "tokens", label: "Tokens" },
-					{ value: "context-percent", label: "% maximum context" },
-				], limit?.mode ?? "", mode => {
-					if (mode === "off" || mode === "all") save({ mode });
-					else if (mode === "messages" || mode === "tokens" || mode === "context-percent") {
-						save({ mode, value: limit && "value" in limit && limit.mode === mode ? limit.value : mode === "messages" ? 1 : 0 });
-					}
-					close(mode);
-				}, () => close(), undefined, undefined, undefined, () => this.#contentRowCount),
-			}];
+			const rows: SettingItem[] = [
+				{
+					id: "mode",
+					label: "Mode",
+					currentValue: limit?.mode ?? "Invalid",
+					description: `${def.description} Editing a legacy First/Recent limit saves both effective edges in this layer once; later canonical edits are independent.`,
+					submenu: (_cv, close) =>
+						new SelectSubmenu(
+							"Limit Mode",
+							def.description,
+							[
+								{ value: "off", label: "Off" },
+								{ value: "all", label: "All" },
+								{ value: "messages", label: "Messages" },
+								{ value: "tokens", label: "Tokens" },
+								{ value: "context-percent", label: "% maximum context" },
+							],
+							limit?.mode ?? "",
+							mode => {
+								if (mode === "off" || mode === "all") save({ mode });
+								else if (mode === "messages" || mode === "tokens" || mode === "context-percent") {
+									save({
+										mode,
+										value:
+											limit && "value" in limit && limit.mode === mode
+												? limit.value
+												: mode === "messages"
+													? 1
+													: 0,
+									});
+								}
+								close(mode);
+							},
+							() => close(),
+							undefined,
+							undefined,
+							undefined,
+							() => this.#contentRowCount,
+						),
+				},
+			];
 			if (limit && "value" in limit) {
 				const mode = limit.mode;
-				const description = mode === "messages" ? "Positive safe integer." : mode === "tokens" ? "Nonnegative safe integer. Zero is finite, not Off or All." : "Finite 0–100, including decimals. Zero remains finite.";
-				rows.push({ id: "value", label: "Value", currentValue: String(limit.value), description,
+				const description =
+					mode === "messages"
+						? "Positive safe integer."
+						: mode === "tokens"
+							? "Nonnegative safe integer. Zero is finite, not Off or All."
+							: "Finite 0–100, including decimals. Zero remains finite.";
+				rows.push({
+					id: "value",
+					label: "Value",
+					currentValue: String(limit.value),
+					description,
 					submenu: (_cv, close) => {
-						const presets = mode === "context-percent" ? [0, 1, 3, 5, 10, 15, 25, 30, 50, 75, 100] : mode === "messages" ? [1, 3, 5, 10, 15, 25, 50, 100, 250, 500, 1000] : [0, 1, 3, 5, 10, 15, 25, 1000, 2000, 4000, 8000, 16000, 32000];
-						return new SettingsSubmenu("Limit Value", [
-							{ id: "custom", label: "Custom number…", currentValue: String(limit.value), description,
-								submenu: (_v, finish) => this.#validatedInput("Limit Value", description, String(limit.value), value => {
-									const parsed = parsePreservationLimit(`${mode}:${value.trim()}`);
-									if (!parsed) throw new Error(description);
-									save(parsed); finish(value); close(value);
-								}, () => finish()) },
-							...presets.map(value => ({ id: String(value), label: String(value), currentValue: "", values: [String(value)] })),
-						], (id, value) => { if (id !== "custom") { save({ mode, value: Number(value) }); close(value); } }, () => close(), () => this.#contentRowCount);
+						const presets =
+							mode === "context-percent"
+								? [0, 1, 3, 5, 10, 15, 25, 30, 50, 75, 100]
+								: mode === "messages"
+									? [1, 3, 5, 10, 15, 25, 50, 100, 250, 500, 1000]
+									: [0, 1, 3, 5, 10, 15, 25, 1000, 2000, 4000, 8000, 16000, 32000];
+						return new SettingsSubmenu(
+							"Limit Value",
+							[
+								{
+									id: "custom",
+									label: "Custom number…",
+									currentValue: String(limit.value),
+									description,
+									submenu: (_v, finish) =>
+										this.#validatedInput(
+											"Limit Value",
+											description,
+											String(limit.value),
+											value => {
+												const parsed = parsePreservationLimit(`${mode}:${value.trim()}`);
+												if (!parsed) throw new Error(description);
+												save(parsed);
+												finish(value);
+												close(value);
+											},
+											() => finish(),
+										),
+								},
+								...presets.map(value => ({
+									id: String(value),
+									label: String(value),
+									currentValue: "",
+									values: [String(value)],
+								})),
+							],
+							(id, value) => {
+								if (id !== "custom") {
+									save({ mode, value: Number(value) });
+									close(value);
+								}
+							},
+							() => close(),
+							() => this.#contentRowCount,
+						);
 					},
 				});
 			}
-			rows.push({ id: "effective", label: "Effective", currentValue: this.#limitLabel(raw), description: this.#limitSummary(raw) });
+			rows.push({
+				id: "effective",
+				label: "Effective",
+				currentValue: this.#limitLabel(raw),
+				description: this.#limitSummary(raw),
+			});
+			rows.push(usage);
 			return rows;
 		};
-		menu = new SettingsSubmenu(def.label, items(), () => {}, () => done(this.#limitLabel(settings.get(def.path))), () => this.#contentRowCount);
+		const menu: SettingsSubmenu = new SettingsSubmenu(
+			def.label,
+			items(),
+			() => {},
+			() => done(this.#limitLabel(settings.get(def.path))),
+			() => this.#contentRowCount,
+			() => {
+				if (displayedValue !== settings.get(def.path) || displayedMaximum !== this.context.maxContextTokens)
+					menu.list.setItems(items());
+				const summary = this.context.getPreservationLimitUsage?.(def.path);
+				usage.currentValue = summary ?? "Unavailable";
+				usage.description =
+					summary ?? "Selected quota and overflow unavailable without a source selection snapshot.";
+			},
+		);
 		return menu;
 	}
 
@@ -1256,27 +1464,68 @@ export class SettingsSelectorComponent implements Component {
 	}
 
 	#createCap(done: (value?: string) => void): SettingsSubmenu {
-		let menu: SettingsSubmenu;
+		let displayedSummary: string;
+		const usage: SettingItem = { id: "usage", label: "Selected quota / overflow", currentValue: "Unavailable" };
 		const items = (): SettingItem[] => {
+			displayedSummary = this.#capSummary();
 			const cap = settings.get("compaction.keepUserMessagesFilterKeepCap");
-			const rows: SettingItem[] = [{ id: "direction", label: "Direction", currentValue: cap, values: ["keep-last", "keep-first", "uncapped"], description: "Uniform mixed-role cap, including /keep. Complete groups; count distinct linked source entries. Off/All linked edges are uncapped; token/% zero remains finite." }];
+			const rows: SettingItem[] = [
+				{
+					id: "direction",
+					label: "Direction",
+					currentValue: cap,
+					values: ["keep-last", "keep-first", "uncapped"],
+					description:
+						"Uniform mixed-role cap, including /keep. Complete groups; count distinct linked source entries. Off/All linked edges are uncapped; token/% zero remains finite.",
+				},
+			];
 			if (cap !== "uncapped") {
 				const path = cap === "keep-first" ? "compaction.keepFirstLimit" : "compaction.keepLastLimit";
 				const def = getSettingDef(path)!;
-				rows.push({ id: "edge", label: "Linked edge…", currentValue: this.#limitLabel(settings.get(path)), description: "Edits the same First/Recent limit, including when automatic selection is off.", submenu: (_cv, close) => this.#createLimit(def, value => { close(value); menu.list.setItems(items()); }) });
+				rows.push({
+					id: "edge",
+					label: "Linked edge…",
+					currentValue: this.#limitLabel(settings.get(path)),
+					description: "Edits the same First/Recent limit, including when automatic selection is off.",
+					submenu: (_cv, close) =>
+						this.#createLimit(def, value => {
+							close(value);
+							menu.list.setItems(items());
+						}),
+				});
 			}
-			rows.push({ id: "effective", label: "Effective", currentValue: this.#capSummary(), description: this.#capSummary() });
+			rows.push({
+				id: "effective",
+				label: "Effective",
+				currentValue: this.#capSummary(),
+				description: this.#capSummary(),
+			});
+			rows.push(usage);
 			return rows;
 		};
-		menu = new SettingsSubmenu("Always-Keep Limit", items(), (id, value) => {
-			if (id === "direction") this.#save("compaction.keepUserMessagesFilterKeepCap", value);
-			menu.list.setItems(items());
-		}, () => done(this.#capSummary()), () => this.#contentRowCount);
+		const menu: SettingsSubmenu = new SettingsSubmenu(
+			"Always-Keep Limit",
+			items(),
+			(id, value) => {
+				if (id === "direction") this.#save("compaction.keepUserMessagesFilterKeepCap", value);
+				menu.list.setItems(items());
+			},
+			() => done(this.#capSummary()),
+			() => this.#contentRowCount,
+			() => {
+				if (displayedSummary !== this.#capSummary()) menu.list.setItems(items());
+				const summary = this.context.getPreservationLimitUsage?.("compaction.keepUserMessagesFilterKeepCap");
+				usage.currentValue = summary ?? "Unavailable";
+				usage.description =
+					summary ?? "Selected quota and overflow unavailable without a source selection snapshot.";
+			},
+		);
 		return menu;
 	}
 
 	#categorySummary(): string {
-		let keep = 0, never = 0;
+		let keep = 0,
+			never = 0;
 		for (const category of PRESERVED_USER_MESSAGE_CATEGORIES) {
 			const value = settings.get(PRESERVED_USER_MESSAGE_CATEGORY_SETTING_PATHS[category]);
 			if (value === "keep") keep++;
@@ -1286,10 +1535,30 @@ export class SettingsSelectorComponent implements Component {
 	}
 
 	#createCategories(done: (value?: string) => void): SettingsSubmenu {
-		return new SettingsSubmenu("Category Rules — stored tags only", PRESERVED_USER_MESSAGE_CATEGORIES.map(category => {
-			const path = PRESERVED_USER_MESSAGE_CATEGORY_SETTING_PATHS[category];
-			return { id: path, label: PRESERVED_USER_MESSAGE_CATEGORY_LABELS[category], currentValue: this.#actionLabel(settings.get(path)), description: `${getUi(path)?.description ?? ""} Auto defers. Keep > Never > Auto within categories; no category priority.`, submenu: (_cv: string, close: (value?: string) => void) => this.#actionSelector(settings.get(path), value => { this.#save(path, value); close(this.#actionLabel(value)); }, () => close()) };
-		}), () => {}, () => done(this.#categorySummary()), () => this.#contentRowCount);
+		return new SettingsSubmenu(
+			"Category Rules — stored tags only",
+			PRESERVED_USER_MESSAGE_CATEGORIES.map(category => {
+				const path = PRESERVED_USER_MESSAGE_CATEGORY_SETTING_PATHS[category];
+				return {
+					id: path,
+					label: PRESERVED_USER_MESSAGE_CATEGORY_LABELS[category],
+					currentValue: this.#actionLabel(settings.get(path)),
+					description: `${getUi(path)?.description ?? ""} Auto defers. Keep > Never > Auto within categories; no category priority.`,
+					submenu: (_cv: string, close: (value?: string) => void) =>
+						this.#actionSelector(
+							settings.get(path),
+							value => {
+								this.#save(path, value);
+								close(this.#actionLabel(value));
+							},
+							() => close(),
+						),
+				};
+			}),
+			() => {},
+			() => done(this.#categorySummary()),
+			() => this.#contentRowCount,
+		);
 	}
 
 	#actionLabel(value: PreservationAction): string {
@@ -1297,64 +1566,196 @@ export class SettingsSelectorComponent implements Component {
 	}
 
 	#actionSelector(current: string, save: (value: PreservationAction) => void, cancel: () => void): SelectSubmenu {
-		return new SelectSubmenu("Action", "Auto is neutral; Never leaves ordinary vanilla treatment intact.", [{ value: "auto", label: "Auto (disabled / defer)" }, { value: "keep", label: "Keep" }, { value: "exclude", label: "Never" }], current, value => save(value as PreservationAction), cancel, undefined, undefined, undefined, () => this.#contentRowCount);
+		return new SelectSubmenu(
+			"Action",
+			"Auto is neutral; Never leaves ordinary vanilla treatment intact.",
+			[
+				{ value: "auto", label: "Auto (disabled / defer)" },
+				{ value: "keep", label: "Keep" },
+				{ value: "exclude", label: "Never" },
+			],
+			current,
+			value => save(value as PreservationAction),
+			cancel,
+			undefined,
+			undefined,
+			undefined,
+			() => this.#contentRowCount,
+		);
 	}
 
 	#createRegexRules(done: (value?: string) => void): SettingsSubmenu {
-		let menu: SettingsSubmenu;
 		const refresh = () => menu.list.setItems(items());
 		const items = (): SettingItem[] => [
-			{ id: "add", label: "Add regex…", currentValue: "", description: "RE2 condition. Auto starts disabled; ordinary and Final stages each use Keep > Never > Auto.", submenu: (_cv, close) => this.#validatedInput("New Regex Condition", "RE2 syntax; must compile before saving.", "", condition => {
-				validatePreservedUserMessageRegexCondition(condition);
-				const rules = settings.get("compaction.keepUserMessagesRegexRules");
-				if (Object.hasOwn(rules, condition)) throw new Error("A rule with this condition already exists");
-				this.#save("compaction.keepUserMessagesRegexRules", { ...rules, [condition]: { state: "auto", caseInsensitive: true, final: false } });
-				close(); refresh(); menu.list.selectItem(`rule:${condition}`);
-			}, () => close()) },
-			...Object.entries(settings.get("compaction.keepUserMessagesRegexRules")).map(([condition, rule]) => ({ id: `rule:${condition}`, label: condition, currentValue: `${this.#actionLabel(rule.state)} ${rule.caseInsensitive ? "i" : ""}${rule.final ? " Final" : ""}`, submenu: (_cv: string, close: (value?: string) => void) => this.#createRegexRuleEditor(condition, () => { close(); refresh(); }) })),
+			{
+				id: "add",
+				label: "Add regex…",
+				currentValue: "",
+				description: "RE2 condition. Auto starts disabled; ordinary and Final stages each use Keep > Never > Auto.",
+				submenu: (_cv, close) =>
+					this.#validatedInput(
+						"New Regex Condition",
+						"RE2 syntax; must compile before saving.",
+						"",
+						condition => {
+							validatePreservedUserMessageRegexCondition(condition);
+							const rules = settings.get("compaction.keepUserMessagesRegexRules");
+							if (Object.hasOwn(rules, condition)) throw new Error("A rule with this condition already exists");
+							this.#save("compaction.keepUserMessagesRegexRules", {
+								...rules,
+								[condition]: { state: "auto", caseInsensitive: true, final: false },
+							});
+							close();
+							refresh();
+							menu.list.selectItem(`rule:${condition}`);
+						},
+						() => close(),
+					),
+			},
+			...Object.entries(settings.get("compaction.keepUserMessagesRegexRules")).map(([condition, rule]) => ({
+				id: `rule:${condition}`,
+				label: condition,
+				currentValue: `${this.#actionLabel(rule.state)} ${rule.caseInsensitive ? "i" : ""}${rule.final ? " Final" : ""}`,
+				submenu: (_cv: string, close: (value?: string) => void) =>
+					this.#createRegexRuleEditor(condition, () => {
+						close();
+						refresh();
+					}),
+			})),
 		];
-		menu = new SettingsSubmenu("Custom Regex Rules", items(), () => {}, () => done(`${Object.keys(settings.get("compaction.keepUserMessagesRegexRules")).length} rules`), () => this.#contentRowCount);
+		const menu: SettingsSubmenu = new SettingsSubmenu(
+			"Custom Regex Rules",
+			items(),
+			() => {},
+			() => done(`${Object.keys(settings.get("compaction.keepUserMessagesRegexRules")).length} rules`),
+			() => this.#contentRowCount,
+		);
 		return menu;
 	}
 
 	#createRegexRuleEditor(initialCondition: string, done: () => void): SettingsSubmenu {
 		let condition = initialCondition;
-		let menu: SettingsSubmenu;
 		const current = () => settings.get("compaction.keepUserMessagesRegexRules")[condition];
 		const save = (rule: PreservedUserMessageRegexRule) => {
 			validatePreservedUserMessageRegexCondition(condition, rule.caseInsensitive);
-			this.#save("compaction.keepUserMessagesRegexRules", { ...settings.get("compaction.keepUserMessagesRegexRules"), [condition]: rule });
+			this.#save("compaction.keepUserMessagesRegexRules", {
+				...settings.get("compaction.keepUserMessagesRegexRules"),
+				[condition]: rule,
+			});
 			menu.list.setItems(items());
 		};
 		const items = (): SettingItem[] => {
 			const rule = current();
 			return [
-				{ id: "condition", label: "Condition", currentValue: condition, submenu: (_cv, close) => this.#validatedInput("Regex Condition", "RE2 syntax. Invalid expressions are never saved.", condition, value => {
-					validatePreservedUserMessageRegexCondition(value, current().caseInsensitive);
-					const rules = settings.get("compaction.keepUserMessagesRegexRules");
-					if (value !== condition && Object.hasOwn(rules, value)) throw new Error("A rule with this condition already exists");
-					const renamed = Object.fromEntries(Object.entries(rules).map(([key, entry]) => [key === condition ? value : key, entry]));
-					this.#save("compaction.keepUserMessagesRegexRules", renamed); condition = value;
-					close(value); menu.list.setItems(items());
-				}, () => close()) },
-				{ id: "state", label: "Action", currentValue: this.#actionLabel(rule.state), description: "Auto disables this rule. Keep wins same-stage conflicts; Never leaves ordinary vanilla treatment unchanged.", submenu: (_cv, close) => this.#actionSelector(current().state, value => { save({ ...current(), state: value }); close(this.#actionLabel(value)); }, () => close()) },
-				{ id: "case", label: "Case insensitive", currentValue: String(rule.caseInsensitive), values: ["true", "false"] },
-				{ id: "final", label: "Final", currentValue: String(rule.final ?? false), values: ["false", "true"], description: "Final runs after stored classifier policy, before manual state. Auto remains neutral." },
-				{ id: "delete", label: "Delete rule…", currentValue: "", submenu: (_cv, close) => new SelectSubmenu("Delete this regex rule?", condition, [{ value: "no", label: "No — keep rule" }, { value: "yes", label: "Yes — delete rule" }], "no", value => {
-					if (value === "yes") { const rules = { ...settings.get("compaction.keepUserMessagesRegexRules") }; delete rules[condition]; this.#save("compaction.keepUserMessagesRegexRules", rules); close(); done(); }
-					else close();
-				}, () => close(), undefined, undefined, undefined, () => this.#contentRowCount) },
+				{
+					id: "condition",
+					label: "Condition",
+					currentValue: condition,
+					submenu: (_cv, close) =>
+						this.#validatedInput(
+							"Regex Condition",
+							"RE2 syntax. Invalid expressions are never saved.",
+							condition,
+							value => {
+								validatePreservedUserMessageRegexCondition(value, current().caseInsensitive);
+								const rules = settings.get("compaction.keepUserMessagesRegexRules");
+								if (value !== condition && Object.hasOwn(rules, value))
+									throw new Error("A rule with this condition already exists");
+								const renamed = Object.fromEntries(
+									Object.entries(rules).map(([key, entry]) => [key === condition ? value : key, entry]),
+								);
+								this.#save("compaction.keepUserMessagesRegexRules", renamed);
+								condition = value;
+								close(value);
+								menu.list.setItems(items());
+							},
+							() => close(),
+						),
+				},
+				{
+					id: "state",
+					label: "Action",
+					currentValue: this.#actionLabel(rule.state),
+					description:
+						"Auto disables this rule. Keep wins same-stage conflicts; Never leaves ordinary vanilla treatment unchanged.",
+					submenu: (_cv, close) =>
+						this.#actionSelector(
+							current().state,
+							value => {
+								save({ ...current(), state: value });
+								close(this.#actionLabel(value));
+							},
+							() => close(),
+						),
+				},
+				{
+					id: "case",
+					label: "Case insensitive",
+					currentValue: String(rule.caseInsensitive),
+					values: ["true", "false"],
+				},
+				{
+					id: "final",
+					label: "Final",
+					currentValue: String(rule.final ?? false),
+					values: ["false", "true"],
+					description: "Final runs after stored classifier policy, before manual state. Auto remains neutral.",
+				},
+				{
+					id: "delete",
+					label: "Delete rule…",
+					currentValue: "",
+					submenu: (_cv, close) =>
+						new SelectSubmenu(
+							"Delete this regex rule?",
+							condition,
+							[
+								{ value: "no", label: "No — keep rule" },
+								{ value: "yes", label: "Yes — delete rule" },
+							],
+							"no",
+							value => {
+								if (value === "yes") {
+									const rules = { ...settings.get("compaction.keepUserMessagesRegexRules") };
+									delete rules[condition];
+									this.#save("compaction.keepUserMessagesRegexRules", rules);
+									close();
+									done();
+								} else close();
+							},
+							() => close(),
+							undefined,
+							undefined,
+							undefined,
+							() => this.#contentRowCount,
+						),
+				},
 			];
 		};
-		menu = new SettingsSubmenu("Regex Rule", items(), (id, value) => {
-			if (id === "case") save({ ...current(), caseInsensitive: value === "true" });
-			if (id === "final") save({ ...current(), final: value === "true" });
-		}, done, () => this.#contentRowCount);
+		const menu: SettingsSubmenu = new SettingsSubmenu(
+			"Regex Rule",
+			items(),
+			(id, value) => {
+				if (id === "case") save({ ...current(), caseInsensitive: value === "true" });
+				if (id === "final") save({ ...current(), final: value === "true" });
+			},
+			done,
+			() => this.#contentRowCount,
+		);
 		return menu;
 	}
 
 	#createModelSelector(def: SettingDef, done: (value?: string) => void): ModelSelectorSubmenu {
-		return new ModelSelectorSubmenu(this.context.modelRegistry, String(settings.get(def.path) ?? ""), value => { this.#save(def.path, value || undefined); done(value || "Automatic (@tiny)"); }, () => done(), () => this.#contentRowCount);
+		return new ModelSelectorSubmenu(
+			this.context.modelRegistry,
+			String(settings.get(def.path) ?? ""),
+			value => {
+				this.#save(def.path, value || undefined);
+				done(value || "Automatic (@tiny)");
+			},
+			() => done(),
+			() => this.#contentRowCount,
+		);
 	}
 
 	#getCurrentValue(def: SettingDef): unknown {

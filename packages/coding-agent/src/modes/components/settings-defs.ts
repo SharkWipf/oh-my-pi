@@ -11,7 +11,10 @@
 
 import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { Settings } from "../../config/settings";
-import { PRESERVED_USER_MESSAGE_CATEGORIES, PRESERVED_USER_MESSAGE_CATEGORY_SETTING_PATHS } from "../../session/preserved-message-settings";
+import {
+	PRESERVED_USER_MESSAGE_CATEGORIES,
+	PRESERVED_USER_MESSAGE_CATEGORY_SETTING_PATHS,
+} from "../../session/preserved-message-settings";
 import {
 	type AnyUiMetadata,
 	getDefault,
@@ -85,7 +88,13 @@ export interface MultiSelectSettingDef extends BaseSettingDef {
 }
 
 interface PreservationSettingDef extends BaseSettingDef {
-	type: "preservationLimit" | "preservationCap" | "categoryDispositions" | "regexRules" | "modelSelector" | "positiveTokens";
+	type:
+		| "preservationLimit"
+		| "preservationCap"
+		| "categoryDispositions"
+		| "regexRules"
+		| "modelSelector"
+		| "positiveTokens";
 }
 
 export type SettingDef =
@@ -188,22 +197,38 @@ function pathToSettingDef(path: SettingPath): SettingDef | null {
 		condition,
 	};
 
-	const category = PRESERVED_USER_MESSAGE_CATEGORIES.find(category => PRESERVED_USER_MESSAGE_CATEGORY_SETTING_PATHS[category] === path);
+	const category = PRESERVED_USER_MESSAGE_CATEGORIES.find(
+		category => PRESERVED_USER_MESSAGE_CATEGORY_SETTING_PATHS[category] === path,
+	);
 	if (category) {
 		return category === PRESERVED_USER_MESSAGE_CATEGORIES[0]
 			? { ...base, label: "Category Rules", type: "categoryDispositions" }
 			: null;
 	}
-	if (path === "compaction.keepFirstLimit" || path === "compaction.keepLastLimit" || path === "compaction.keepRecentUserMessagesLimit") {
+	if (
+		path === "compaction.keepFirstLimit" ||
+		path === "compaction.keepLastLimit" ||
+		path === "compaction.keepRecentUserMessagesLimit"
+	) {
 		return { ...base, type: "preservationLimit" };
 	}
 	if (path === "compaction.keepUserMessagesFilterKeepCap") return { ...base, type: "preservationCap" };
 	if (path === "compaction.keepUserMessagesLlmModel") return { ...base, type: "modelSelector" };
 	if (path === "compaction.keepUserMessagesRegexRules") {
-		return { ...base, type: "regexRules", condition: () => Settings.instance.get("compaction.keepUserMessagesRegex") };
+		return {
+			...base,
+			type: "regexRules",
+			condition: () => Settings.instance.get("compaction.keepUserMessagesRegex"),
+		};
 	}
 	if (path === "compaction.maxTokensPerUserMessage") {
-		return { ...base, type: "positiveTokens", condition: () => Settings.instance.get("compaction.keepUserMessages") && Settings.instance.get("compaction.pruneLongUserMessages") !== "no" };
+		return {
+			...base,
+			type: "positiveTokens",
+			condition: () =>
+				Settings.instance.get("compaction.keepUserMessages") &&
+				Settings.instance.get("compaction.pruneLongUserMessages") !== "no",
+		};
 	}
 
 	if (schemaType === "boolean") {
