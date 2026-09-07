@@ -2,7 +2,7 @@ import {
 	remapCompactionSourceRepresentation,
 	type SourceRewrite,
 } from "@oh-my-pi/pi-agent-core/compaction/source";
-import { remapNativeItemOrigins } from "@oh-my-pi/pi-ai/utils/source-origin";
+import { bindMessageSource, remapNativeItemOrigins } from "@oh-my-pi/pi-ai/utils/source-origin";
 import {
 	buildPreservedUserMessageClassifierInputFromLookup,
 	preservedUserMessageClassifierInputsEqual,
@@ -76,11 +76,26 @@ export function rewriteSessionSources(
 ): readonly string[] {
 	const originals = new Map<string, SessionEntry>();
 	const targets = new Set<string>();
+	let bindNativeIngress = false;
 	for (const rewrite of rewrites) {
 		const entry = getEntry(rewrite.entryId);
-		if (entry && !originals.has(entry.id)) originals.set(entry.id, structuredClone(entry));
+		if (entry?.type === "message" && entry.message.role === "assistant" && entry.message.providerPayload?.type === "openaiResponsesHistory" && entry.message.providerPayload.contentBlocks?.length) bindNativeIngress = true;
+		if (entry && !originals.has(entry.id)) originals.set(entry.id, entry);
 		collectTargets(rewrite.entryId, getEntry, childrenOf, targets);
 	}
+	if (bindNativeIngress) {
+		// Ancestry depth is the frozen branch's source order, not the mixed-branch file position.
+		const pending = entries.filter(entry => entry.parentId === null).map(entry => ({ entry, order: 0 }));
+		while (pending.length) {
+			const { entry, order } = pending.pop()!;
+			if (originals.has(entry.id) && entry.type === "message" && entry.message.role === "assistant" && entry.message.providerPayload?.type === "openaiResponsesHistory" && entry.message.providerPayload.contentBlocks?.length) {
+				// Consume construction correspondence before the first mutation can shift content positions.
+				bindMessageSource(entry.message, entry.id, order);
+			}
+			for (const child of childrenOf(entry.id)) pending.push({ entry: child, order: order + 1 });
+		}
+	}
+	for (const [id, entry] of originals) originals.set(id, structuredClone(entry));
 	const getOriginal: EntryLookup = id => originals.get(id) ?? getEntry(id);
 
 	applySourceRewrites();
