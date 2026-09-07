@@ -6128,7 +6128,7 @@ export class AgentSession {
 			for (const notice of keywordNotices) {
 				await this.#queueCustomMessage(notice, streamingBehavior);
 			}
-			await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, submittedAt);
+			await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, submittedAt, undefined, options?.producer);
 			return true;
 		}
 
@@ -6177,7 +6177,7 @@ export class AgentSession {
 			await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, submittedAt, {
 				images: normalizedImages,
 				descriptionNotice: imageDescriptionNotice,
-			});
+			}, options?.producer);
 			return true;
 		}
 
@@ -6197,7 +6197,7 @@ export class AgentSession {
 					synthetic: true,
 					userInitiated: options?.userInitiated === true ? true : undefined,
 				}
-			: { role: "user" as const, content: userContent, attribution: promptAttribution, timestamp: submittedAt };
+			: { role: "user" as const, content: userContent, attribution: promptAttribution, timestamp: submittedAt, producer: options?.producer };
 
 		const preludeMessages: AgentMessage[] = [];
 		if (eagerTodoPrelude) {
@@ -6824,6 +6824,7 @@ export class AgentSession {
 		mode: "steer" | "followUp" | "aside",
 		timestamp?: number,
 		preprocessed?: { images: ImageContent[] | undefined; descriptionNotice: CustomMessage | undefined },
+		producer?: UserMessage["producer"],
 	): Promise<void> {
 		// Captured before any await below so the aside branch can detect a
 		// newSession()/switchSession() that completed while normalization/vision
@@ -6858,7 +6859,7 @@ export class AgentSession {
 			if (await this.#sessionGenerationChanged(sessionGeneration)) return;
 			const records: AgentMessage[] = [];
 			if (imageDescriptionNotice) records.push(imageDescriptionNotice);
-			records.push({ role: "user", content, attribution: "user", timestamp: timestamp ?? Date.now() });
+			records.push({ role: "user", content, attribution: "user", timestamp: timestamp ?? Date.now(), producer });
 			this.#irc.queueAside(records);
 			// The awaits above (image normalization / vision description) can span the run's
 			// settle, so the run may already be idle by the time the record lands in the aside
@@ -6873,6 +6874,7 @@ export class AgentSession {
 			if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
 			this.agent.followUp({
 				role: "user",
+				producer,
 				content,
 				attribution: "user",
 				timestamp: timestamp ?? Date.now(),
@@ -6882,6 +6884,7 @@ export class AgentSession {
 			if (imageDescriptionNotice) this.agent.steer(imageDescriptionNotice);
 			this.agent.steer({
 				role: "user",
+				producer,
 				content,
 				steering: true,
 				attribution: "user",
@@ -7277,7 +7280,7 @@ export class AgentSession {
 	 */
 	async sendUserMessage(
 		content: string | (TextContent | ImageContent)[],
-		options?: { deliverAs?: "steer" | "followUp" | "aside" },
+		options?: { deliverAs?: "steer" | "followUp" | "aside"; producer?: UserMessage["producer"] },
 	): Promise<void> {
 		// Normalize content to text string + optional images
 		let text: string;
@@ -7302,17 +7305,17 @@ export class AgentSession {
 		let deliveredAsAside = false;
 		if (options?.deliverAs === "aside") {
 			if (this.isStreaming) {
-				await this.#queueUserMessage(text, images, "aside");
+				await this.#queueUserMessage(text, images, "aside", undefined, undefined, options?.producer);
 				return;
 			}
 			// Idle: fall through to the prompt flow below (starts a turn, like an omitted
 			// deliverAs) — there is no live run to inject an aside into.
 			deliveredAsAside = true;
 		} else if (options?.deliverAs === "followUp") {
-			await this.#queueUserMessage(text, images, "followUp");
+			await this.#queueUserMessage(text, images, "followUp", undefined, undefined, options?.producer);
 			return;
 		} else if (options?.deliverAs === "steer") {
-			await this.#queueUserMessage(text, images, "steer");
+			await this.#queueUserMessage(text, images, "steer", undefined, undefined, options?.producer);
 			return;
 		}
 
@@ -7325,6 +7328,7 @@ export class AgentSession {
 		// tool-batch-aborting steer.
 		await this.prompt(text, {
 			expandPromptTemplates: false,
+			producer: options?.producer,
 			images,
 			streamingBehavior: deliveredAsAside ? "aside" : "steer",
 		});
