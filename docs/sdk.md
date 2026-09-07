@@ -266,6 +266,20 @@ Related APIs:
 
 `deliverAs: "aside"` (both APIs) delivers at the next agent step boundary without interrupting the current tool batch, instead of steering (which skips remaining tools) or waiting for the run to finish. When the session is idle both start a turn instead (in plan mode the custom message is folded into context without a turn).
 
+## User-message classification jobs
+
+Classification records eleven independent category facts; preservation settings interpret them separately. It never selects retention or delays `prompt()`, compaction, or disposal. Live scheduling requires both `compaction.keepUserMessages` and `compaction.keepUserMessagesLlm`; stored-category filtering and explicit actions remain independent. The configured classifier model defaults to `@tiny`, never an expensive active-model fallback.
+
+- `await session.getMessageClassificationAvailability()` returns `{ available, model?, reason? }` after model/credential resolution. Unavailable models launch no job.
+- `await session.startMessageClassification(sourceId)` returns a job ID and forces selected-message classification, including a rerun of valid facts. Existing valid facts remain active until a new valid success.
+- `await session.startMessageClassificationBackfill(workers)` returns a job ID for every missing/current-unusable real user in the captured active post-clear branch. Workers must be a positive integer; there is no fixed worker ceiling. Warn users about substantial model requests, tokens, and time before launching. Presentation filters do not narrow this scope.
+- `session.getMessageClassificationStatus({ includeRows: false })` reads job counts without enumerating retained row failures; `getMessageClassificationRowStatus(sourceId)` reads one runtime row. Omitting the option includes the runtime row snapshot. Persisted category facts remain the authority after successful rows settle.
+- `session.subscribeMessageClassification((status, affectedIds) => ...)` returns an unsubscribe function. Subscription `status.rows` contains only affected row deltas, not the full row snapshot. Unsubscribing or closing a UI leaves jobs running.
+- `session.cancelMessageClassification(jobId)` cancels only that job and its in-flight/scanner work; independent live/selected work continues. Saved facts remain intact.
+
+Source identities and inputs are revalidated before successful v1 facts are appended. Branch/reset/session changes interrupt stale work without appending to another branch. Failure is not an all-false classification. Restart never resumes requests automatically: explicitly launch missing-only backfill.
+
+
 ## `AgentSession` lifecycle and disposal
 
 Call `await session.dispose()` when the embedder is completely done with a session. `dispose()` starts disposal itself and is idempotent: repeated or concurrent calls receive the same teardown promise, so shutdown events and owned resources are not drained twice.
