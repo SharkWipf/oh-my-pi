@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added guarded transient inline-rendering facts to source-origin metadata. Known clone operations preserve them; changed blocks, unknown hook output, and persisted metadata cannot retain stale physical attribution.
+
 ## [18.1.12] - 2026-09-06
 
 ### Added

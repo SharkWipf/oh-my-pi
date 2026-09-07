@@ -1,6 +1,6 @@
 import { type FluentType, type } from "@oh-my-pi/omptype";
 import type { SourceRewrite } from "../compaction-source";
-import type { Message } from "../types";
+import type { ImageContent, Message } from "../types";
 
 export interface NativeSourcePart {
 	entryId: string;
@@ -22,9 +22,15 @@ export interface NativeSourcePart {
 	transportBlockIndex?: number;
 }
 
+/** Transient physical facts recorded by the inline renderer, never provider billing. */
+export type InlinePhysical = Readonly<
+	{ owner: "system" | "context" | "tool"; toolCallId?: string } &
+	({ kind: "frame"; estimatedTokens: number } | { kind: "note" })
+>;
+
 export type NativeItemOrigin =
 	| { kind: "source"; parts: NativeSourcePart[] }
-	| { kind: "synthetic"; reason: string; anchorEntryId?: string }
+	| { kind: "synthetic"; reason: string; anchorEntryId?: string; inlinePhysical?: InlinePhysical }
 	| { kind: "aggregate"; compactionEntryId: string; coveredSources?: NativeSourcePart[] }
 	| { kind: "unknown"; reason: string };
 
@@ -45,8 +51,14 @@ const nativeSourcePartSchema: FluentType<NativeSourcePart> = type({
 	"status?": "'exact-current' | 'historical-not-current' | 'unknown' | undefined",
 	"transportBlockIndex?": nativePositionSchema.or(type("undefined")),
 });
+const inlinePhysicalSchema: FluentType<InlinePhysical> = type({
+	owner: "'system' | 'context' | 'tool'",
+	"toolCallId?": "string",
+	kind: "'frame'",
+	estimatedTokens: type("number").narrow(value => Number.isFinite(value) && value >= 0),
+}).or(type({ owner: "'system' | 'context' | 'tool'", "toolCallId?": "string", kind: "'note'" }));
 const nativeItemOriginSchema: FluentType<NativeItemOrigin> = type({ kind: "'source'", parts: nativeSourcePartSchema.array() })
-	.or(type({ kind: "'synthetic'", reason: "string", "anchorEntryId?": "string | undefined" }))
+	.or(type({ kind: "'synthetic'", reason: "string", "anchorEntryId?": "string | undefined", "inlinePhysical?": inlinePhysicalSchema }))
 	.or(type({ kind: "'aggregate'", compactionEntryId: "string", "coveredSources?": nativeSourcePartSchema.array().or(type("undefined")) }))
 	.or(type({ kind: "'unknown'", reason: "string" }));
 const nativeItemOriginsSchema = nativeItemOriginSchema.array();
@@ -62,7 +74,35 @@ export function validateNativeItemOrigins(value: unknown): NativeItemOrigin[] | 
 	return nativeItemOriginsSchema.allows(value) ? value : undefined;
 }
 
-const origins = new WeakMap<object, NativeItemOrigin>();
+type InlineSnapshot =
+	| { kind: "note"; text: string }
+	| { kind: "frame"; data: string; mimeType: string; detail: ImageContent["detail"]; url: string | undefined; fileProvider: string | undefined; fileId: string | undefined };
+type OriginEntry = NativeItemOrigin | { kind: "inline"; origin: Extract<NativeItemOrigin, { kind: "synthetic" }>; snapshot: InlineSnapshot };
+const origins = new WeakMap<object, OriginEntry>();
+
+function withoutInlinePhysical(origin: NativeItemOrigin): NativeItemOrigin {
+	if (origin.kind !== "synthetic" || !origin.inlinePhysical) return origin;
+	const { inlinePhysical: _inlinePhysical, ...rest } = origin;
+	return rest;
+}
+
+function inlineSnapshot(value: object, fact: InlinePhysical): InlineSnapshot | undefined {
+	if (!("type" in value)) return undefined;
+	if (fact.kind === "note" && value.type === "text" && "text" in value && typeof value.text === "string") {
+		return { kind: "note", text: value.text };
+	}
+	if (fact.kind !== "frame" || value.type !== "image") return undefined;
+	const image = value as ImageContent;
+	return { kind: "frame", data: image.data, mimeType: image.mimeType, detail: image.detail, url: image.url, fileProvider: image.providerFile?.provider, fileId: image.providerFile?.id };
+}
+
+function inlineSnapshotMatches(value: object, snapshot: InlineSnapshot): boolean {
+	if (!("type" in value)) return false;
+	if (snapshot.kind === "note") return value.type === "text" && "text" in value && value.text === snapshot.text;
+	if (value.type !== "image") return false;
+	const image = value as ImageContent;
+	return image.data === snapshot.data && image.mimeType === snapshot.mimeType && image.detail === snapshot.detail && image.url === snapshot.url && image.providerFile?.provider === snapshot.fileProvider && image.providerFile?.id === snapshot.fileId;
+}
 const unknownOrigin: NativeItemOrigin = { kind: "unknown", reason: "legacy-map-absent" };
 let sourceBindingGeneration = 0;
 
@@ -72,18 +112,35 @@ export function getSourceOriginBindingGeneration(): number {
 }
 
 export function getSourceOrigin(value: object): NativeItemOrigin | undefined {
-	return origins.get(value);
+	const entry = origins.get(value);
+	if (entry?.kind !== "inline") return entry;
+	if (inlineSnapshotMatches(value, entry.snapshot)) return entry.origin;
+	const origin = withoutInlinePhysical(entry.origin);
+	origins.set(value, origin);
+	return origin;
+}
+
+/** Live block facts only: untracked clones, mutations and imported metadata have none. */
+export function getInlinePhysical(value: object): InlinePhysical | undefined {
+	const origin = getSourceOrigin(value);
+	return origin?.kind === "synthetic" ? origin.inlinePhysical : undefined;
 }
 
 export function setSourceOrigin<T extends object>(value: T, origin: NativeItemOrigin): T {
-	origins.set(value, origin);
+	const fact = origin.kind === "synthetic" ? origin.inlinePhysical : undefined;
+	const snapshot = fact ? inlineSnapshot(value, fact) : undefined;
+	if (origin.kind === "synthetic" && fact && snapshot) {
+		origins.set(value, { kind: "inline", origin: { ...origin, inlinePhysical: Object.freeze({ ...fact }) }, snapshot });
+	} else {
+		origins.set(value, withoutInlinePhysical(origin));
+	}
 	return value;
 }
 
 /** Transfer only at the operation that constructs a known equivalent object. */
 export function transferSourceOrigin<T extends object>(from: object, to: T): T {
-	const origin = origins.get(from);
-	if (origin) origins.set(to, origin);
+	const origin = getSourceOrigin(from);
+	if (origin) setSourceOrigin(to, origin);
 	return to;
 }
 
@@ -93,7 +150,7 @@ export function transferTransformedSourceOrigin<T extends object>(
 	to: T,
 	coverage: NativeSourcePart["coverage"] = "full",
 ): T {
-	const origin = origins.get(from);
+	const origin = getSourceOrigin(from);
 	if (!origin) return to;
 	if (origin.kind !== "source") return setSourceOrigin(to, origin);
 	return setSourceOrigin(to, {
@@ -111,7 +168,7 @@ export function combineSourceOrigins(values: readonly unknown[]): NativeItemOrig
 	const parts: NativeSourcePart[] = [];
 	let sole: NativeItemOrigin | undefined;
 	for (const value of values) {
-		const origin = value && typeof value === "object" ? origins.get(value) : undefined;
+		const origin = value && typeof value === "object" ? getSourceOrigin(value) : undefined;
 		sole ??= origin;
 		if (origin?.kind === "source") parts.push(...origin.parts);
 	}
@@ -125,7 +182,7 @@ export function combineContentSourceOrigins(content: readonly unknown[]): Native
 	const parts: NativeSourcePart[] = [];
 	for (let index = 0; index < content.length; index++) {
 		const block = content[index];
-		const blockOrigin = block && typeof block === "object" ? origins.get(block) : undefined;
+		const blockOrigin = block && typeof block === "object" ? getSourceOrigin(block) : undefined;
 		if (blockOrigin?.kind !== "source") continue;
 		for (const part of blockOrigin.parts) parts.push({ ...part, transportBlockIndex: index });
 	}
@@ -172,8 +229,9 @@ export function bindMessageSource(message: Message, entryId: string, order: numb
 		}
 	}
 	setSourceOrigin(message, { kind: "source", parts });
+	if (message.role !== "assistant") return;
 	const payload = message.providerPayload;
-	if (message.role !== "assistant" || payload?.type !== "openaiResponsesHistory" || payload.dt !== true) return;
+	if (payload?.type !== "openaiResponsesHistory" || payload.dt !== true) return;
 	// A delta is this assistant response, unlike a full replay snapshot. Native
 	// components get their own source names, never guessed normalized-block matches.
 	importItemOrigins(payload.items, validateNativeItemOrigins(payload.origins));
@@ -201,7 +259,7 @@ export function bindMessageSource(message: Message, entryId: string, order: numb
 
 /** Serialize the sidecar separately; never put provenance fields inside provider items. */
 export function exportItemOrigins(items: readonly object[]): NativeItemOrigin[] {
-	return items.map(item => origins.get(item) ?? unknownOrigin);
+	return items.map(item => withoutInlinePhysical(getSourceOrigin(item) ?? unknownOrigin));
 }
 
 /** Import only the persisted map. Missing legacy maps cannot be reconstructed from content. */
@@ -210,7 +268,7 @@ export function importItemOrigins(items: readonly object[], itemOrigins?: readon
 	for (let index = 0; index < items.length; index++) {
 		const item = items[index]!;
 		const origin = itemOrigins[index] ?? unknownOrigin;
-		setSourceOrigin(item, origin);
+		setSourceOrigin(item, withoutInlinePhysical(origin));
 		const payload = "content" in item ? item.content : "output" in item ? item.output : undefined;
 		const content = Array.isArray(payload) ? payload : payload && typeof payload === "object" ? [payload] : undefined;
 		if (origin.kind !== "source" || !Array.isArray(content)) continue;
@@ -257,7 +315,7 @@ export function invalidateSourceOrigins(value: unknown, reason = "externally-mut
 }
 
 function occurrenceKey(item: object): string | object {
-	const origin = origins.get(item);
+	const origin = getSourceOrigin(item);
 	if (origin?.kind === "aggregate") return JSON.stringify(["aggregate", origin.compactionEntryId]);
 	if (origin?.kind !== "source" || origin.parts.length === 0) return item;
 	return JSON.stringify(origin.parts.map(part => [
@@ -269,7 +327,7 @@ function occurrenceKey(item: object): string | object {
 }
 
 function sourceOrder(item: object): number | undefined {
-	const origin = origins.get(item);
+	const origin = getSourceOrigin(item);
 	if (origin?.kind !== "source" || !origin.parts.length) return undefined;
 	let order = Infinity;
 	for (const part of origin.parts) order = Math.min(order, part.order);
