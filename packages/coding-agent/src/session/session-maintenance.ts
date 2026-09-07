@@ -82,7 +82,15 @@ import {
 	resolveMethodSettings,
 	resolveSpeculationMethod,
 } from "./compaction-methods";
-import { assistantTurnProducedOutput, convertToLlm, getOriginalSourceMessage, stripImagesFromMessage } from "./messages";
+import {
+	assistantTurnProducedOutput,
+	convertToLlm,
+	createCustomMessage,
+	getOriginalSourceMessage,
+	isCustomMessageContent,
+	normalizeCustomMessagePayload,
+	stripImagesFromMessage,
+} from "./messages";
 import { isTerminalTextAssistantAnswer } from "./queued-messages";
 import {
 	resolveCompactionConfiguredTarget,
@@ -3080,6 +3088,18 @@ export class SessionMaintenance {
 			if (entry.type === "message") {
 				keptTailTokens += this.#tokenizer.countMessage(entry.message);
 				recentSources.push({ entryId: entry.id, order, message: entry.message });
+			} else if (entry.type === "custom_message" && isCustomMessageContent(entry.content)) {
+				const normalized = normalizeCustomMessagePayload(entry);
+				const message = createCustomMessage(
+					normalized.customType,
+					normalized.content,
+					normalized.display,
+					normalized.details,
+					entry.timestamp,
+					entry.attribution === undefined ? undefined : normalized.attribution,
+				);
+				keptTailTokens += this.#tokenizer.countMessage(message);
+				recentSources.push({ entryId: entry.id, order, message });
 			}
 		}
 		const archive = snapcompact.getPreservedArchive(staleEntry.preserveData);
