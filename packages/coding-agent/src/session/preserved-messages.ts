@@ -1,6 +1,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { Tokenizer } from "@oh-my-pi/pi-agent-core/tokenizer";
 import type { UserMessage } from "@oh-my-pi/pi-ai";
+import { createCustomMessage, isCustomMessageContent, normalizeCustomMessagePayload } from "./messages";
 import { PreservedMessageIndex, type PolicyKind, type PolicyLimit, type PolicyRange } from "./preserved-message-index";
 import {
 	PRESERVED_USER_MESSAGE_CATEGORIES,
@@ -418,12 +419,27 @@ export class PreservedMessageQuery {
 	#entry(position: number): SessionMessageEntry | undefined {
 		const index = position + this.#offset;
 		const entry = index < this.#baseLength ? this.#entries[index] : this.#appended[index - this.#baseLength];
-		return entry?.type === "message" ? entry : undefined;
+		if (entry?.type === "message") return entry;
+		if (entry?.type !== "custom_message" || !isCustomMessageContent(entry.content)) return undefined;
+		const normalized = normalizeCustomMessagePayload(entry);
+		if (!normalized.display || normalized.attribution !== "user") return undefined;
+		return {
+			...entry,
+			type: "message",
+			message: createCustomMessage(
+				normalized.customType,
+				normalized.content,
+				normalized.display,
+				normalized.details,
+				entry.timestamp,
+				normalized.attribution,
+			),
+		};
 	}
 
 	#appendEntry(position: number): void {
 		const index = position + this.#offset;
-		const entry = (index < this.#baseLength ? this.#entries[index] : this.#appended[index - this.#baseLength])!;
+		let entry = (index < this.#baseLength ? this.#entries[index] : this.#appended[index - this.#baseLength])!;
 		this.#index.append({
 			user: false,
 			raw: 0,
@@ -468,6 +484,11 @@ export class PreservedMessageQuery {
 					}
 			}
 			return;
+		}
+		if (entry.type === "custom_message") {
+			const projected = this.#entry(position);
+			if (!projected) return;
+			entry = projected;
 		}
 		if (entry.type !== "message") return;
 		this.#positions.set(entry.id, position);
@@ -702,8 +723,10 @@ export class PreservedMessageQuery {
 			const position = this.#index.length;
 			this.#appended.push(entry);
 			this.#appendEntry(position);
-			if (entry.type === "message") affected.add(this.#positions.get(this.#groups.get(entry.id)?.[0] ?? entry.id)!);
-			else if (entry.type === "custom" && entry.customType === MESSAGE_OVERRIDE_CUSTOM_TYPE) {
+			if (entry.type === "message" || entry.type === "custom_message") {
+				const target = this.#positions.get(this.#groups.get(entry.id)?.[0] ?? entry.id);
+				if (target !== undefined) affected.add(target);
+			} else if (entry.type === "custom" && entry.customType === MESSAGE_OVERRIDE_CUSTOM_TYPE) {
 				for (const id of decodeCompactionMessageOverride(entry.data)?.messageIds ?? []) {
 					const target = this.#positions.get(this.#groups.get(id)?.[0] ?? id);
 					if (target !== undefined) affected.add(target);
@@ -795,6 +818,9 @@ export class PreservedMessageQuery {
 
 	classificationStatus(id: string): PreservationRow["categoryStatus"] {
 		this.#assertCurrent();
+		const position = this.#positions.get(id);
+		const entry = position === undefined ? undefined : this.#entry(position);
+		if (!entry || !isPreservationUser(entry)) return "absent";
 		if (this.#classifications.has(id)) return "valid";
 		const problem = this.#classificationProblems.get(id);
 		return problem === "invalidated" ? "invalidated" : problem ? "unsupported" : "absent";

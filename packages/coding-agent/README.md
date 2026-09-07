@@ -46,4 +46,6 @@ When no effective model maximum is available, percentage-derived windows are rep
 
 The result separates selected users `P`, complete admitted non-user atoms `N`, and temporary hard-recent `H`. Quota estimates are determined from source content before ordinary allocation, including the base estimate for original images. Methods must leave the ordinary user cut unchanged and precharge complete `N` once inside their own allocator using `prechargeNonUsers`; physical representation overlap never refunds source quota. Candidate spans use durable source IDs and UTF-16 text intervals. Installed compaction bytes and provider accounting remain method/lifecycle-owned.
 
+Visible user-attributed `custom_message` journal entries support manual state as non-user `N` sources. Their current durable content is normalized through the existing custom-message helper while retaining the journal ID; they never enter automatic user windows, hard-recent, or classification. Hidden and agent-attributed custom injections do not become manual user rows.
+
 Saved manual overrides and successful eleven-bit classification metadata keep their established v1 codecs. Settings compose layers before interpreting legacy paired message-zero limits; opening settings does not write normalized values.

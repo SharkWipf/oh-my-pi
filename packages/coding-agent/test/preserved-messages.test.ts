@@ -62,6 +62,57 @@ function link(entries: SessionEntry[], parentId: string | null = null): SessionE
 async function query(entries: SessionEntry[], settings = policy()) {
 	return (await PreservedMessageQuery.build(link(entries), settings, tokenizer, { isCurrent: () => true }))!;
 }
+
+it("keeps visible human custom journal sources manual-only, current, and uniformly capped", async () => {
+	const custom: Extract<SessionEntry, { type: "custom_message" }> & { compactionOverride: "keep" } = {
+		type: "custom_message",
+		id: "human",
+		parentId: null,
+		timestamp: "2026-01-01T00:00:00Z",
+		customType: "collab",
+		content: "current durable human input",
+		display: true,
+		attribution: "user",
+		compactionOverride: "keep",
+	};
+	const q = await query(
+		[custom, { ...custom, id: "injection", attribution: "agent" }, { ...custom, id: "hidden", display: false }],
+		policy({
+			first: { mode: "all" },
+			recent: { mode: "all" },
+			hardRecent: { mode: "all" },
+			prune: "exclude",
+			maxTokens: 1,
+		}),
+	);
+	const selected = q.select({ maximumContext: 1000 });
+	expect([...selected.P]).toEqual([]);
+	expect([...selected.H]).toEqual([]);
+	expect([...selected.N]).toEqual(["human"]);
+	expect(q.getManualGroup("injection")).toBeUndefined();
+	expect(q.getManualGroup("hidden")).toBeUndefined();
+	expect(q.applyClassifications([{ id: "human", mask: 2047 }])).toEqual([]);
+	custom.content = "edited durable source";
+	q.refreshSources(["human"]);
+	const current = q.select({ maximumContext: 1000 });
+	expect(current.candidate("human")?.message).toMatchObject({ role: "custom", content: "edited durable source" });
+	const charge = prechargeNonUsers(current.nonUserAtoms(), 1000, entry => tokenizer.countMessage(entry.message));
+	expect([...charge.sourceIds]).toEqual(["human"]);
+	expect(charge.tokens).toBe(tokenizer.countTokens(custom.content));
+	expect(charge.residualBudget).toBe(1000 - current.quota.N.tokens);
+	expect(q.appendEntries(link([{ ...custom, id: "later", content: "later human input" }], "hidden"))).toBe(true);
+	const capped = q.select({ maximumContext: 1000, recent: { mode: "messages", value: 1 } });
+	expect([...capped.N]).toEqual(["later"]);
+	expect(capped.reasons("human").capDenied).toBe(true);
+	q.applyManualOverride(["later"], "auto");
+	expect([...q.select({ maximumContext: 1000 }).N]).toEqual(["human"]);
+	expect(
+		q.appendEntries(
+			link([control("tags", USER_MESSAGE_CLASSIFICATION_CUSTOM_TYPE, { v: 1, c: ["human", 1] })], "later"),
+		),
+	).toBe(true);
+	expect(q.classificationStatus("human")).toBe("absent");
+});
 function exchange(): SessionMessageEntry[] {
 	return [
 		{
