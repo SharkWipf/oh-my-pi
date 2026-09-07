@@ -157,7 +157,7 @@ describe("native SDK transform origins", () => {
 });
 
 it("honors actual SDK context and provider hooks once, without retaining unsupported attribution", async () => {
-	using directory = TempDir.createSync("native-sdk-origins-");
+	using directory = TempDir.createSync("@native-sdk-origins-");
 	const auth = await AuthStorage.create(":memory:");
 	const api = "native-origin-hook-proof";
 	const requestModel = buildModel({ ...model, api, provider: "native-origin-hook-proof" });
