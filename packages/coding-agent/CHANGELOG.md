@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added source-ID preservation policy APIs with independent first/recent/hard-recent limits, uniformly capped manual tool exchanges, compact source quota indexes, and compatible saved settings/classification readers.
+
 ### Fixed
 
 - The startup update notice counts every change in a release: bullets written above a `###` heading now count under `Other`, and `+`/`*` markers and lightly indented bullets count like `-`.

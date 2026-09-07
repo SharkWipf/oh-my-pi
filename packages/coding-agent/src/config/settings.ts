@@ -299,6 +299,183 @@ function stringArrayFromUnknown(value: unknown): string[] {
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return !!value && typeof value === "object" && !Array.isArray(value);
 }
+type PreservationLimitLeaf = "keepFirstLimit" | "keepLastLimit" | "keepRecentUserMessagesLimit";
+
+interface PreservationLimitMigrationSpec {
+	canonicalLeaf: PreservationLimitLeaf;
+	countLeaf: string;
+	percentLeaf: string;
+}
+
+type LayerSettingValue = { present: false } | { present: true; value: unknown };
+
+type PreservationLimitMigrationOperation =
+	| { leaf: PreservationLimitLeaf; kind: "canonical"; value: unknown }
+	| {
+			leaf: PreservationLimitLeaf;
+			kind: "legacy";
+			count: LayerSettingValue;
+			percent: LayerSettingValue;
+	  };
+
+const PRESERVATION_LIMIT_MIGRATION_SPECS: readonly PreservationLimitMigrationSpec[] = [
+	{
+		canonicalLeaf: "keepFirstLimit",
+		countLeaf: "keepFirstNMessages",
+		percentLeaf: "keepFirstMessagesPercent",
+	},
+	{
+		canonicalLeaf: "keepLastLimit",
+		countLeaf: "keepLastNMessages",
+		percentLeaf: "keepLastMessagesPercent",
+	},
+	{
+		canonicalLeaf: "keepRecentUserMessagesLimit",
+		countLeaf: "keepRecentUserMessages",
+		percentLeaf: "keepRecentUserMessagesPercent",
+	},
+];
+
+/** Per-layer migration intent; WeakMap metadata never enters YAML or public settings. */
+const preservationLimitMigrationOperations = new WeakMap<RawSettings, readonly PreservationLimitMigrationOperation[]>();
+
+function readLayerSettingValue(
+	raw: RawSettings,
+	compaction: Record<string, unknown> | undefined,
+	leaf: string,
+): LayerSettingValue {
+	if (compaction && Object.hasOwn(compaction, leaf)) return { present: true, value: compaction[leaf] };
+	const path = `compaction.${leaf}`;
+	return Object.hasOwn(raw, path) ? { present: true, value: raw[path] } : { present: false };
+}
+
+function canonicalLegacyPreservationLimit(count: LayerSettingValue, percent: LayerSettingValue): string {
+	if (percent.present) {
+		if (typeof percent.value !== "number" || !Number.isFinite(percent.value)) return "tokens:0";
+		if (percent.value >= 0) return `context-percent:${percent.value}`;
+	}
+	if (!count.present) return "messages:0";
+	if (typeof count.value !== "number" || !Number.isFinite(count.value)) return "tokens:0";
+	return `messages:${Math.max(0, Math.floor(count.value))}`;
+}
+
+function mutationComparableSettingValue(raw: RawSettings, path: string): unknown {
+	const spec = PRESERVATION_LIMIT_MIGRATION_SPECS.find(candidate => `compaction.${candidate.canonicalLeaf}` === path);
+	if (!spec) return getByPath(raw, path.split("."));
+	const compaction = isRecord(raw.compaction) ? raw.compaction : undefined;
+	const canonical = readLayerSettingValue(raw, compaction, spec.canonicalLeaf);
+	if (canonical.present) return canonical.value ?? "invalid";
+	const count = readLayerSettingValue(raw, compaction, spec.countLeaf);
+	const percent = readLayerSettingValue(raw, compaction, spec.percentLeaf);
+	return count.present || percent.present ? canonicalLegacyPreservationLimit(count, percent) : undefined;
+}
+
+function capturePreservationLimitMigrationOperations(raw: RawSettings): void {
+	if (preservationLimitMigrationOperations.has(raw)) return;
+	const compaction = isRecord(raw.compaction) ? raw.compaction : undefined;
+	const operations: PreservationLimitMigrationOperation[] = [];
+	for (const spec of PRESERVATION_LIMIT_MIGRATION_SPECS) {
+		const canonical = readLayerSettingValue(raw, compaction, spec.canonicalLeaf);
+		const count = readLayerSettingValue(raw, compaction, spec.countLeaf);
+		const percent = readLayerSettingValue(raw, compaction, spec.percentLeaf);
+		if (canonical.present) {
+			operations.push({ leaf: spec.canonicalLeaf, kind: "canonical", value: canonical.value });
+		} else if (count.present || percent.present) {
+			operations.push({ leaf: spec.canonicalLeaf, kind: "legacy", count, percent });
+		}
+	}
+	preservationLimitMigrationOperations.set(raw, operations);
+}
+
+function updateCanonicalPreservationLimitOperation(
+	raw: RawSettings,
+	path: string,
+	value: unknown,
+	present: boolean,
+): void {
+	const spec = PRESERVATION_LIMIT_MIGRATION_SPECS.find(candidate => `compaction.${candidate.canonicalLeaf}` === path);
+	if (!spec) return;
+	const operations = [...(preservationLimitMigrationOperations.get(raw) ?? [])].filter(
+		operation => operation.leaf !== spec.canonicalLeaf,
+	);
+	if (present) {
+		operations.push({ leaf: spec.canonicalLeaf, kind: "canonical", value });
+	} else {
+		const compaction = isRecord(raw.compaction) ? raw.compaction : undefined;
+		const count = readLayerSettingValue(raw, compaction, spec.countLeaf);
+		const percent = readLayerSettingValue(raw, compaction, spec.percentLeaf);
+		if (count.present || percent.present) {
+			operations.push({ leaf: spec.canonicalLeaf, kind: "legacy", count, percent });
+		}
+	}
+	preservationLimitMigrationOperations.set(raw, operations);
+}
+
+function copyPreservationLimitMigrationOperations(source: RawSettings, target: RawSettings): void {
+	const operations = preservationLimitMigrationOperations.get(source);
+	if (operations) preservationLimitMigrationOperations.set(target, operations);
+}
+
+function cloneRawSettings(source: RawSettings): RawSettings {
+	const clone = structuredClone(source);
+	copyPreservationLimitMigrationOperations(source, clone);
+	return clone;
+}
+
+function applyPreservationLimitMigrationOperations(raw: RawSettings): void {
+	const operations = preservationLimitMigrationOperations.get(raw);
+	if (!operations || operations.length === 0) return;
+	const compaction = isRecord(raw.compaction) ? { ...raw.compaction } : {};
+	for (const spec of PRESERVATION_LIMIT_MIGRATION_SPECS) {
+		let state:
+			| { kind: "canonical"; value: unknown }
+			| { kind: "legacy"; count: LayerSettingValue; percent: LayerSettingValue }
+			| undefined;
+		for (const operation of operations) {
+			if (operation.leaf !== spec.canonicalLeaf) continue;
+			if (operation.kind === "canonical") {
+				state = { kind: "canonical", value: operation.value };
+				continue;
+			}
+			const previous =
+				state?.kind === "legacy"
+					? state
+					: { kind: "legacy" as const, count: { present: false } as const, percent: { present: false } as const };
+			state = {
+				kind: "legacy",
+				count: operation.count.present ? operation.count : previous.count,
+				percent: operation.percent.present ? operation.percent : previous.percent,
+			};
+		}
+		if (!state) continue;
+		compaction[spec.canonicalLeaf] =
+			state.kind === "canonical"
+				? (state.value ?? "invalid")
+				: canonicalLegacyPreservationLimit(state.count, state.percent);
+		delete compaction[spec.countLeaf];
+		delete compaction[spec.percentLeaf];
+		delete raw[`compaction.${spec.countLeaf}`];
+		delete raw[`compaction.${spec.percentLeaf}`];
+	}
+	raw.compaction = compaction;
+}
+
+/** Normalize the effective legacy pair, never each contributing layer. */
+function normalizeEffectivePreservationLimits(raw: RawSettings): void {
+	const compaction = isRecord(raw.compaction) ? { ...raw.compaction } : {};
+	const legacy = compaction.keepFirstLimit === "messages:0" || compaction.keepLastLimit === "messages:0" ||
+		preservationLimitMigrationOperations.get(raw)?.some(operation => operation.kind === "legacy" && operation.leaf !== "keepRecentUserMessagesLimit");
+	const first = compaction.keepFirstLimit ?? (legacy ? "messages:0" : "all");
+	const recent = compaction.keepLastLimit ?? (legacy ? "messages:0" : "all");
+	const bothLegacyZero = first === "messages:0" && recent === "messages:0";
+	if (compaction.keepFirstLimit !== undefined || compaction.keepLastLimit !== undefined) {
+		compaction.keepFirstLimit = first === "messages:0" ? (bothLegacyZero ? "all" : "off") : first;
+		compaction.keepLastLimit = recent === "messages:0" ? (bothLegacyZero ? "all" : "off") : recent;
+	}
+	if (compaction.keepRecentUserMessagesLimit === "messages:0") compaction.keepRecentUserMessagesLimit = "off";
+	if (Object.keys(compaction).length > 0) raw.compaction = compaction;
+}
+
 
 /**
  * Migrate a v17 leaf rename that used to nest under a boolean parent path
@@ -662,8 +839,9 @@ export class Settings {
 	set<P extends SettingPath>(path: P, value: SettingValue<P>): void {
 		const prev = this.get(path);
 		const segments = path.split(".");
-		this.#captureGlobalMutation(path, this.#modifiedPathMutations, getByPath(this.#global, segments));
+		this.#captureGlobalMutation(path, this.#modifiedPathMutations, mutationComparableSettingValue(this.#global, path));
 		setByPath(this.#global, segments, value);
+		updateCanonicalPreservationLimitOperation(this.#global, path, value, true);
 		this.#persistedMutationGeneration++;
 		this.#modified.add(path);
 		this.#rebuildMerged();
@@ -688,6 +866,7 @@ export class Settings {
 		const prev = this.get(path);
 		const segments = path.split(".");
 		setByPath(this.#overrides, segments, value);
+		updateCanonicalPreservationLimitOperation(this.#overrides, path, value, true);
 		this.#rebuildMerged();
 		this.#fireEffectiveSettingChanged(path, this.get(path), prev);
 	}
@@ -708,6 +887,7 @@ export class Settings {
 			current = current[segment] as RawSettings;
 		}
 		delete current[segments[segments.length - 1]];
+		updateCanonicalPreservationLimitOperation(this.#overrides, path, undefined, false);
 		this.#rebuildMerged();
 		this.#fireEffectiveSettingChanged(path, this.get(path), prev);
 	}
@@ -803,11 +983,11 @@ export class Settings {
 		});
 		cloned.#storage = this.#storage;
 		cloned.#configPath = this.#configPath;
-		cloned.#global = structuredClone(this.#global);
-		cloned.#project = this.#persist ? await cloned.#loadProjectSettings() : structuredClone(this.#project);
+		cloned.#global = cloneRawSettings(this.#global);
+		cloned.#project = this.#persist ? await cloned.#loadProjectSettings() : cloneRawSettings(this.#project);
 		if (!this.#persist) cloned.#projectShellPathSource = this.#projectShellPathSource;
 		cloned.#configFiles = [...this.#configFiles];
-		cloned.#configOverlay = structuredClone(this.#configOverlay);
+		cloned.#configOverlay = cloneRawSettings(this.#configOverlay);
 		cloned.#overlayShellPathSource = this.#overlayShellPathSource;
 		cloned.#overrides = this.#buildOriginalOverrides();
 		cloned.#rebuildMerged();
@@ -1157,9 +1337,9 @@ export class Settings {
 	 */
 	#buildOriginalOverrides(): RawSettings {
 		if (this.#savedRuntimeModelRoleOverrides.size === 0) {
-			return structuredClone(this.#overrides);
+			return cloneRawSettings(this.#overrides);
 		}
-		const overrides = structuredClone(this.#overrides);
+		const overrides = cloneRawSettings(this.#overrides);
 		const runtimeRoles = getByPath(overrides, ["modelRoles"]);
 		if (!isRecord(runtimeRoles)) return overrides;
 		for (const [role, originalValue] of this.#savedRuntimeModelRoleOverrides) {
@@ -1815,7 +1995,9 @@ export class Settings {
 			const result = await loadCapability(settingsCapability.id, { cwd: this.#cwd });
 			for (const item of result.items as SettingsCapabilityItem[]) {
 				if (item.level === "project") {
-					merged = this.#deepMerge(merged, dropSettingsGroupShadows(item.data as RawSettings, item.path));
+					const projectSettings = dropSettingsGroupShadows(item.data as RawSettings, item.path);
+					capturePreservationLimitMigrationOperations(projectSettings);
+					merged = this.#deepMerge(merged, projectSettings);
 					if (Object.hasOwn(item.data, "shellPath")) shellPathSource = item.path;
 				}
 			}
@@ -1932,6 +2114,7 @@ export class Settings {
 
 	/** Apply schema migrations to raw settings */
 	#migrateRawSettings(raw: RawSettings, captureLegacyChangelogVersion = true): RawSettings {
+		capturePreservationLimitMigrationOperations(raw);
 		// queueMode -> steeringMode
 		if ("queueMode" in raw && !("steeringMode" in raw)) {
 			raw.steeringMode = raw.queueMode;
@@ -2730,7 +2913,7 @@ export class Settings {
 				// rather than recreating the config from only the pending path.
 				const loaded = await this.#loadYamlIfPresentForWriteLocked(configPath, writePath);
 				const current =
-					loaded.settings ?? (this.#quarantinedYamlTargets.has(configPath) ? structuredClone(this.#global) : {});
+					loaded.settings ?? (this.#quarantinedYamlTargets.has(configPath) ? cloneRawSettings(this.#global) : {});
 				let shouldWrite = false;
 
 				// Apply pending changes unless a newer file generation also
@@ -2742,7 +2925,7 @@ export class Settings {
 						mutation !== undefined &&
 						mutation.generation.kind !== "unreadable" &&
 						(yamlGenerationsMatch(mutation.generation, loaded.generation) ||
-							Bun.deepEquals(getByPath(current, segments), mutation.baseValue));
+							Bun.deepEquals(mutationComparableSettingValue(current, modPath), mutation.baseValue));
 					if (!canApply) {
 						logger.warn("Settings: skipped stale change after external config edit", {
 							path: configPath,
@@ -2752,6 +2935,7 @@ export class Settings {
 					}
 					const value = getByPath(this.#global, segments);
 					setByPath(current, segments, value);
+					updateCanonicalPreservationLimitOperation(current, modPath, value, true);
 					shouldWrite = true;
 				}
 
@@ -2952,13 +3136,18 @@ export class Settings {
 			filteredRoles ??= { ...projectRoles };
 			delete filteredRoles[role];
 		}
-		return filteredRoles ? { ...this.#project, modelRoles: filteredRoles } : this.#project;
+		if (!filteredRoles) return this.#project;
+		const filtered = { ...this.#project, modelRoles: filteredRoles };
+		copyPreservationLimitMigrationOperations(this.#project, filtered);
+		return filtered;
 	}
 
 	#rebuildMerged(): void {
 		this.#merged = this.#deepMerge(this.#deepMerge({}, this.#global), this.#projectSettingsForMerge());
 		this.#merged = this.#deepMerge(this.#merged, this.#configOverlay);
 		this.#merged = this.#deepMerge(this.#merged, this.#overrides);
+		applyPreservationLimitMigrationOperations(this.#merged);
+		normalizeEffectivePreservationLimits(this.#merged);
 		this.#resolvedCache.clear();
 		this.#editVariantCache = undefined;
 	}
@@ -2993,6 +3182,11 @@ export class Settings {
 			} else {
 				result[key] = override;
 			}
+		}
+		const baseOperations = preservationLimitMigrationOperations.get(base);
+		const overrideOperations = preservationLimitMigrationOperations.get(overrides);
+		if (baseOperations?.length || overrideOperations?.length) {
+			preservationLimitMigrationOperations.set(result, [...(baseOperations ?? []), ...(overrideOperations ?? [])]);
 		}
 		return result;
 	}

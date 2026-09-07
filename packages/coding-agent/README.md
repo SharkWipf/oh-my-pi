@@ -33,3 +33,13 @@ The agent supports three mutually-exclusive memory backends, selected via the `m
    - `HINDSIGHT_BANK_MISSION`, `HINDSIGHT_DEBUG`
 
 Switching backends mid-session immediately replaces the live backend, memory tools, listeners, and system-prompt context. Existing users with `memories.enabled = true|false` are migrated to `memory.backend = "local"|"off"` exactly once on first launch; afterward, `memory.backend` is the sole runtime selector.
+
+## Source preservation policy API
+
+`session/preserved-messages` exposes a branch-local `PreservedMessageQuery`. Build it cooperatively from the active journal branch and a currentness predicate; it ignores entries before the latest clear boundary. Window-only settings changes query compact count/price aggregates without retokenizing source history. Rows and selected candidate messages are materialized on demand.
+
+First/recent/hard-recent limits independently accept Off, All, message count, tokens, or a percentage of the effective model maximum context. Finite token/percentage zero is not Off. Heuristics only remove candidates; ordinary regex, eleven-category policy, Final regex, then manual state resolve in order. Auto is neutral and Keep wins within a stage. Hard-recent temporarily bypasses Never and pruning. Manual Always also bypasses pruning, but every Always source shares the configured linked cap.
+
+The result separates selected users `P`, complete admitted non-user atoms `N`, and temporary hard-recent `H`. Quota estimates are determined from source content before ordinary allocation, including the base estimate for original images. Methods must leave the ordinary user cut unchanged and precharge complete `N` once inside their own allocator using `prechargeNonUsers`; physical representation overlap never refunds source quota. Candidate spans use durable source IDs and UTF-16 text intervals. Installed compaction bytes and provider accounting remain method/lifecycle-owned.
+
+Saved manual overrides and successful eleven-bit classification metadata keep their established v1 codecs. Settings compose layers before interpreting legacy paired message-zero limits; opening settings does not write normalized values.
