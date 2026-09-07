@@ -1,3 +1,4 @@
+import { type FluentType, type } from "@oh-my-pi/omptype";
 import type { SourceRewrite } from "../compaction-source";
 import type { Message } from "../types";
 
@@ -26,6 +27,34 @@ export type NativeItemOrigin =
 	| { kind: "synthetic"; reason: string; anchorEntryId?: string }
 	| { kind: "aggregate"; compactionEntryId: string; coveredSources?: NativeSourcePart[] }
 	| { kind: "unknown"; reason: string };
+
+const nativePositionSchema = type("number.integer").narrow(value => value >= 0);
+const nativeRangeSchema = type({ start: nativePositionSchema, end: nativePositionSchema }).narrow(range => range.end >= range.start);
+const nativeSourcePartSchema: FluentType<NativeSourcePart> = type({
+	entryId: "string",
+	order: type("number").narrow(Number.isFinite),
+	blockIndex: nativePositionSchema.or(type("string")),
+	coverage: "'full' | 'partial' | 'derived'",
+	representation: "'native' | 'json-quoted-block' | 'original-image' | 'transformed-text'",
+	"sourceSpan?": nativeRangeSchema,
+	"transportSpan?": nativeRangeSchema,
+	"sourceLength?": nativePositionSchema,
+	"currentSourceSpan?": nativeRangeSchema,
+	"currentBlockIndex?": nativePositionSchema.or(type("string")),
+	"currentSourceLength?": nativePositionSchema,
+	"status?": "'exact-current' | 'historical-not-current' | 'unknown'",
+	"transportBlockIndex?": nativePositionSchema,
+});
+const nativeItemOriginSchema: FluentType<NativeItemOrigin> = type({ kind: "'source'", parts: nativeSourcePartSchema.array() })
+	.or(type({ kind: "'synthetic'", reason: "string", "anchorEntryId?": "string" }))
+	.or(type({ kind: "'aggregate'", compactionEntryId: "string", "coveredSources?": nativeSourcePartSchema.array() }))
+	.or(type({ kind: "'unknown'", reason: "string" }));
+const nativeItemOriginsSchema = nativeItemOriginSchema.array();
+
+/** Validate persisted local metadata once at its untyped boundary; never infer missing origins. */
+export function validateNativeItemOrigins(value: unknown): NativeItemOrigin[] | undefined {
+	return nativeItemOriginsSchema.allows(value) ? value : undefined;
+}
 
 const origins = new WeakMap<object, NativeItemOrigin>();
 const unknownOrigin: NativeItemOrigin = { kind: "unknown", reason: "legacy-map-absent" };
@@ -137,6 +166,31 @@ export function bindMessageSource(message: Message, entryId: string, order: numb
 		}
 	}
 	setSourceOrigin(message, { kind: "source", parts });
+	const payload = message.providerPayload;
+	if (message.role !== "assistant" || payload?.type !== "openaiResponsesHistory" || payload.dt !== true) return;
+	// A delta is this assistant response, unlike a full replay snapshot. Native
+	// components get their own source names, never guessed normalized-block matches.
+	importItemOrigins(payload.items, validateNativeItemOrigins(payload.origins));
+	for (let itemIndex = 0; itemIndex < payload.items.length; itemIndex++) {
+		const item = payload.items[itemIndex]!;
+		const existing = getSourceOrigin(item);
+		if (existing && (existing.kind !== "unknown" || existing.reason !== "legacy-map-absent")) continue;
+		const nativePartsStart = parts.length;
+		const component = `providerPayload.${itemIndex}`;
+		const text = typeof item.content === "string" ? item.content : typeof item.arguments === "string" ? item.arguments : undefined;
+		bind(item, component, text);
+		if (Array.isArray(item.content)) {
+			for (let blockIndex = 0; blockIndex < item.content.length; blockIndex++) {
+				const block: unknown = item.content[blockIndex];
+				if (!block || typeof block !== "object") continue;
+				const blockText = "text" in block && typeof block.text === "string" ? block.text : undefined;
+				bind(block, `${component}.content.${blockIndex}`, blockText, "type" in block && block.type === "input_image");
+				parts[parts.length - 1]!.transportBlockIndex = blockIndex;
+			}
+		}
+		setSourceOrigin(item, { kind: "source", parts: parts.splice(nativePartsStart) });
+	}
+	payload.origins = exportItemOrigins(payload.items);
 }
 
 /** Serialize the sidecar separately; never put provenance fields inside provider items. */
