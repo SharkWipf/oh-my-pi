@@ -12,7 +12,7 @@ import {
 	ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, ImageContent, Message, Model, Usage, UsageReport } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, Message, Model, OriginalSubmission, Usage, UsageReport } from "@oh-my-pi/pi-ai";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { execReplace } from "@oh-my-pi/pi-natives";
 import type {
@@ -2009,7 +2009,8 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	startPendingSubmission(
 		input: {
-			sourceCaptureId?: string;
+			originalSubmission?: OriginalSubmission;
+			compactionOverride?: "keep" | "exclude";
 			text: string;
 			images?: ImageContent[];
 			imageLinks?: (string | undefined)[];
@@ -2020,7 +2021,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		options?: { preserveDraft?: boolean },
 	): SubmittedUserInput {
 		const submission: SubmittedUserInput = {
-			sourceCaptureId: input.sourceCaptureId,
+			originalSubmission: input.originalSubmission,
+			compactionOverride: input.compactionOverride,
 			text: input.text,
 			images: input.images,
 			imageLinks: input.imageLinks,
@@ -5370,9 +5372,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		text: string,
 		mode: "steer" | "followUp",
 		images?: ImageContent[],
-		sourceCaptureId?: string,
+		originalSubmission?: OriginalSubmission,
 	): void {
-		this.#uiHelpers.queueCompactionMessage(text, mode, images, sourceCaptureId);
+		this.#uiHelpers.queueCompactionMessage(text, mode, images, originalSubmission);
 	}
 
 	flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void> {

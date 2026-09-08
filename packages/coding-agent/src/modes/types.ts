@@ -1,6 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, ImageContent, Message, Model, Usage, UsageReport } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, Message, Model, OriginalSubmission, Usage, UsageReport } from "@oh-my-pi/pi-ai";
 import type { Component, Container, EditorTheme, Loader, Spacer, Text, TUI } from "@oh-my-pi/pi-tui";
 import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
@@ -46,14 +46,15 @@ import type { OAuthManualInputManager } from "./oauth-manual-input";
 import type { Theme } from "./theme/theme";
 
 export type CompactionQueuedMessage = {
-	sourceCaptureId?: string;
+	originalSubmission?: OriginalSubmission;
 	text: string;
 	mode: "steer" | "followUp";
 	images?: ImageContent[];
 };
 
 export type SubmittedUserInput = {
-	sourceCaptureId?: string;
+	originalSubmission?: OriginalSubmission;
+	compactionOverride?: "keep" | "exclude";
 	text: string;
 	images?: ImageContent[];
 	imageLinks?: (string | undefined)[];
@@ -303,7 +304,7 @@ export interface InteractiveModeContext {
 		text: string,
 		mode: "steer" | "followUp",
 		images?: ImageContent[],
-		sourceCaptureId?: string,
+		originalSubmission?: OriginalSubmission,
 	): void;
 	flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void>;
 	flushPendingBashComponents(): void;
@@ -314,7 +315,8 @@ export interface InteractiveModeContext {
 	/** Reconcile the idle "F5 to Retry" status row with the transcript tail. */
 	syncRetryHintRow(): void;
 	startPendingSubmission(input: {
-		sourceCaptureId?: string;
+		originalSubmission?: OriginalSubmission;
+		compactionOverride?: "keep" | "exclude";
 		text: string;
 		images?: ImageContent[];
 		imageLinks?: (string | undefined)[];

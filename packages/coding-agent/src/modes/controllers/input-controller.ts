@@ -1,6 +1,6 @@
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { ImageContent, OriginalSubmission } from "@oh-my-pi/pi-ai";
 import { type AutocompleteProvider, matchesKey, type PasteOptions, type SlashCommand } from "@oh-my-pi/pi-tui";
 import { isEnoent, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { isSettingsInitialized, settings } from "../../config/settings";
@@ -713,6 +713,11 @@ export class InputController {
 	setupEditorSubmitHandler(): void {
 		this.ctx.editor.onSubmit = async (text: string) => {
 			text = this.#compactDraftImages(text.trim());
+			const originalSubmission: OriginalSubmission = {
+				text,
+				images: this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined,
+				imageLinks: this.ctx.editor.pendingImageLinks.length > 0 ? [...this.ctx.editor.pendingImageLinks] : undefined,
+			};
 			const hasPendingImages = this.ctx.editor.pendingImages.length > 0;
 			if ((!isSettingsInitialized() || settings.get("emojiAutocomplete")) && text) text = expandEmoticons(text);
 
@@ -756,13 +761,11 @@ export class InputController {
 			}
 
 			const runner = this.ctx.session.extensionRunner;
-			let inputImages = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
-			let inputImageLinks =
-				this.ctx.editor.pendingImageLinks.length > 0 ? [...this.ctx.editor.pendingImageLinks] : undefined;
+			let inputImages = originalSubmission.images;
+			let inputImageLinks = originalSubmission.imageLinks;
 			let hasInputImages = (inputImages?.length ?? 0) > 0;
 			const submittedText = text;
 			const submittedImages = inputImages;
-			const sourceCaptureId = await this.ctx.sessionManager.captureRequirementsInput(text, inputImages);
 
 			if (runner?.hasHandlers("input")) {
 				const result = await runner.emitInput(text, inputImages, "interactive");
@@ -877,10 +880,10 @@ export class InputController {
 			if (text && isKnownSkillCommand(this.ctx, text)) {
 				if (this.ctx.session.isCompacting) {
 					const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
-					this.ctx.queueCompactionMessage(text, "steer", images, sourceCaptureId);
+					this.ctx.queueCompactionMessage(text, "steer", images, originalSubmission);
 					return;
 				}
-				if (await this.#invokeSkillCommand(text, "steer", inputImages, inputImageLinks, sourceCaptureId)) {
+				if (await this.#invokeSkillCommand(text, "steer", inputImages, inputImageLinks, originalSubmission)) {
 					return;
 				}
 			}
@@ -925,7 +928,7 @@ export class InputController {
 			// Queue input during compaction
 			if (this.ctx.session.isCompacting) {
 				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
-				this.ctx.queueCompactionMessage(text, "steer", images, sourceCaptureId);
+				this.ctx.queueCompactionMessage(text, "steer", images, originalSubmission);
 				// An inline `/loop` body queued here arms the loop only when it is
 				// an actual model prompt. Skill/bash/python bodies never reach this
 				// branch, but an extension-command body would otherwise be retained
@@ -941,7 +944,7 @@ export class InputController {
 			if (this.#isLocalExtensionCommand(text)) {
 				this.ctx.editor.clearDraft(text);
 				try {
-					await this.ctx.session.prompt(text, { images: inputImages, sourceCaptureId });
+					await this.ctx.session.prompt(text, { images: inputImages, originalSubmission });
 				} catch (error) {
 					if (inputImages && inputImages.length > 0) {
 						this.ctx.editor.pendingImages = [...inputImages];
@@ -972,7 +975,7 @@ export class InputController {
 				try {
 					const forwarded = await this.ctx.withLocalSubmission(
 						text,
-						() => this.ctx.session.prompt(text, { streamingBehavior: "steer", images, sourceCaptureId }),
+						() => this.ctx.session.prompt(text, { streamingBehavior: "steer", images, originalSubmission }),
 						{ imageCount: images?.length ?? 0 },
 					);
 					// An inline `/loop` body arms the loop only after dispatch
@@ -1025,7 +1028,7 @@ export class InputController {
 				// streaming-branch Enter (above) and keeps the message from throwing
 				// AgentBusyError on that race.
 				const submission = this.ctx.startPendingSubmission({
-					sourceCaptureId,
+					originalSubmission,
 					text,
 					images,
 					imageLinks: inputImageLinks,
@@ -1052,7 +1055,7 @@ export class InputController {
 				try {
 					const forwarded = await this.ctx.withLocalSubmission(
 						text,
-						() => this.ctx.session.prompt(text, { streamingBehavior: "steer", images, sourceCaptureId }),
+						() => this.ctx.session.prompt(text, { streamingBehavior: "steer", images, originalSubmission }),
 						{
 							imageCount: images?.length ?? 0,
 						},
@@ -1278,7 +1281,7 @@ export class InputController {
 		streamingBehavior: "steer" | "followUp",
 		images?: ImageContent[],
 		imageLinks?: (string | undefined)[],
-		sourceCaptureId?: string,
+		originalSubmission?: OriginalSubmission,
 	): Promise<boolean> {
 		if (!isKnownSkillCommand(this.ctx, text)) return false;
 		const draftImages = images && images.length > 0 ? [...images] : undefined;
@@ -1299,7 +1302,14 @@ export class InputController {
 		try {
 			// Build the user-attributed skill message once so the optimistic
 			// transcript row and the dispatched message share content.
-			const built = await buildSkillCommandPrompt(this.ctx, text, streamingBehavior, draftImages, sourceCaptureId);
+			const built = await buildSkillCommandPrompt(
+				this.ctx,
+				text,
+				streamingBehavior,
+				draftImages,
+				originalSubmission,
+				draftImageLinks,
+			);
 			if (!built) {
 				restoreDraft();
 				return false;

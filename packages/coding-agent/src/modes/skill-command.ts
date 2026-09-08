@@ -1,4 +1,4 @@
-import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { ImageContent, OriginalSubmission, TextContent } from "@oh-my-pi/pi-ai";
 import { buildSkillPromptMessage, getSkillSlashCommandName, parseSkillInvocation } from "../extensibility/skills";
 import { type CustomMessage, SKILL_PROMPT_MESSAGE_TYPE, type SkillPromptDetails } from "../session/messages";
 import type { InteractiveModeContext } from "./types";
@@ -17,16 +17,19 @@ type SkillPromptMessage = Pick<
 };
 
 type SkillPromptOptions = {
-	sourceCaptureId?: string;
+	originalSubmission: OriginalSubmission;
+	producer: { type: "human" };
+	imageLinks?: (string | undefined)[];
 	streamingBehavior: "steer" | "followUp";
 	queueChipText: string;
 };
 
 interface InvokeSkillCommandOptions {
-	sourceCaptureId?: string;
+	originalSubmission?: OriginalSubmission;
 	propagateErrors?: boolean;
 	queueOnly?: boolean;
 	images?: ImageContent[];
+	imageLinks?: (string | undefined)[];
 }
 
 /** Built custom-message payload and delivery options for a `/skill:` command. */
@@ -48,14 +51,15 @@ export async function buildSkillCommandPrompt(
 	text: string,
 	streamingBehavior: "steer" | "followUp",
 	images?: ImageContent[],
-	sourceCaptureId?: string,
+	originalSubmission?: OriginalSubmission,
+	imageLinks?: (string | undefined)[],
 ): Promise<BuiltSkillCommandPrompt | undefined> {
 	const parsed = parseSkillInvocation(text);
 	if (!parsed) return undefined;
 	const skill = ctx.skillCommands.get(getSkillSlashCommandName({ name: parsed.name }));
 	if (!skill) return undefined;
 
-	const captureId = sourceCaptureId ?? (await ctx.session.sessionManager.captureRequirementsInput(text, images));
+	originalSubmission ??= { text, images, imageLinks };
 	const built = await buildSkillPromptMessage(skill, parsed.args, "user");
 	const textBlock: TextContent = { type: "text", text: built.message };
 	const promptContent = images && images.length > 0 ? [textBlock, ...images] : built.message;
@@ -68,7 +72,7 @@ export async function buildSkillCommandPrompt(
 			details: built.details,
 			attribution: "user",
 		},
-		options: { streamingBehavior, queueChipText: text, sourceCaptureId: captureId },
+		options: { streamingBehavior, queueChipText: text, originalSubmission, imageLinks, producer: { type: "human" } },
 	};
 }
 
@@ -85,7 +89,8 @@ export async function invokeSkillCommandFromText(
 			text,
 			streamingBehavior,
 			options?.images,
-			options?.sourceCaptureId,
+			options?.originalSubmission,
+			options?.imageLinks,
 		);
 		if (!built) return false;
 		const promptOptions = options?.queueOnly ? { ...built.options, queueOnly: true } : built.options;
