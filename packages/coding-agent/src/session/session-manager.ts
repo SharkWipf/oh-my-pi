@@ -40,7 +40,7 @@ import {
 	sanitizeRehydratedOpenAIResponsesAssistantMessage,
 	stripInternalDetailsFields,
 } from "./messages";
-import { type BuildSessionContextOptions, buildSessionContext, type SessionContext } from "./session-context";
+import { type BuildSessionContextOptions, buildSessionContext, getOpenAiRemoteCompactionPayload, type SessionContext } from "./session-context";
 import {
 	type BranchSummaryEntry,
 	type CompactionEntry,
@@ -261,6 +261,33 @@ class SessionEntryIndex {
 	#labels = new Map<string, string>();
 	#leaf: string | null = null;
 	#usage = emptyUsageStatistics();
+
+	/** Walk only the actual replay suffix; full historical inspection still uses pathTo. */
+	contextPath(options?: BuildSessionContextOptions): SessionEntry[] {
+		const path: SessionEntry[] = [];
+		const seen = new Set<string>();
+		let cursor = this.leafEntry();
+		let compaction: CompactionEntry | undefined;
+		let first: string | undefined;
+		while (cursor && !seen.has(cursor.id)) {
+			seen.add(cursor.id);
+			path.push(cursor);
+			if (!compaction) {
+				if (cursor.type === "reset_boundary") break;
+				if (cursor.type === "compaction") {
+					compaction = cursor;
+					if (!options?.transcript && getOpenAiRemoteCompactionPayload(compaction)) {
+						first = compaction.providerReplayThroughEntryId;
+						if (!first) break;
+					} else first = compaction.firstKeptEntryId;
+				}
+			}
+			if (compaction && cursor.id === first) break;
+			cursor = cursor.parentId ? this.#entriesById.get(cursor.parentId) : undefined;
+		}
+		path.reverse();
+		return path;
+	}
 
 	clear(): void {
 		this.#entriesById.clear();
