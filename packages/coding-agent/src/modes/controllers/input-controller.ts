@@ -1003,11 +1003,7 @@ export class InputController {
 					compactionOverride,
 					originalSubmission,
 				);
-				// An inline `/loop` body queued here arms the loop only when it is
-				// an actual model prompt. Skill/bash/python bodies never reach this
-				// branch, but an extension-command body would otherwise be retained
-				// as loopPrompt while the drain executes it locally — and idle
-				// submissions never arm commands.
+				// Arm only actual model prompts after queue acceptance.
 				if (submittedMode === "loop" && (compactionOverride || !this.#isLocalExtensionCommand(text))) {
 					this.ctx.setLoopPrompt(restoreCompactionOverridePrompt(text, compactionOverride));
 				}

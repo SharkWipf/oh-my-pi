@@ -7,8 +7,10 @@
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
+import { executeRequirementsCommand, renderRequirementsData } from "../requirements/commands";
+import { parseSlashCommand } from "../slash-commands/helpers/parse";
 import { type AgentSession, type AgentSessionEvent, SHUTDOWN_CONSOLIDATE_BUDGET_MS } from "../session/agent-session";
+import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { isSilentAbort } from "../session/messages";
 import { flushTelemetryExport } from "../telemetry-export";
 import { initializeExtensions } from "./runtime-init";
@@ -166,15 +168,40 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 		wroteTextWorkingIndicator = true;
 	};
 
-	// Send initial message with attachments
-	if (initialMessage !== undefined) {
+	let lastInputWasCommand = false;
+	let commandFailure: string | undefined;
+	const handleRequirements = async (text: string, images?: ImageContent[]): Promise<boolean> => {
+		const parsed = parseSlashCommand(text);
+		if (parsed?.name !== "memory" || !/^requirements(?:\s|$)/i.test(parsed.args.trim())) return false;
+		lastInputWasCommand = true;
+		let output: string;
+		try {
+			if (images?.length)
+				throw new Error(
+					"Requirements commands do not accept image attachments; use evidence with original source IDs.",
+				);
+			output = await executeRequirementsCommand(session, parsed.args.trim().slice("requirements".length).trim());
+		} catch (error) {
+			output = renderRequirementsData(error instanceof Error ? error.message : String(error));
+			commandFailure = output;
+		}
+		writeStdoutLine(
+			mode === "json"
+				? `${JSON.stringify({ type: "command_result", command: "memory requirements", text: output })}\n`
+				: `${output}\n`,
+		);
+		return true;
+	};
+
+	// Operator commands never need primary-model cooperation.
+	if (initialMessage !== undefined && !(await handleRequirements(initialMessage, initialImages))) {
 		writeTextWorkingIndicator();
 		if (mode === "text") session.setTextOutputCommitted(false);
 		await logger.time("print:prompt:initial", () => session.prompt(initialMessage, { images: initialImages }));
 	}
-
-	// Send remaining messages
 	for (const message of messages) {
+		if (await handleRequirements(message)) continue;
+		lastInputWasCommand = false;
 		writeTextWorkingIndicator();
 		if (mode === "text") session.setTextOutputCommitted(false);
 		await logger.time("print:prompt:next", () => session.prompt(message));
@@ -185,7 +212,7 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 	session.prepareForHeadlessAdvisorDrain();
 
 	// In text mode, output final response
-	if (mode === "text") {
+	if (mode === "text" && !lastInputWasCommand) {
 		// Read via the session accessor, not the raw state tail: a classifier
 		// refusal is pruned from active context at settle, and an aborted turn
 		// can trail synthetic tool results — both would hide the terminal
@@ -244,4 +271,5 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 	// otherwise discard the buffered tail and truncate the last record.
 	await stdoutTail;
 	await session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
+	if (commandFailure !== undefined) throw new Error(commandFailure);
 }

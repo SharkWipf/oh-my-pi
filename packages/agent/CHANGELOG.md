@@ -31,6 +31,10 @@
 - Local compaction preserves selected source spans chronologically without refunding selected-user cut costs; complete admitted non-user atoms are charged once before the calibrated ordinary walk. Repeated sparse retention no longer resurrects intervening omitted originals.
 - Authored images interleaved with snap archive frames keep their one-time original-image estimate instead of being priced as rasterized transcript frames.
 
+### Added
+
+- Pre-model-call gates receive the resolved request model alongside the actual post-inband provider context, so accounting and admission use the dispatched representation without preparing it again.
+
 ## [18.1.10] - 2026-09-04
 
 ### Fixed

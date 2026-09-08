@@ -63,6 +63,13 @@ AgentMessage[] → transformContext() → AgentMessage[] → convertToLlm() → 
 
 1. **transformContext**: Prune old messages, inject external context
 2. **convertToLlm**: Filter out UI-only messages, convert custom types to LLM format
+3. **transformProviderContext**: Transform the complete provider context, including its system prompt and tools.
+
+Use `agent.addBeforeModelCallHook` to refresh owner-managed system prompts before each request is assembled, including requests after tool execution. The agent refreshes the effective prompt and tools after these hooks. Keep base and per-turn prompt inputs at the session prompt owner rather than composing into a prepared provider context.
+
+`beforeModelCall(context, signal, request)` and callbacks registered with `addBeforeModelCall` observe the actual prepared provider context after the configured transform and inband tool encoding. `request.model` is the resolved model for that request. This later boundary can check generation or capacity but is too late for ordinary prompt composition. Returning `{ stop: true }` refuses provider dispatch; the registration disposer removes an owner gate.
+
+`agent.buildSideRequestContext(messages, systemPrompt?)` applies the configured provider transform. Side requests that require independent instructions pass their uncomposed prompt explicitly; they do not run execution-request pre-hooks.
 
 ## Event Flow
 

@@ -90,6 +90,8 @@ export interface BeamMemoryState {
 	config: BeamConfig;
 	/** Tracks in-flight background fact-extraction tasks scheduled by `remember(..., { extract: true })`. */
 	pendingExtractions?: Set<Promise<void>>;
+	/** Aborted when background enrichment loses its owning bank. */
+	readonly backgroundSignal?: AbortSignal;
 }
 
 export interface AnnotationWriteOptions {

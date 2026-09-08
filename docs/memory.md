@@ -1,6 +1,6 @@
 # Autonomous Memory
 
-Oh My Pi supports five memory modes. Memory is disabled by default; select one backend via `/settings` or `config.yml`:
+Oh My Pi supports five ordinary memory modes. Ordinary memory and living requirements are independently disabled by default; select an ordinary backend via `/settings` or `config.yml`:
 
 | `memory.backend` | Storage and behavior                                                   | Guide                                                   |
 | ---------------- | ---------------------------------------------------------------------- | ------------------------------------------------------- |
@@ -16,6 +16,57 @@ Enable the local summary pipeline:
 memory:
   backend: local
 ```
+
+## Living requirements
+
+Living requirements are independent source-backed records, not ordinary backend summaries or learned skills. Enable **Memory → Living Requirements** in `/settings`, then configure **Requirements Extractor**, **Requirements Evidence**, and **Requirements Sanity** in the existing `/model` role picker. Their configuration keys are `modelRoles.requirements`, `modelRoles.requirementsEvidence`, and `modelRoles.requirementsSanity`; the same provider/model may serve all three isolated jobs. Unconfigured routes stay unresolved rather than silently selecting a different model.
+
+```yaml
+memory:
+  backend: off
+requirements:
+  enabled: true
+```
+
+`/memory requirements` shows exact source and revision IDs, scopes, active/conflicting/quarantined records, coverage holes, configured/resolved model capabilities, and the last request receipt. `/context` includes the same requirements summary and settings links. Token values distinguish estimates from unknown values; prepared or refused receipts do not claim a request was sent. When available, the capacity receipt shows context-window, irreducible-prompt and reserve tokens; unknown capacity does not itself mean overflow. Processing all supplied evidence is fallible extraction, **not a guarantee that every natural-language requirement was found**.
+
+Historical catalog availability is separate from extraction coverage. Requirements-off input uses normal accepted-submission metadata without requirements capture, indexing or history scans. Enabling requirements cooperatively catalogs committed authoritative source metadata; it does not launch model calls just to establish availability. Historical backfill is explicit and never acquires a pending-live context hold. Only durably delivered new live inputs awaiting complete processing receive temporary protection at their ordinary delivered entry IDs.
+
+Before execution, recall reads the current applicable requirement heads and their consumed original evidence, not the historical catalog. AgentStorage uses indexed normalized changed-row transactions; full historical inspection is explicit. SessionTools composes one cached requirements fragment with the uncomposed base or turn override in the early model-call hook. The later dispatch boundary checks generation and actual capacity without rewriting the prepared prompt. Catalog status is an aggregate, not an instruction per old source.
+
+TUI, ACP, RPC and print-mode commands share the session-owned actions. Views do not own background work. Disposing the owning session aborts requirements requests and prevents delayed evidence preparation or late model replies from authorizing new work or publishing revisions; it does not promise retraction of a request already accepted remotely. `omp --start-without-memory -p "/memory requirements help"` works without model credentials.
+
+Assistant, tool, and extension output is reference evidence, not operator authority. Normal operator SDK submissions use the same host-recorded human producer as ordinary input. A later human acceptance may adopt nonhuman data through extraction and independent review; the accepted record cites the whole original acceptance unit and adopted journal entry or block. Original bodies remain in the normal journal/blob store rather than a second requirements transcript. Changed or unavailable originals invalidate affected evidence; matching bytes returning do not undo explicit quarantine.
+
+Evidence identifies a host-issued complete original entry or content block by source identity, immutable source version and unit ID. Models cannot invent byte offsets, paths, hashes or new units. The pipeline has exactly three model stages: contextual extraction; fresh contextual evidence and obligation-coverage review; and fresh candidate-only sanity. Evidence review independently inventories obligations, maps each to a supported operation or genuinely matching current accepted head, and checks each operation against its cited whole units. Sanity receives normalized candidate statements, scopes and operations only—no source transcript, active memory or tool output. A legitimate empty proposal can pass, but a complete flag never overrides an uncovered obligation. These semantic judgments remain fallible.
+
+| `/memory requirements` action | Operation |
+| --- | --- |
+| `inspect <revision-id>` | Inspect statement, scope, history and evidence metadata. |
+| `source <source-key>` | Retrieve original evidence and current locators using exact IDs. Original data cannot be recovered if its source is unavailable. |
+| `retry [source-key]` | Retry/backfill at the original source position after fixing the reported model/evidence problem. An explicit source key can retry a scoped foreign-source coverage hole; unrelated foreign backlog is not processed automatically. |
+| `evidence <source-key> <referent-source-key...>` | Supply host-resolved original evidence for review. |
+| `adopt <source-key> <unit-id> <scope-json> --confirm` | Explicitly adopt a complete original text unit, not an excerpt; independent candidate-only sanity is still required. `adoptedUnitIds` identifies accepted units; sibling units remain uncovered until separately reviewed/adopted or explicitly passed with a gap. |
+| `gap <source-key> <reason> --confirm` | Continue past a hole without pretending its evidence was processed. |
+| `correct`, `withdraw`, `scope` followed by `<revision-id> <decision/reason>` | Create a targeted operator source decision; normal evidence/sanity review still decides publication. |
+| `quarantine <id,id...> <reason> --confirm` | Suspend revisions without deleting original evidence. Unresolved conflict metadata remains visible, but quarantined instruction bodies are omitted from automatic recall. |
+| `restore <id,id...>` | Request fresh evidence and sanity review; rejected, unavailable or uncertain revisions stay suspended. |
+| `clear <session|project|global|all> <reason> --confirm` | Explicit scoped requirements withdrawal, separate from deleting ordinary backend data. |
+| `help` | Show all commands, required confirmations and scope syntax. |
+
+`/clear` starts a new conversation/requirements epoch; explicitly standing project/global requirements and ordinary memory banks remain. Explicit requirements scoped clear records a tombstone: historical backfill cannot recreate withdrawn authority; newly accepted operator input can establish a new requirement. Disabling requirements suspends automatic work and injection, not inspection or stored evidence. Capacity overflow does not silently truncate active records: use a larger-context model, explicitly narrow scope, or approve staged work.
+
+Deleting a session through the existing session picker checks enabled requirements for active dependent original evidence. The confirmation shows the affected statements, IDs and scopes, then offers cancellation, retention of the needed originals in the normal BlobStore, or explicit withdrawal of those exact revisions before deletion. Retention does not preserve an entire extra transcript; withdrawal does not clear unrelated requirements or ordinary memory banks. No-dependent and requirements-off deletion keep the ordinary path. External disappearance makes consumed evidence unavailable; identical original bytes returning can restore availability but never cancel explicit quarantine or withdrawal.
+
+Standing project/global requirements retain their original source and referent provenance across sessions. Current local and scoped foreign originals are revalidated before dispatch. Missing or rewritten originals expose current evidence gaps separately from explicit quarantine; identical bytes returning do not restore a quarantined revision. Explicit restore resolves the actual originals and requires fresh review under the current generation. Unrelated historical backlog remains inspectable without entering active recall.
+
+### Recovery without memory
+
+- `omp --start-without-memory` skips ordinary backend and autolearn startup before loading a session.
+- `/memory requirements bypass-future --confirm` revokes future requirements jobs, publication, recall and pending-live protection only. Ordinary memory remains under its selected backend. Previously injected memory, the transcript and provider state remain; this is **not a clean history**.
+- `/memory requirements retry-clean [original-entry-id...] --confirm` uses the ordinary fresh-session/root/provider-state transition, with ordinary memory off, autolearn off and requirements disabled before the new session starts. Only explicitly selected original human inputs are carried; no old transcript or summary is implicitly inherited.
+
+Requirements bypass remains active for the run until explicitly restarted. Clean retry does not rewrite every memory backend or retract submitted remote writes: normal disposal retains its ordinary side effects, which may include flushing accepted writes or consolidation. Neither action deletes stored memory or establishes semantic safety. Rules, AGENTS files, skills and context files still apply; status names the context-file paths that remain enabled.
 
 ## Usage
 

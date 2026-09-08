@@ -155,6 +155,7 @@ export class SessionHandoff {
 			const handoffContext = await this.#host.agent.buildSideRequestContext(
 				handoffLlmMessages,
 				this.#host.baseSystemPrompt(),
+				{ includeOwnerTransforms: true },
 			);
 			const handoffStreamOptions = this.#host.prepareSimpleStreamOptions(
 				{

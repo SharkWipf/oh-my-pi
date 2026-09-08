@@ -526,6 +526,8 @@ export interface ExecutorOptions {
 	 * artifacts directory (no per-subagent subdir).
 	 */
 	parentArtifactManager?: ArtifactManager;
+	/** Inherit operator memory recovery before constructing a child. */
+	startWithoutMemory?: boolean;
 	parentHindsightSessionState?: HindsightSessionState;
 	parentMnemopiSessionState?: MnemopiSessionState;
 	/** Parent agent's eval executor session id. Subagents reuse it so eval state is shared. */
@@ -3530,6 +3532,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				// so nested lifecycle/progress/event frames reach its surfaces
 				// without leaking into another root session's traffic.
 				subagentEventBus: options.subagentEventBus,
+				startWithoutMemory: options.startWithoutMemory,
 				parentHindsightSessionState: options.parentHindsightSessionState,
 				parentMnemopiSessionState: options.parentMnemopiSessionState,
 				parentTaskPrefix: id,

@@ -1,4 +1,9 @@
-import { computeContextBreakdown, renderCompactionDiagnosticsDetails, renderCompactionDiagnosticsSummary } from "../../modes/utils/context-usage";
+import {
+	computeContextBreakdown,
+	renderCompactionDiagnosticsDetails,
+	renderCompactionDiagnosticsSummary,
+} from "../../modes/utils/context-usage";
+import { requirementsContextText } from "../../requirements/commands";
 import type { SlashCommandRuntime } from "../types";
 import { renderAsciiBar } from "./format";
 
@@ -8,6 +13,10 @@ import { renderAsciiBar } from "./format";
  * minimal "window/used" lines when the breakdown helper throws.
  */
 export function buildContextReportText(runtime: Pick<SlashCommandRuntime, "session">, action: "usage" | "details" = "usage"): string {
+	return `${buildUsageReportText(runtime, action)}\n\n${requirementsContextText(runtime.session)}`;
+}
+
+function buildUsageReportText(runtime: Pick<SlashCommandRuntime, "session">, action: "usage" | "details"): string {
 	if (action === "details") {
 		const current = runtime.session.getCompactionDiagnostics("current");
 		const recorded = runtime.session.getCompactionDiagnostics("recorded");
@@ -67,7 +76,8 @@ export function buildContextReportText(runtime: Pick<SlashCommandRuntime, "sessi
 				}
 			}
 		}
-		if (breakdown.recordedCompaction) lines.push("", "Last compaction (recorded)", renderCompactionDiagnosticsSummary(breakdown.recordedCompaction));
+		if (breakdown.recordedCompaction)
+			lines.push("", "Last compaction (recorded)", renderCompactionDiagnosticsSummary(breakdown.recordedCompaction));
 		lines.push("", "Use /context details for the ordered inventory, settings and measurement basis.");
 		return lines.join("\n");
 	} catch {

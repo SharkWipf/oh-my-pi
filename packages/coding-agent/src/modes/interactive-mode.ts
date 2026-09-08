@@ -1334,6 +1334,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			if (!$env.PI_NO_TITLE && !this.sessionManager.getSessionName()) {
 				tinyTitleClient.prewarm(this.settings.get("providers.tinyModel"));
 			}
+			// Cold source coverage belongs after the first frame, never SDK/session construction.
+			void this.session.requirements.observeCommittedSources().catch(error => {
+				this.showError(`Requirements source initialization failed: ${error}`);
+			});
 		});
 
 		// Initialize hooks with TUI-based UI context

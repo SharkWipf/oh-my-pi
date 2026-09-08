@@ -10,6 +10,11 @@ export interface SessionStorageStat {
 	size: number;
 	mtimeMs: number;
 	mtime: Date;
+	/** Physical filesystem identity, only when the backend actually provides it. */
+	dev?: number;
+	ino?: number;
+	ctimeMs?: number;
+	mode?: number;
 }
 
 export interface SessionStorageWriter {
@@ -260,7 +265,15 @@ export class FileSessionStorage implements SessionStorage {
 
 	statSync(path: string): SessionStorageStat {
 		const stats = fs.statSync(path);
-		return { size: stats.size, mtimeMs: stats.mtimeMs, mtime: stats.mtime };
+		return {
+			size: stats.size,
+			mtimeMs: stats.mtimeMs,
+			mtime: stats.mtime,
+			dev: stats.dev,
+			ino: stats.ino,
+			ctimeMs: stats.ctimeMs,
+			mode: stats.mode,
+		};
 	}
 
 	listFilesSync(dir: string, pattern: string): string[] {

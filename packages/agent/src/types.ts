@@ -67,13 +67,19 @@ export interface AgentPreModelCallStop {
 
 export type AgentPreModelCallResult = AgentPreModelCallStop | undefined;
 
+/** Model resolved for the actual prepared provider request. */
+export interface AgentPreparedRequest {
+	readonly model: Model;
+}
+
 /**
- * A pre-model-call gate. Return {@link AgentPreModelCallStop} to refuse the
- * request, or nothing to proceed; the signal aborts with the run.
+ * A pre-model-call gate after provider-context transforms and inband tool encoding.
+ * Return a stop result to refuse; the signal aborts with the run.
  */
 export type AgentBeforeModelCall = (
 	context: Context,
-	signal?: AbortSignal,
+	signal: AbortSignal | undefined,
+	request: AgentPreparedRequest,
 ) => AgentPreModelCallResult | void | Promise<AgentPreModelCallResult | void>;
 
 /**

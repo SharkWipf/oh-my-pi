@@ -220,6 +220,9 @@ export class SessionTools {
 	 * drop it before the request. Cleared when the turn ends.
 	 */
 	#turnSystemPromptOverride: string[] | undefined;
+	#requirementsFragment = "";
+	#appliedPromptBase: string[] | undefined;
+	#appliedRequirementsFragment: string | undefined;
 	#lastAppliedToolSignature: string | undefined;
 	/** Full enabled set, including tools demoted from the model-visible surface. */
 	#enabledToolNames = new Set<string>();
@@ -318,34 +321,45 @@ export class SessionTools {
 		return this.#baseSystemPrompt;
 	}
 
-	/** Replaces the controller-owned base prompt without applying it to the agent. */
+	/** Replace and apply the uncomposed base, preserving the turn override. */
 	setBaseSystemPrompt(prompt: string[]): void {
 		this.#baseSystemPrompt = prompt;
+		this.#applyAgentSystemPrompt(prompt);
 	}
 
-	/**
-	 * Pushes `base` to the agent as the effective system prompt, unless an active
-	 * per-turn {@link #turnSystemPromptOverride} takes precedence. Every base
-	 * rebuild applies its result through here so a mid-turn rebuild preserves the
-	 * override.
-	 */
+	setRequirementsFragment(fragment: string): void {
+		this.#requirementsFragment = fragment;
+		this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
+	}
+
+	capturePromptState(): { base: string[]; turnOverride: string[] | undefined } {
+		return { base: this.#baseSystemPrompt, turnOverride: this.#turnSystemPromptOverride };
+	}
+
+	restorePromptState(state: { base: string[]; turnOverride: string[] | undefined }): void {
+		this.#baseSystemPrompt = state.base;
+		this.#turnSystemPromptOverride = state.turnOverride;
+		this.#requirementsFragment = "";
+		this.#appliedPromptBase = undefined;
+		this.#applyAgentSystemPrompt(state.base);
+	}
+
 	#applyAgentSystemPrompt(base: string[]): void {
-		this.#host.agent.setSystemPrompt(this.#turnSystemPromptOverride ?? base);
+		const effective = this.#turnSystemPromptOverride ?? base;
+		if (this.#appliedPromptBase === effective && this.#appliedRequirementsFragment === this.#requirementsFragment) return;
+		this.#host.agent.setSystemPrompt(this.#requirementsFragment ? [...effective, this.#requirementsFragment] : effective);
+		this.#appliedPromptBase = effective;
+		this.#appliedRequirementsFragment = this.#requirementsFragment;
 	}
 
-	/**
-	 * Registers the per-turn `before_agent_start` system-prompt override and
-	 * applies it to the agent. Base rebuilds during the turn preserve it until
-	 * {@link clearTurnSystemPromptOverride}.
-	 */
 	setTurnSystemPromptOverride(prompt: string[]): void {
 		this.#turnSystemPromptOverride = prompt;
-		this.#host.agent.setSystemPrompt(prompt);
+		this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
 	}
 
-	/** Drops the active per-turn override; later rebuilds fall back to the base prompt. */
 	clearTurnSystemPromptOverride(): void {
 		this.#turnSystemPromptOverride = undefined;
+		this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
 	}
 
 	/** Skills currently rendered into the system prompt. */
