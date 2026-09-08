@@ -6,6 +6,7 @@ import type {
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Context, Message, Model } from "@oh-my-pi/pi-ai";
 import type { SourceLayoutPart, SourceRepresentation } from "@oh-my-pi/pi-ai/compaction-source";
+import { visitOpenAIResponsesLogicalContent } from "@oh-my-pi/pi-ai/utils";
 import { FRAME_TOKEN_ESTIMATE } from "@oh-my-pi/snapcompact";
 import { getArchiveFrameAccounting, getInlinePhysical, getSourceOrigin, type NativeItemOrigin } from "@oh-my-pi/pi-ai/utils/source-origin";
 import { estimateToolSchemaTokens } from "../modes/utils/context-usage";
@@ -174,9 +175,29 @@ function appendNativeRows(rows: ContextInventoryRow[], items: Array<Record<strin
 		};
 		const text = (value: string, label: string, kind: "text" | "tool" = "text") => emit(kind, label, tokenizer.countTokens(value), { value: Buffer.byteLength(value, "utf8"), unit: "utf8-bytes" });
 		const opaque = (value: unknown, label: string, blocks = 1) => emit("native", label, null, { value: Buffer.byteLength(JSON.stringify(value) ?? "", "utf8"), unit: "utf8-bytes" }, blocks);
+		const unresolved = (value: unknown, label: string, blocks = 1) => {
+			const start = rows.length;
+			if (value && typeof value === "object") visitOpenAIResponsesLogicalContent(value, {
+				image: image => {
+					const url = image.type === "reference" ? image.image_url : undefined;
+					const prefix = url?.startsWith("data:") ? url.indexOf(";base64,") : -1;
+					const size: ContextInventoryRow["payloadSize"] = image.type === "base64"
+						? { value: image.data.length, unit: "base64-characters" }
+						: url && prefix !== undefined && prefix >= 0
+							? { value: url.length - prefix - 8, unit: "base64-characters" }
+							: undefined;
+					emit("original-image", "Native image", IMAGE_TOKEN_ESTIMATE, size);
+				},
+			});
+			if (rows.length === start) opaque(value, label, blocks);
+			else if (!(value && typeof value === "object" && "type" in value && (value.type === "input_image" || value.type === "computer_screenshot" || value.type === "image"))) {
+				// Image bytes are already inventoried; never charge or count their enclosing tree again.
+				emit("native", "Remaining native metadata", null, undefined, 0);
+			}
+		};
 		const content = (value: unknown) => {
 			if (typeof value === "string") { text(value, "Native message text"); return; }
-			if (!Array.isArray(value)) { opaque(value, "Unresolved native content"); return; }
+			if (!Array.isArray(value)) { unresolved(value, "Unresolved native content"); return; }
 			for (const block of value) {
 				if (!block || typeof block !== "object") { opaque(block, "Unresolved native block"); continue; }
 				if ((block.type === "input_text" || block.type === "output_text" || block.type === "summary_text") && typeof block.text === "string") {
@@ -188,7 +209,7 @@ function appendNativeRows(rows: ContextInventoryRow[], items: Array<Record<strin
 						? { value: url.length - prefix - 8, unit: "base64-characters" }
 						: { value: Buffer.byteLength(JSON.stringify(block), "utf8"), unit: "utf8-bytes" };
 					emit("original-image", "Native input image", IMAGE_TOKEN_ESTIMATE, size);
-				} else opaque(block, "Unresolved native block");
+				} else unresolved(block, "Unresolved native block");
 			}
 		};
 		if ((item.type === "message" || item.type === undefined) && typeof item.role === "string") {
@@ -202,7 +223,7 @@ function appendNativeRows(rows: ContextInventoryRow[], items: Array<Record<strin
 			if (Array.isArray(item.summary)) content(item.summary);
 			if (item.encrypted_content !== undefined) opaque(item.encrypted_content, "Encrypted native reasoning", 0);
 			else if (rows.length === firstRow) opaque(item, "Opaque native reasoning reference", 0);
-		} else opaque(item, item.type === "compaction" ? "Opaque native compaction" : "Unresolved native item", 0);
+		} else unresolved(item, item.type === "compaction" ? "Opaque native compaction" : "Unresolved native item", 0);
 		// An empty native message still occupies one exact item/message boundary.
 		if (rows.length === firstRow) emit("text", "Empty native message", 0, { value: 0, unit: "utf8-bytes" }, 0);
 	}
@@ -345,7 +366,9 @@ export function buildCompactionDiagnostics(input: CompactionDiagnosticsInput): C
 					const part = locatedPart(blockIndex);
 					const physical = prepared ? getInlinePhysical(block) : undefined;
 					const archiveFrame = getArchiveFrameAccounting(block);
-					const frame = physical?.kind === "frame" || archiveFrame !== undefined || part?.kind === "frame" || (original.role === "compactionSummary" && part?.kind !== "original-image");
+					const origin = getSourceOrigin(block);
+					const originalImage = origin?.kind === "source" && origin.parts.length > 0 && origin.parts.every(part => part.representation === "original-image");
+					const frame = physical?.kind === "frame" || archiveFrame !== undefined || part?.kind === "frame" || (original.role === "compactionSummary" && part?.kind !== "original-image" && !originalImage);
 					const tokens = physical?.kind === "frame" ? physical.estimatedTokens : frame ? framePrice : IMAGE_TOKEN_ESTIMATE;
 					imageAdjustment += tokens - fullTokens;
 					add(frame ? "frame" : "original-image", physical?.kind === "frame" ? `Inline ${physical.owner} frame` : frame ? "Rasterized archive frame" : "Original or unclassified image", tokens, blockIndex, block.data.length, true, archiveFrame ? "Archive identity is recorded; historical renderer-specific price is not. Charge is the generic local archive estimate." : undefined);

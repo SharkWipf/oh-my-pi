@@ -1459,7 +1459,7 @@ export class AgentSession {
 		});
 		this.#disposePreparedCompactionDiagnostics = this.agent.addBeforeModelCall((context, signal, request) => {
 			if (signal?.aborted) return;
-			this.#preparedCompactionDiagnostics = { ownership: this.#compactionOwnership, facts: this.#maintenance.capturePreparedCompactionDiagnostics(context, request.model, request.sourceContext) };
+			this.#preparedCompactionDiagnostics = { ownership: this.#compactionOwnership, facts: this.#maintenance.capturePreparedCompactionDiagnostics(context, request.model) };
 		});
 		// Resolve the wire service-tier per request so the Fireworks Priority
 		// toggle scopes priority to Fireworks alone, without mutating the shared

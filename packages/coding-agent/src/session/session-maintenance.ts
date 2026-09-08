@@ -516,12 +516,12 @@ export class SessionMaintenance {
 	}
 
 	/** Observe the existing post-inband gate; never re-run transforms or retain Context. */
-	capturePreparedCompactionDiagnostics(context: Context, model: Model, sourceContext: Context): CompactionDiagnostics {
+	capturePreparedCompactionDiagnostics(context: Context, model: Model): CompactionDiagnostics {
 		const entry = this.#activeCompactionEntry();
 		const representation = getCompactionSourceRepresentation(entry?.preserveData);
 		const recorded = entry?.diagnostics;
 		const facts = buildCompactionDiagnostics({
-			messages: sourceContext.messages, preparedContext: context, tokenizer: this.#tokenizer, model,
+			messages: context.messages, preparedContext: context, tokenizer: this.#tokenizer, model,
 			fixedCosts: computeNonMessageBreakdown(this.#host.nonMessageTokenSource(), this.#tokenizer),
 			method: entry?.method ?? "uncompacted", snapshot: "OMP-prehook", target: {},
 			before: { tokens: null, basis: "unknown", description: "No same-domain before-preparation measurement was captured" },

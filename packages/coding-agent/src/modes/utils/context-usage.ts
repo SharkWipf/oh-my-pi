@@ -606,7 +606,7 @@ export function renderCompactionDiagnosticsSummary(diagnostics: CompactionDiagno
 		" · " + diagnosticTokens(diagnostics.before) + "→" + diagnosticTokens(diagnostics.total) + " tokens\n" +
 		"Ordinary " + diagnosticTokens(distribution.ordinary) +
 		" · added " + diagnosticTokens(distribution.addedUser) +
-		" · shared " + diagnosticTokens(distribution.shared) + " (not additive)";
+		" · shared " + diagnosticTokens(distribution.shared) + " (counted once)";
 }
 
 function diagnosticQuantityDetail(quantity: DiagnosticTokenQuantity): string {
