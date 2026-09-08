@@ -3,6 +3,7 @@
  */
 
 import type { ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type { SourceRewrite } from "@oh-my-pi/pi-ai/compaction-source";
 import type { Tokenizer } from "../tokenizer";
 import type { AgentMessage, AgentToolCall } from "../types";
 import type { SessionEntry, SessionMessageEntry } from "./entries";
@@ -16,6 +17,8 @@ import {
 import { splitReadSelector } from "./utils";
 
 export interface PruneConfig {
+	/** Current policy-admitted source members, including complete assistant/tool atoms. */
+	protectedSourceEntryIds?: Pick<ReadonlySet<string>, "has">;
 	/** Keep the most recent tool output tokens intact. */
 	protectTokens: number;
 	/** Only prune if total savings meets this threshold. */
@@ -79,6 +82,8 @@ export const USELESS_NOTICE = "[Uneventful result elided]";
 export type SupersedeKeyFn = (toolName: string, args: Record<string, unknown>) => string | undefined;
 
 export interface SupersedePruneConfig {
+	/** Current policy-admitted source members, including complete assistant/tool atoms. */
+	protectedSourceEntryIds?: Pick<ReadonlySet<string>, "has">;
 	/** Supersede key function; results sharing a key supersede older ones. */
 	supersedeKey?: SupersedeKeyFn;
 	/** Also prune results flagged useless by their tool. Default false. */
@@ -253,6 +258,7 @@ export function pruneSupersededToolResults(
 	entries: SessionEntry[],
 	tokenizer: Tokenizer,
 	config: SupersedePruneConfig,
+	rewrite?: (maps: readonly SourceRewrite[], apply: () => void) => void,
 ): PruneResult {
 	const toolCallsById = collectToolCallsById(entries);
 	const candidates = config.supersedeKey
@@ -284,7 +290,9 @@ export function pruneSupersededToolResults(
 		// Provider cache is cold (idle exceeds the retention TTL), so re-writing
 		// the sent region costs nothing. Entries before the compaction boundary
 		// are summarized away and never sent — skip them to avoid pointless churn.
-		toPrune = candidates.filter(candidate => candidate.index >= boundaryIndex);
+		toPrune = candidates.filter(
+			candidate => candidate.index >= boundaryIndex && !config.protectedSourceEntryIds?.has(candidate.entry.id),
+		);
 	} else {
 		const suffixTokenLimit = config.suffixTokenLimit ?? DEFAULT_SUFFIX_TOKEN_LIMIT;
 		// suffixTokens[i] = estimated tokens of all messages strictly after entry i.
@@ -293,19 +301,30 @@ export function pruneSupersededToolResults(
 		// at/after the compaction boundary.
 		const suffixTokens = computeMessageSuffixTokens(entries, tokenizer);
 		toPrune = candidates.filter(
-			candidate => candidate.index >= boundaryIndex && suffixTokens[candidate.index] <= suffixTokenLimit,
+			candidate =>
+				candidate.index >= boundaryIndex &&
+				suffixTokens[candidate.index] <= suffixTokenLimit &&
+				!config.protectedSourceEntryIds?.has(candidate.entry.id),
 		);
 	}
 	if (toPrune.length === 0) return { prunedCount: 0, tokensSaved: 0 };
 
 	const prunedAt = Date.now();
 	let tokensSaved = 0;
-	for (const candidate of toPrune) {
-		candidate.message.content = [{ type: "text", text: candidate.notice }];
-		candidate.message.prunedAt = prunedAt;
-		invalidateMessageCache(candidate.message as AgentMessage);
-		tokensSaved += estimatePrunedSavings(candidate.tokens, candidate.notice);
-	}
+	const apply = () => {
+		for (const candidate of toPrune) {
+			candidate.message.content = [{ type: "text", text: candidate.notice }];
+			candidate.message.prunedAt = prunedAt;
+			invalidateMessageCache(candidate.message as AgentMessage);
+			tokensSaved += estimatePrunedSavings(candidate.tokens, candidate.notice);
+		}
+	};
+	if (rewrite) {
+		rewrite(toPrune.map(candidate => ({
+			entryId: candidate.entry.id,
+			blocks: candidate.message.content.map((_, oldBlockIndex) => ({ oldBlockIndex, newBlockIndex: null })),
+		})), apply);
+	} else apply();
 	return { prunedCount: toPrune.length, tokensSaved };
 }
 
@@ -313,6 +332,7 @@ export function pruneToolOutputs(
 	entries: SessionEntry[],
 	tokenizer: Tokenizer,
 	config: PruneConfig = DEFAULT_PRUNE_CONFIG,
+	rewrite?: (maps: readonly SourceRewrite[], apply: () => void) => void,
 ): PruneResult {
 	let accumulatedTokens = 0;
 	let tokensSaved = 0;
@@ -367,7 +387,7 @@ export function pruneToolOutputs(
 		// still-cached copy; compaction/shake reclaim those when they rebuild.
 		const inWarmPrefix =
 			messageSuffix !== undefined && cacheWarmSuffixTokens !== undefined && messageSuffix[i] > cacheWarmSuffixTokens;
-		if (inWarmPrefix || i < boundaryIndex) {
+		if (inWarmPrefix || i < boundaryIndex || config.protectedSourceEntryIds?.has(entry.id)) {
 			accumulatedTokens += tokens;
 			continue;
 		}
@@ -404,18 +424,26 @@ export function pruneToolOutputs(
 	}
 
 	const prunedAt = Date.now();
-	for (const candidate of candidates) {
-		const message = candidate.entry.message as ToolResultMessage;
-		const notice = candidate.superseded
-			? SUPERSEDED_NOTICE
-			: candidate.useless
-				? USELESS_NOTICE
-				: createPrunedNotice(candidate.tokens);
-		message.content = [{ type: "text", text: notice }];
-		message.prunedAt = prunedAt;
-		invalidateMessageCache(message as AgentMessage);
-		prunedCount++;
-	}
+	const apply = () => {
+		for (const candidate of candidates) {
+			const message = candidate.entry.message as ToolResultMessage;
+			const notice = candidate.superseded
+				? SUPERSEDED_NOTICE
+				: candidate.useless
+					? USELESS_NOTICE
+					: createPrunedNotice(candidate.tokens);
+			message.content = [{ type: "text", text: notice }];
+			message.prunedAt = prunedAt;
+			invalidateMessageCache(message as AgentMessage);
+			prunedCount++;
+		}
+	};
+	if (rewrite) {
+		rewrite(candidates.map(candidate => ({
+			entryId: candidate.entry.id,
+			blocks: (candidate.entry.message as ToolResultMessage).content.map((_, oldBlockIndex) => ({ oldBlockIndex, newBlockIndex: null })),
+		})), apply);
+	} else apply();
 
 	return { prunedCount, tokensSaved };
 }

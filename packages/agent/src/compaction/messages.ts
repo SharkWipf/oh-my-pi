@@ -8,6 +8,7 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import type { AgentMessage } from "../types";
+import type { CompactionDiagnostics } from "./diagnostics";
 import branchSummaryContextPrompt from "./prompts/branch-summary-context.md" with { type: "text" };
 import compactionSummaryContextPrompt from "./prompts/compaction-summary-context.md" with { type: "text" };
 import handoffSummaryContextPrompt from "./prompts/handoff-summary-context.md" with { type: "text" };
@@ -17,6 +18,10 @@ const HANDOFF_SUMMARY_TEMPLATE = handoffSummaryContextPrompt;
 const BRANCH_SUMMARY_TEMPLATE = branchSummaryContextPrompt;
 
 export interface CustomMessage<T = unknown> {
+	/** Host capture identity, retained through custom skill delivery and queued replay. */
+	sourceCaptureId?: string;
+	imageLinks?: (string | undefined)[];
+	compactionOverride?: "keep" | "exclude";
 	role: "custom";
 	customType: string;
 	content: string | (TextContent | ImageContent)[];
@@ -55,6 +60,8 @@ export interface CompactionSummaryMessage {
 	tokensAfter?: number;
 	/** Harness compaction method that produced this summary (display metadata). */
 	method?: string;
+	/** Frozen facts from the event that produced these bytes. */
+	diagnostics?: CompactionDiagnostics;
 	providerPayload?: ProviderPayload;
 	/** Runtime-only ordered archive blocks for snapcompact: old text region,
 	 *  imaged middle, then new text region. When present, `summary` is already
@@ -135,6 +142,7 @@ export interface CompactionSummaryMessageOptions {
 	method?: string;
 	/** Estimated context tokens after the rewrite, for display alongside `tokensBefore`. */
 	tokensAfter?: number;
+	diagnostics?: CompactionDiagnostics;
 }
 
 export function createCompactionSummaryMessage(
@@ -143,7 +151,7 @@ export function createCompactionSummaryMessage(
 	timestamp: string,
 	options: CompactionSummaryMessageOptions = {},
 ): CompactionSummaryMessage {
-	const { shortSummary, providerPayload, images, blocks, warning, method, tokensAfter } = options;
+	const { shortSummary, providerPayload, images, blocks, warning, method, tokensAfter, diagnostics } = options;
 	const imageBlocks =
 		blocks?.filter((block): block is ImageContent => block.type === "image") ??
 		(images && images.length > 0 ? images : undefined);
@@ -154,6 +162,7 @@ export function createCompactionSummaryMessage(
 		tokensBefore,
 		tokensAfter,
 		method,
+		diagnostics,
 		providerPayload,
 		blocks: blocks && blocks.length > 0 ? blocks : undefined,
 		images: imageBlocks && imageBlocks.length > 0 ? imageBlocks : undefined,
