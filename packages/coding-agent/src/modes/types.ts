@@ -47,8 +47,11 @@ import type { Theme } from "./theme/theme";
 
 export type CompactionQueuedMessage = {
 	text: string;
+	originalSubmission?: OriginalSubmission;
 	mode: "steer" | "followUp";
 	images?: ImageContent[];
+	imageLinks?: (string | undefined)[];
+	compactionOverride?: "keep" | "exclude";
 };
 
 export type SubmittedUserInput = {
@@ -299,7 +302,14 @@ export interface InteractiveModeContext {
 	showNewVersionNotification(newVersion: string): void;
 	clearEditor(): void;
 	updatePendingMessagesDisplay(): void;
-	queueCompactionMessage(text: string, mode: "steer" | "followUp", images?: ImageContent[]): void;
+	queueCompactionMessage(
+		text: string,
+		mode: "steer" | "followUp",
+		images?: ImageContent[],
+		imageLinks?: (string | undefined)[],
+		compactionOverride?: "keep" | "exclude",
+		originalSubmission?: OriginalSubmission,
+	): Promise<void>;
 	flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void>;
 	flushPendingBashComponents(): void;
 	flushPendingModelSwitch(): Promise<void>;
@@ -310,6 +320,8 @@ export interface InteractiveModeContext {
 	syncRetryHintRow(): void;
 	startPendingSubmission(input: {
 		text: string;
+		originalSubmission?: OriginalSubmission;
+		compactionOverride?: "keep" | "exclude";
 		images?: ImageContent[];
 		imageLinks?: (string | undefined)[];
 		customType?: string;
@@ -396,7 +408,7 @@ export interface InteractiveModeContext {
 	handleChangelogCommand(showFull?: boolean): Promise<void>;
 	handleHotkeysCommand(): void;
 	handleToolsCommand(): void;
-	handleContextCommand(): void;
+	handleContextCommand(view?: "usage" | "details"): void;
 	handleDumpCommand(): Promise<void>;
 	handleAdvisorDumpCommand(isRaw?: boolean): void;
 	handleDebugTranscriptCommand(): Promise<void>;

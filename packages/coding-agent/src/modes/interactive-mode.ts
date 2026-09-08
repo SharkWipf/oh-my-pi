@@ -12,7 +12,7 @@ import {
 	ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, ImageContent, Message, Model, Usage, UsageReport } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, OriginalSubmission, Message, Model, Usage, UsageReport } from "@oh-my-pi/pi-ai";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { execReplace } from "@oh-my-pi/pi-natives";
 import type {
@@ -107,6 +107,7 @@ import {
 	type ResolvedRoleModel,
 	SHUTDOWN_CONSOLIDATE_BUDGET_MS,
 } from "../session/agent-session";
+import { restoreCompactionOverridePrompt } from "../session/preserved-message-settings";
 import type { CompactMode } from "../session/compact-modes";
 import type { ForeignSessionSource } from "../session/foreign-session-store";
 import { HistoryStorage } from "../session/history-storage";
@@ -2008,6 +2009,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			text: string;
 			images?: ImageContent[];
 			imageLinks?: (string | undefined)[];
+			compactionOverride?: "keep" | "exclude";
+			originalSubmission?: OriginalSubmission;
 			customType?: string;
 			display?: boolean;
 			streamingBehavior?: "steer" | "followUp";
@@ -2018,6 +2021,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			text: input.text,
 			images: input.images,
 			imageLinks: input.imageLinks,
+			compactionOverride: input.compactionOverride,
+			originalSubmission: input.originalSubmission,
 			customType: input.customType,
 			display: input.display,
 			streamingBehavior: input.streamingBehavior,
@@ -2074,11 +2079,13 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#stopLoadingAnimation(true);
 		}
 		if (!submission.customType && !preserveDraft) {
-			this.editor.pendingImages = submission.images ? [...submission.images] : [];
-			this.editor.pendingImageLinks = submission.imageLinks ? [...submission.imageLinks] : [];
+			const original = submission.originalSubmission ?? submission;
+			this.editor.pendingImages = original.images ? [...original.images] : [];
+			this.editor.pendingImageLinks = original.imageLinks ? [...original.imageLinks] : this.editor.pendingImages.map(() => undefined);
 			this.editor.imageLinks = this.editor.pendingImageLinks;
 			this.rebuildChatFromMessages();
-			this.editor.setText(submission.text);
+			this.editor.setCollapsedText(submission.originalSubmission ? original.text : restoreCompactionOverridePrompt(original.text, original.compactionOverride));
+			this.editor.restoreOriginalSubmission({ ...original, originalSubmission: submission.originalSubmission });
 		}
 		this.updateEditorBorderColor();
 		this.ui.requestRender();
@@ -2101,10 +2108,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		// The drop arrives asynchronously (after the abort settles); never clobber
 		// a draft the user has already started typing in the meantime.
 		if (!this.editor.getText().trim()) {
-			this.editor.pendingImages = prompt.images ? [...prompt.images] : [];
-			this.editor.pendingImageLinks = prompt.images ? prompt.images.map(() => undefined) : [];
+			const original = prompt.originalSubmission ?? prompt;
+			this.editor.pendingImages = original.images ? [...original.images] : [];
+			this.editor.pendingImageLinks = original.imageLinks ? [...original.imageLinks] : this.editor.pendingImages.map(() => undefined);
 			this.editor.imageLinks = this.editor.pendingImageLinks;
-			this.editor.setText(prompt.text);
+			this.editor.setCollapsedText(prompt.originalSubmission ? original.text : restoreCompactionOverridePrompt(original.text, original.compactionOverride));
+			this.editor.restoreOriginalSubmission({ ...original, originalSubmission: prompt.originalSubmission });
 		}
 		this.ui.requestRender();
 	}
@@ -5360,8 +5369,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#uiHelpers.updatePendingMessagesDisplay();
 	}
 
-	queueCompactionMessage(text: string, mode: "steer" | "followUp", images?: ImageContent[]): void {
-		this.#uiHelpers.queueCompactionMessage(text, mode, images);
+	queueCompactionMessage(
+		text: string,
+		mode: "steer" | "followUp",
+		images?: ImageContent[],
+		imageLinks?: (string | undefined)[],
+		compactionOverride?: "keep" | "exclude",
+		originalSubmission?: OriginalSubmission,
+	): Promise<void> {
+		return this.#uiHelpers.queueCompactionMessage(text, mode, images, imageLinks, compactionOverride, originalSubmission);
 	}
 
 	flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void> {
@@ -5512,8 +5528,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#commandController.handleToolsCommand();
 	}
 
-	handleContextCommand(): void {
-		this.#commandController.handleContextCommand();
+	handleContextCommand(view?: "usage" | "details"): void {
+		if (view) this.#commandController.handleContextCommand(view);
+		else this.#selectorController.showCompactionMessageManager();
 	}
 
 	#vibeSessionTransitionBlocked(): boolean {

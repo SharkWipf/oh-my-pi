@@ -122,6 +122,7 @@ export interface EntryBase {
 export interface MessageEntry extends EntryBase {
 	type: "message";
 	message: WireMessage;
+	compactionOverride?: "keep" | "exclude";
 }
 
 export interface CustomMessageEntry extends EntryBase {
@@ -333,7 +334,13 @@ export type GuestFrame =
 			 */
 			writeToken?: string;
 	  }
-	| { t: "prompt"; text: string; images?: ImageContent[] }
+	| {
+			t: "prompt";
+			text: string;
+			images?: ImageContent[];
+			imageLinks?: (string | undefined)[];
+			compactionOverride?: "keep" | "exclude";
+	  }
 	| { t: "ui-response"; reqId: number; value?: CollabUiResponseValue }
 	| { t: "abort" }
 	| { t: "agent-cmd"; cmd: "chat" | "kill" | "revive"; agentId: string; text?: string }
@@ -394,7 +401,7 @@ export type WireFrame = GuestFrame | HostFrame;
  *   grammar would silently drop `ui-request` (asks hang forever on the
  *   host), so they must be rejected at hello.
  */
-export const COLLAB_PROTO = 3;
+export const COLLAB_PROTO = 4;
 
 /** Parameter key used for intent tracing (e.g. prompt explanation/reasoning) */
 export const INTENT_FIELD = "i";

@@ -23,6 +23,7 @@ import {
 } from "../../config/model-resolver";
 import { getRoleInfo } from "../../config/model-roles";
 import { settings } from "../../config/settings";
+import type { SettingPath, SettingTab } from "../../config/settings-schema";
 import { disableProvider, enableProvider } from "../../discovery";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
@@ -52,6 +53,14 @@ import {
 	persistForeignSession,
 } from "../../session/foreign-session-import";
 import type { ForeignSessionInfo, ForeignSessionSource } from "../../session/foreign-session-store";
+import {
+	DEFAULT_PRESERVATION_CATEGORY_ACTIONS,
+	isPreservationAction,
+	PRESERVED_USER_MESSAGE_CATEGORIES,
+	PRESERVED_USER_MESSAGE_CATEGORY_LABELS,
+	PRESERVED_USER_MESSAGE_CATEGORY_SETTING_PATHS,
+} from "../../session/preserved-message-settings";
+import { isPreservationUser } from "../../session/preserved-messages";
 import type { SessionEntry, SessionMessageEntry, SessionTreeNode } from "../../session/session-entries";
 import type { SessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
@@ -91,6 +100,7 @@ import { AgentHubOverlayComponent } from "../components/agent-hub";
 import { AgentsHubComponent } from "../components/agents-hub";
 import { AssistantMessageComponent } from "../components/assistant-message";
 import { CopySelectorComponent } from "../components/copy-selector";
+import { CompactionMessageManagerComponent, type CompactionMessageRow } from "../components/compaction-message-manager";
 import { ExtensionDashboard } from "../components/extensions";
 import { listLiveToolRecords, liveToolRecordFromSession } from "../components/extensions/live-tool-session";
 import { HistorySearchComponent } from "../components/history-search";
@@ -188,15 +198,440 @@ export class SelectorController {
 		this.ctx.ui.requestRender();
 	}
 
-	showSettingsSelector(): void {
+	/** Indexed current policy, separate from installed compaction bytes. */
+	showCompactionMessageManager(): void {
+		const session = this.ctx.session;
+		const ownership = session.getPreservedMessagesOwnership();
+		const originSessionId = session.sessionId;
+		const originLeaf = session.sessionManager.getLeafId();
+		let disposed = false;
+		let query = session.getPreservedMessageQuery();
+		let selection = session.getPreservedMessageSelection();
+		let availability = { available: false, model: "@tiny", reason: "Checking classifier availability…" };
+		let availabilityGeneration = 0;
+		let jobs = session.getMessageClassificationStatus({ includeRows: false }).jobs;
+		let loadError: string | undefined;
+		let loading = false;
+		let refreshPending = false;
+		const subscriptions: (() => void)[] = [];
+		const current = () =>
+			!disposed && session === this.ctx.session && ownership === session.getPreservedMessagesOwnership();
+		const close = () => {
+			if (disposed) return;
+			disposed = true;
+			for (const unsubscribe of subscriptions) unsubscribe();
+			manager.dispose();
+			overlay?.hide();
+			this.focusActiveEditorArea();
+			this.ctx.ui.requestRender();
+		};
+		const checkOwner = () => {
+			if (current()) return true;
+			if (!disposed) {
+				close();
+				this.ctx.showWarning("Context view closed: active session, branch, or clear boundary changed.");
+			}
+			return false;
+		};
+		const refreshAvailability = async () => {
+			const generation = ++availabilityGeneration;
+			const result = await session.getMessageClassificationAvailability();
+			if (!current() || generation !== availabilityGeneration) return;
+			availability = { available: result.available, model: result.model ?? "@tiny", reason: result.reason ?? "" };
+			manager.refresh([]);
+		};
+		const refresh = async (ids?: readonly string[]) => {
+			if (!checkOwner()) return;
+			query = session.getPreservedMessageQuery();
+			if (!query) {
+				if (loading) {
+					refreshPending = true;
+					return;
+				}
+				loading = true;
+				selection = undefined;
+				manager.refresh();
+				try {
+					query = await session.preparePreservedMessages();
+					loadError = undefined;
+				} catch (error) {
+					loadError = error instanceof Error ? error.message : String(error);
+				} finally {
+					loading = false;
+				}
+				if (!checkOwner()) return;
+				if (refreshPending) {
+					refreshPending = false;
+					await refresh();
+					return;
+				}
+			}
+			selection = session.getPreservedMessageSelection();
+			manager.refresh(ids);
+		};
+		const manualLabel = (state: "keep" | "exclude" | "auto") =>
+			state === "keep" ? "Always" : state === "exclude" ? "Never" : "Auto";
+		const row = (index: number, role: "user" | "all"): CompactionMessageRow => {
+			const source = query?.rowAt(index, role);
+			if (!source) throw new Error("Context source no longer belongs to this view.");
+			const reasons = selection?.reasons(source.id);
+			const position = selection?.positions(source.id);
+			const work = session.getMessageClassificationRowStatus(source.id);
+			const message = source.entry.message;
+			return {
+				id: source.id,
+				role: isPreservationUser(source.entry)
+					? "user"
+					: message.role === "assistant"
+						? message.content.some(block => block.type === "toolCall")
+							? "tool"
+							: "assistant"
+						: message.role === "toolResult"
+							? "tool"
+							: "custom",
+				manual: source.manual === "keep" ? "always" : source.manual === "exclude" ? "never" : "auto",
+				preview: width => {
+					if (!("content" in message)) return message.role;
+					if (typeof message.content === "string")
+						return width === undefined ? message.content : message.content.slice(0, width * 2);
+					let text = "";
+					for (const block of message.content) {
+						const part =
+							block.type === "text"
+								? block.text
+								: block.type === "image"
+									? "[image]"
+									: block.type === "toolCall"
+										? block.name
+										: "";
+						if (!part) continue;
+						text +=
+							(text ? " " : "") +
+							(width === undefined ? part : part.slice(0, Math.max(0, width * 2 - text.length)));
+						if (width !== undefined && text.length >= width * 2) break;
+					}
+					return text;
+				},
+				firstIndex: position?.first,
+				recentIndex: position?.recent,
+				hardRecent: reasons?.hardRecent,
+				alwaysAdmitted: reasons?.always,
+				status: !isPreservationUser(source.entry)
+					? undefined
+					: work?.state === "saved"
+						? "succeeded"
+						: work?.state === "interrupted"
+							? "canceled"
+							: (work?.state ?? (source.categoryMask !== undefined ? "succeeded" : "unclassified")),
+				statusReason:
+					work?.error ??
+					(source.categoryStatus === "unsupported"
+						? "Unsupported classification metadata; explicit backfill is available"
+						: source.categoryStatus === "invalidated"
+							? "Unclassified — source/context changed"
+							: undefined),
+			};
+		};
+		const inspect = (id: string): readonly string[] => {
+			const source = query?.rowAt(query.rowIndexOf(id, "all"), "all");
+			if (!source || !query || !selection) return ["Source no longer belongs to this view."];
+			const stages = query.inspect(id);
+			const reasons = selection.reasons(id);
+			const candidate = query.inspectCandidate(id, source.manual === "keep" || reasons.hardRecent);
+			const work = session.getMessageClassificationRowStatus(id);
+			const lines = [
+				"Current policy (not installed bytes)",
+				`Source: ${id}`,
+				`Session: ${originSessionId}; branch anchor: ${originLeaf ?? "root"}`,
+				`Atomic members (count ${source.memberIds.length}): ${source.memberIds.join(", ")}`,
+				...(source.memberIds.length > 1
+					? [
+							`Complete group raw quota: ${source.memberIds.reduce((tokens, memberId) => tokens + (query!.inspectCandidate(memberId, true)?.quotaTokens ?? 0), 0)} estimated tokens; admission is indivisible.`,
+						]
+					: []),
+				`Stored manual: ${manualLabel(source.manual)}`,
+				`Automatic result: ${stages ? manualLabel(stages.finalRegex !== "auto" ? stages.finalRegex : stages.classifier !== "auto" ? stages.classifier : stages.regex !== "auto" ? stages.regex : stages.heuristic) : "unavailable"}`,
+				`Stages: heuristic ${stages?.heuristic}; regex ${stages?.regex}; classifier ${stages?.classifier}; Final ${stages?.finalRegex}; manual ${stages?.manual}`,
+				`Selecting reasons: ${
+					Object.entries(reasons)
+						.filter(([key, active]) => active && key !== "capDenied")
+						.map(([key]) => key)
+						.join(", ") || "none — ordinary vanilla treatment"
+				}`,
+				...(reasons.hardRecent && source.manual === "exclude"
+					? ["Temporarily protected by recent guarantee; stored Never survives."]
+					: []),
+				...(reasons.capDenied
+					? ["Always cap denied: independent first/recent/hard-recent reasons still apply."]
+					: []),
+				...Object.entries(selection.blockers)
+					.filter(([, sourceId]) => sourceId !== undefined)
+					.map(
+						([limit, sourceId]) =>
+							`${limit} prefix stops before source ${sourceId}; later candidates cannot skip it.`,
+					),
+				...selection.unavailableLimits.map(
+					limit =>
+						`${limit} percentage selection unavailable without an effective model maximum; configuration preserved.`,
+				),
+				`Configured long policy: ${session.settings.get("compaction.pruneLongUserMessages")}`,
+				`Effective representation: ${source.manual === "keep" ? "verbatim — manual Always bypass" : reasons.hardRecent ? "verbatim — hard-recent bypass" : candidate ? (candidate.truncated ? "configured text pruning; original images retained" : "verbatim candidate") : "excluded custom candidate; vanilla unchanged"}`,
+				`Source quota estimate: ${candidate ? `${candidate.quotaTokens} tokens (raw ${candidate.rawTokens})` : "no eligible candidate"}; independent of ordinary overlap and physical price`,
+				...(candidate?.limitation
+					? [
+							`Immutable content exceeds pruning target: ${candidate.limitation.tokens} > ${candidate.limitation.limit}; images are not dropped.`,
+						]
+					: []),
+				`Classifier: ${work ? `${work.state}${work.error ? ": " + work.error : ""}` : source.categoryStatus}`,
+			];
+			if (!isPreservationUser(source.entry))
+				lines.push("Manual non-user source: no automatic user windows or classifier categories.");
+			else if (source.categoryMask === undefined)
+				lines.push("Category booleans unavailable; unknown is not classified-all-false.");
+			else
+				for (let bit = 0; bit < PRESERVED_USER_MESSAGE_CATEGORIES.length; bit++) {
+					const category = PRESERVED_USER_MESSAGE_CATEGORIES[bit]!;
+					const configured = session.settings.get(PRESERVED_USER_MESSAGE_CATEGORY_SETTING_PATHS[category]);
+					const action = isPreservationAction(configured)
+						? configured
+						: DEFAULT_PRESERVATION_CATEGORY_ACTIONS[category];
+					lines.push(
+						`${source.categoryMask & (1 << bit) ? "true " : "false"} — ${PRESERVED_USER_MESSAGE_CATEGORY_LABELS[category]}; policy ${manualLabel(action)}`,
+					);
+				}
+			lines.push(
+				"Installed representation (unchanged by policy edits)",
+				...session.getSourceRepresentationDetails(id),
+			);
+			return lines;
+		};
+		const startBackfill = async (workers: number) => {
+			if (!checkOwner()) return;
+			await session.startMessageClassificationBackfill(workers);
+			return "Backfill started; leaving Context does not cancel it.";
+		};
+		const manager = new CompactionMessageManagerComponent({
+			source: {
+				count: role => query?.rowCount(role) ?? 0,
+				get: row,
+				indexOf: (id, role) => query?.rowIndexOf(id, role) ?? -1,
+			},
+			summary: () => ({
+				scope: `Session ${originSessionId}; branch ${originLeaf ?? "root"}; epoch ${query?.resetId ?? "start"}`,
+				lines: loadError
+					? [`Unable to load source policy: ${loadError}`]
+					: !selection
+						? ["Loading source policy…"]
+						: [
+								`Current policy: ${session.settings.get("compaction.keepUserMessages") ? "automatic on" : "automatic off; manual Always active"}`,
+								`Next-compaction preview: ${selection.P.size} users; ${selection.N.size} non-user sources inside ordinary budget`,
+								`Source quota estimates: users ${selection.quota.P.tokens}; non-users ${selection.quota.N.tokens} tokens; ordinary overlap not refunded`,
+								session.model
+									? `Maximum context denominator: ${session.model.contextWindow} tokens`
+									: "Percentage ceiling unavailable — no effective model",
+								...selection.unavailableLimits.map(
+									limit => `${limit} percentage selection unavailable; configured amount preserved.`,
+								),
+								"Installed representation is unchanged. Usage / Details include current physical context and requirements.",
+							],
+				nonAutoCount: query?.nonAutoCount() ?? 0,
+				classifier: availability,
+				job: jobs.findLast(job => job.kind === "backfill"),
+			}),
+			inspect,
+			inspectSettings: id => {
+				const links: { label: string; path: SettingPath }[] = [
+					{ label: "Always cap (includes manual sources)", path: "compaction.keepUserMessagesFilterKeepCap" },
+					{ label: "First limit / linked cap", path: "compaction.keepFirstLimit" },
+					{ label: "Recent limit / linked cap", path: "compaction.keepLastLimit" },
+				];
+				const source = query?.rowAt(query.rowIndexOf(id, "all"), "all");
+				if (!source || !isPreservationUser(source.entry)) return links;
+				links.push(
+					{ label: "Hard-recent guarantee", path: "compaction.keepRecentUserMessagesLimit" },
+					{ label: "Automatic user selection", path: "compaction.keepUserMessages" },
+					{ label: "Heuristic stage", path: "compaction.keepUserMessagesHeuristic" },
+					{
+						label: "Regex and Final rules",
+						// Settings hides the rules while regex filtering is off; focus its toggle instead.
+						path: session.settings.get("compaction.keepUserMessagesRegex")
+							? "compaction.keepUserMessagesRegexRules"
+							: "compaction.keepUserMessagesRegex",
+					},
+					{ label: "Classifier policy stage", path: "compaction.keepUserMessagesClassifierFilter" },
+					{ label: "Classifier model", path: "compaction.keepUserMessagesLlmModel" },
+					{ label: "Long-message policy", path: "compaction.pruneLongUserMessages" },
+					{ label: "Long-message token threshold", path: "compaction.maxTokensPerUserMessage" },
+					...PRESERVED_USER_MESSAGE_CATEGORIES.map(category => ({
+						label: PRESERVED_USER_MESSAGE_CATEGORY_LABELS[category],
+						path: PRESERVED_USER_MESSAGE_CATEGORY_SETTING_PATHS[category],
+					})),
+				);
+				return links;
+			},
+			setState: async (id, state) => {
+				if (!checkOwner()) return;
+				await session.setPreservedMessageOverride(
+					id,
+					state === "always" ? "keep" : state === "never" ? "exclude" : "auto",
+				);
+				return "Saved manual state; tags and installed representation unchanged.";
+			},
+			prepareResetAll: async () => {
+				if (!checkOwner()) throw new Error("Context scope changed.");
+				const snapshot = await session.capturePreservedMessageOverrideReset();
+				if (!checkOwner()) throw new Error("Context scope changed during capture.");
+				return {
+					scope: `Session ${snapshot.sessionId}; branch ${snapshot.anchorId ?? "root"}; epoch ${snapshot.resetId ?? "start"}; ${snapshot.groupCount} atomic groups, ${snapshot.sourceCount} sources`,
+					count: snapshot.groupCount,
+					apply: async () => {
+						const result = await session.resetPreservedMessageOverrides(snapshot);
+						return `Saved: reset ${result.reset}; skipped ${result.skipped} newer edits. Tags and settings preserved.`;
+					},
+				};
+			},
+			classify: async id => {
+				if (checkOwner()) await session.startMessageClassification(id);
+			},
+			backfill: startBackfill,
+			resumeJob: startBackfill,
+			cancelJob: () => {
+				const job = jobs.findLast(job => job.kind === "backfill" && job.state === "running");
+				if (job) session.cancelMessageClassification(job.id);
+			},
+			settings: path => {
+				close();
+				this.showSettingsSelector(
+					{ initialTab: "context", initialSettingPath: path as SettingPath | undefined },
+					() => this.showCompactionMessageManager(),
+				);
+			},
+			usage: () => {
+				close();
+				this.ctx.handleContextCommand("usage");
+			},
+			details: () => {
+				close();
+				this.ctx.handleContextCommand("details");
+			},
+			close,
+			requestRender: () => this.ctx.ui.requestRender(),
+			height: () => this.ctx.ui.terminal.rows,
+		});
+		const overlay = this.#showFullscreenMenu(manager);
+		subscriptions.push(
+			session.subscribePreservedMessages(ids => {
+				void refresh(ids);
+			}),
+		);
+		subscriptions.push(
+			session.subscribeMessageClassification((status, ids) => {
+				if (!checkOwner()) return;
+				jobs = status.jobs;
+				manager.refresh(ids);
+			}),
+		);
+		subscriptions.push(
+			session.settings.onEffectiveChange(path => {
+				if (path.startsWith("compaction.") || path.startsWith("modelRoles.") || path === "extendedContext")
+					void refreshAvailability();
+			}),
+		);
+		subscriptions.push(
+			session.subscribe(event => {
+				if (event.type === "model_changed") void refreshAvailability();
+			}),
+		);
+		void refresh();
+		void refreshAvailability();
+	}
+
+	showSettingsSelector(
+		options?: { initialTab?: SettingTab; initialSettingPath?: SettingPath },
+		onClose?: () => void,
+	): void {
 		getAvailableThemes().then(availableThemes => {
+			const session = this.ctx.session;
+			let disposed = false;
+			let requested = false;
+			let loading = false;
+			let sourceRevision = 0;
+			let loadError: string | undefined;
+			let selection = session.getPreservedMessageSelection();
+			const current = () => !disposed && this.ctx.session === session;
+			const refreshSelection = () => {
+				if (!current() || !requested) return;
+				selection = session.getPreservedMessageSelection();
+				this.ctx.ui.requestRender();
+			};
+			const invalidateSelection = () => {
+				sourceRevision++;
+				loadError = undefined;
+				refreshSelection();
+			};
+			// AgentSession publishes this same event for model_changed.
+			const unsubscribe = session.subscribePreservedMessages(invalidateSelection);
+			const unsubscribeSettings = session.settings.onEffectiveChange(path => {
+				if (path.startsWith("compaction.") || path.startsWith("modelRoles.") || path === "extendedContext")
+					invalidateSelection();
+			});
+			const getPreservationLimitUsage = (path: SettingPath): string | undefined => {
+				const group =
+					path === "compaction.keepFirstLimit"
+						? "first"
+						: path === "compaction.keepLastLimit"
+							? "recent"
+							: path === "compaction.keepRecentUserMessagesLimit"
+								? "hardRecent"
+								: path === "compaction.keepUserMessagesFilterKeepCap"
+									? "always"
+									: undefined;
+				if (!group) return undefined;
+				requested = true;
+				if (!current()) return "Selection unavailable: active session changed.";
+				if (!session.getPreservedMessageQuery()) {
+					selection = undefined;
+					if (!loading && !loadError) {
+						loading = true;
+						const revision = sourceRevision;
+						const ownership = session.getPreservedMessagesOwnership();
+						const sameBuild = () =>
+							current() && revision === sourceRevision && ownership === session.getPreservedMessagesOwnership();
+						void session
+							.preparePreservedMessages()
+							.then(() => {
+								if (sameBuild()) selection = session.getPreservedMessageSelection();
+							})
+							.catch(error => {
+								if (sameBuild()) loadError = error instanceof Error ? error.message : String(error);
+							})
+							.finally(() => {
+								loading = false;
+								if (current()) this.ctx.ui.requestRender();
+							});
+					}
+					return loadError ? `Selection unavailable: ${loadError}` : "Loading source selection…";
+				}
+				if (!selection) selection = session.getPreservedMessageSelection();
+				if (!selection) return "Source selection unavailable.";
+				if (selection.unavailableLimits.includes(group))
+					return "Percentage quota unavailable without an effective model maximum; configuration preserved.";
+				const quota = selection.quota[group === "hardRecent" ? "H" : group];
+				const blocker = selection.blockers[group];
+				return `${quota.count} source entries; ${quota.tokens} estimated quota tokens. ${blocker ? `Overflow stops before source ${blocker}.` : "No prefix overflow."}`;
+			};
 			// Fullscreen settings editor on the alternate screen: the overlay
 			// enables mouse tracking (click/hover/wheel) for its lifetime and
 			// the transcript stays untouched underneath.
 			const done = () => {
+				if (disposed) return;
+				disposed = true;
+				unsubscribe();
+				unsubscribeSettings();
 				overlayHandle?.hide();
 				this.focusActiveEditorArea();
 				this.ctx.ui.requestRender();
+				onClose?.();
 			};
 			const selector = new SettingsSelectorComponent(
 				{
@@ -208,6 +643,11 @@ export class SelectorController {
 					),
 					cwd: getProjectDir(),
 					model: this.ctx.session.model,
+					modelRegistry: this.ctx.session.modelRegistry,
+					get maxContextTokens() {
+						return session.model?.contextWindow ?? undefined;
+					},
+					getPreservationLimitUsage,
 					imageBudget: this.ctx.ui.imageBudget,
 					requestRender: () => this.ctx.ui.requestRender(),
 					composerPreviewStatus: this.ctx.statusLine,
@@ -269,6 +709,7 @@ export class SelectorController {
 						this.ctx.ui.requestRender();
 					},
 				},
+				options,
 			);
 			const overlayHandle = this.#showFullscreenMenu(selector);
 		});
@@ -1401,8 +1842,8 @@ export class SelectorController {
 				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 			}
 			await this.ctx.reloadTodos();
-			if (result.editorText && (isUserTarget || !this.ctx.editor.getText().trim())) {
-				this.ctx.editor.setDraft(result.editorText, result.editorImages);
+			if (result.editorText !== undefined && (isUserTarget || !this.ctx.editor.getText().trim())) {
+				this.ctx.editor.setDraft(result.editorText, result.editorImages, result.sourceInput);
 			}
 			done();
 			this.ctx.showStatus("Rewound to selected point");
@@ -1613,8 +2054,8 @@ export class SelectorController {
 							await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 						}
 						await this.ctx.reloadTodos();
-						if (result.editorText && !this.ctx.editor.getText().trim()) {
-							this.ctx.editor.setDraft(result.editorText, result.editorImages);
+						if (result.editorText !== undefined && !this.ctx.editor.getText().trim()) {
+							this.ctx.editor.setDraft(result.editorText, result.editorImages, result.sourceInput);
 						}
 						this.ctx.showStatus("Navigated to selected point");
 

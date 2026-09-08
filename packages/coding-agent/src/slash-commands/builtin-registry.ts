@@ -117,13 +117,13 @@ export const BUILTIN_SLASH_COMMANDS_INTERNAL: ReadonlyArray<SlashCommandSpec> = 
  * Execute a builtin slash command in the interactive TUI.
  *
  * Returns `false` when no builtin matched. Returns `true` when a command
- * consumed the input entirely. Returns a `string` when the command was handled
- * but remaining text should be sent as a prompt.
+ * consumed the input entirely. Residual text is a string; literal semantic
+ * directives return their prompt and initial manual state together.
  */
 export async function executeBuiltinSlashCommand(
 	text: string,
 	runtime: BuiltinSlashCommandRuntime,
-): Promise<string | boolean> {
+): Promise<string | boolean | { prompt: string; compactionOverride: "keep" | "exclude" }> {
 	const parsed = parseSlashCommand(text);
 	if (!parsed) return false;
 
@@ -141,7 +141,10 @@ export async function executeBuiltinSlashCommand(
 	}
 	if (command.handleTui) {
 		const result = await command.handleTui(parsed, runtime);
-		if (result && typeof result === "object" && "prompt" in result) return result.prompt;
+		if (result && typeof result === "object" && "prompt" in result)
+			return result.compactionOverride
+				? { prompt: result.prompt, compactionOverride: result.compactionOverride }
+				: result.prompt;
 		return true;
 	}
 	if (command.handle) {
@@ -165,7 +168,10 @@ export async function executeBuiltinSlashCommand(
 		};
 		const result = await command.handle(parsed, adapted);
 		ctx.editor.setText("");
-		if (result && typeof result === "object" && "prompt" in result) return result.prompt;
+		if (result && typeof result === "object" && "prompt" in result)
+			return result.compactionOverride
+				? { prompt: result.prompt, compactionOverride: result.compactionOverride }
+				: result.prompt;
 		return true;
 	}
 	return false;

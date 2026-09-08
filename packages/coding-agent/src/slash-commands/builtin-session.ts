@@ -1,6 +1,7 @@
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { AgentSession } from "../session/agent-session";
 import type { SessionOAuthAccountList } from "../session/agent-session-types";
+import { parseCompactionOverridePrompt } from "../session/preserved-message-settings";
 import {
 	getChangelogPath,
 	parseChangelog,
@@ -137,6 +138,21 @@ async function handleSessionPinCommand(
 }
 
 export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
+	...(["keep", "once"] as const).map((name): SlashCommandSpec => ({
+		name,
+		description:
+			name === "keep"
+				? "Send a literal message with Always preservation (subject to the Always limit)"
+				: "Send a literal message with Never preservation (ordinary retention still applies)",
+		allowArgs: true,
+		inlineHint: "<message>",
+		acpInputHint: "<message>",
+		handle: (command, runtime) => {
+			const directive = parseCompactionOverridePrompt(command.text);
+			if (!directive?.text) return usage(`Usage: /${name} <message>`, runtime);
+			return { prompt: directive.text, compactionOverride: directive.compactionOverride };
+		},
+	})),
 	{
 		name: "todo",
 		icon: "todo",
@@ -425,19 +441,31 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "context",
 		icon: "context",
-		description: "Show estimated context usage breakdown",
+		description: "Manage source preservation; usage and detailed context inventory",
+		inlineHint: "[usage|details]",
+		allowArgs: true,
 		acpDescription: "Show context usage",
 		getTuiAutocompleteDescription: runtime => {
 			const usage = runtime.ctx.session.getContextUsage();
-			if (!usage) return "Context: unavailable";
+			if (!usage) return "Manage source policy; Usage unavailable without a model";
 			return `Context: ${Math.round(usage.percent)}% (${formatTokenCount(usage.tokens)}/${formatTokenCount(usage.contextWindow)})`;
 		},
-		handle: async (_command, runtime) => {
-			await runtime.output(buildContextReportText(runtime));
+		handle: async (command, runtime) => {
+			const view = command.args.trim();
+			if (view !== "" && view !== "usage" && view !== "details") {
+				await runtime.output("Usage: /context [usage|details]");
+				return commandConsumed();
+			}
+			await runtime.output(buildContextReportText(runtime, view || "usage"));
 			return commandConsumed();
 		},
-		handleTui: (_command, runtime) => {
-			runtime.ctx.handleContextCommand();
+		handleTui: (command, runtime) => {
+			const view = command.args.trim();
+			if (view !== "" && view !== "usage" && view !== "details") {
+				runtime.ctx.showWarning("Usage: /context [usage|details]");
+				return;
+			}
+			runtime.ctx.handleContextCommand(view || undefined);
 			runtime.ctx.editor.setText("");
 		},
 	},
