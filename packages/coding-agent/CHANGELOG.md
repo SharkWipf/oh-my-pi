@@ -15,6 +15,9 @@
 
 ### Fixed
 
+- Requirements review uses the normal execution context at the addressed source while retaining whole original evidence and needed distant referents. Later submissions and other branches cannot leak into that frozen context; compaction summaries remain untrusted context rather than original evidence.
+- Literal adoption and restoration read addressed original evidence and current heads before candidate-only sanity instead of materializing the raw history.
+- Requirements validation reuses a per-pass source index and cooperatively cancels long unit passes, avoiding quadratic source-graph rescans.
 - Requirements extraction, literal adoption and restoration retain the initiating lifecycle signal through asynchronous evidence preparation. Disposing the owning session prevents delayed preparation from issuing fresh model calls or reacquiring publication authority, and aborts in-flight requirements requests.
 - Original requirements evidence remains readable when unrelated conversation entries append during resolution; addressed source rewrites and lifecycle changes still invalidate the read.
 - Exact-source requirements actions no longer wait for unrelated cold catalog enumeration. Current accepted requirements can be recalled while historical catalog coverage remains explicitly incomplete.

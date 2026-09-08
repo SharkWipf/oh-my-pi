@@ -42,6 +42,8 @@ Assistant, tool, and extension output is reference evidence, not operator author
 
 Appending later ordinary conversation entries does not by itself make an unchanged original unavailable. Authored source rewrites, unavailable originals and changed session or epoch ownership still reject stale evidence.
 
+Contextual stages use the normal execution view at the addressed source, together with whole original units and needed original referents; they do not reconstruct the whole raw journal. Compaction and branch summaries are untrusted context, never replacement evidence. Later entries and other branches do not enter that source's frozen context. Missing needed referents remain unresolved, and capacity overflow does not permit source truncation. Literal adoption and restoration use point-read original evidence with candidate-only sanity, without contextual extraction or full-history materialization.
+
 Evidence identifies a host-issued complete original entry or content block by source identity, immutable source version and unit ID. Models cannot invent byte offsets, paths, hashes or new units. The pipeline has exactly three model stages: contextual extraction; fresh contextual evidence and obligation-coverage review; and fresh candidate-only sanity. Evidence review independently inventories obligations, maps each to a supported operation or genuinely matching current accepted head, and checks each operation against its cited whole units. Sanity receives normalized candidate statements, scopes and operations only—no source transcript, active memory or tool output. A legitimate empty proposal can pass, but a complete flag never overrides an uncovered obligation. These semantic judgments remain fallible.
 
 | `/memory requirements` action | Operation |
