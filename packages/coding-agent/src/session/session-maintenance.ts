@@ -513,7 +513,7 @@ export class SessionMaintenance {
 		const changedIds = maps.map(map => map.entryId);
 		await operation.manager.rewriteEntries(
 			maps,
-			() => operation.manager.rewriteCapturedInputs(maps, apply),
+			apply,
 			affectedIds => { this.#host.preservedSourcesChanged(changedIds, affectedIds); },
 		);
 		await operation.manager.flush();
