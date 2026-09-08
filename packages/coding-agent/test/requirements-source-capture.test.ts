@@ -143,7 +143,7 @@ describe("accepted original source authority", () => {
 		await unlink(journalPath);
 		expect((await session.observeRequirementsEvidence([retained]))[0].integrity).toBeNull();
 	});
-	test("assistant append preserves frozen source chronology while reset still revokes it", async () => {
+	test("later assistant and human entries preserve original A while reset still revokes it", async () => {
 		const session = manager();
 		for (let index = 0; index < 512; index++) append(session, `history ${index}`);
 		const id = append(session, "current exact original");
@@ -154,6 +154,13 @@ describe("accepted original source authority", () => {
 		const resolved = await resolving;
 		expect(resolved?.units[0].text).toBe("current exact original");
 		expect(resolved?.context).toHaveLength(513);
+		const catalogVersion = session.getRequirementsSourceVersion();
+		const priorHuman = session.resolveRequirementsEvidence(source.key, source);
+		await Bun.sleep(0);
+		const laterHuman = append(session, "new independent human request");
+		expect(session.getRequirementsSourceVersion()).not.toBe(catalogVersion);
+		expect(session.getRequirementsSource(laterHuman)!.key).not.toBe(source.key);
+		expect((await priorHuman)?.units[0].text).toBe("current exact original");
 		const abandoned = session.resolveRequirementsEvidence(source.key, source);
 		await Bun.sleep(0);
 		session.appendResetBoundary();

@@ -1219,7 +1219,6 @@ export class SessionManager {
 			return;
 		}
 		if (entry.type === "reset_boundary" ||
-			(entry.type === "message" && (entry.message.role === "user" || (entry.message.role === "custom" && entry.message.producer?.type === "human"))) ||
 			(entry.type === "custom" && entry.customType === REQUIREMENTS_OPERATOR_DECISION_ENTRY))
 			this.#requirementsSourceRewriteVersion++;
 		this.#entries.push(entry);
@@ -2362,10 +2361,11 @@ export class SessionManager {
 		}
 	}
 
+	/** Catalog and dispatch identity notices arrivals; exact original-read fences track rewrites separately. */
 	getRequirementsSourceVersion(): string {
 		const versions = [...(this.#requirementsDependencyJournals?.values() ?? [])].map(locator => this.#requirementsJournalVersion(locator));
 		const blobs = [...(this.#requirementsDependencyBlobs ?? [])].map(hash => this.#blobs.getVersion(hash));
-		return JSON.stringify([this.#sessionId, this.#requirementsSourceRewriteVersion, versions, blobs]);
+		return JSON.stringify([this.#sessionId, this.getLeafId(), this.#requirementsSourceRewriteVersion, versions, blobs]);
 	}
 
 	#requirementsJournalVersion(locator: RequirementsSource["locators"][number]): string | null {
@@ -2573,6 +2573,7 @@ export class SessionManager {
 		const locator = resolved.source.locators.find(locator => locator.sessionId === this.#sessionId);
 		const entry = locator ? this.getEntry(locator.entryId) : undefined;
 		const predecessors: (SessionMessageEntry | CustomMessageEntry)[] = [];
+		const wasApplicable = !!locator && this.isRequirementsSourceApplicable(resolved.source);
 		const visited = new Set<string>();
 		let cursor = entry?.parentId ? this.getEntry(entry.parentId) : undefined;
 		while (cursor && cursor.type !== "reset_boundary" && !visited.has(cursor.id)) {
@@ -2602,9 +2603,10 @@ export class SessionManager {
 			else unavailableContext.push({ ...reference, state: "orphaned", integrityAvailable: false, reason: "Original contextual evidence is unavailable" });
 			if ((index & 255) === 0) await Bun.sleep(0);
 		}
-		if (generation !== this.#requirementsSourceRewriteVersion) return undefined;
-		if (journalVersion !== this.#requirementsJournalVersion(journalLocator)) {
-			if (journalEntries && journalLocator.journalPath) {
+		const validationGeneration = this.#requirementsSourceRewriteVersion;
+		const journalChanged = journalVersion !== this.#requirementsJournalVersion(journalLocator);
+		if (generation !== validationGeneration || journalChanged) {
+			if (journalChanged && journalEntries && journalLocator.journalPath) {
 				let journalId: string | undefined;
 				const matched = new Set<string>();
 				let changed = false;
@@ -2621,10 +2623,17 @@ export class SessionManager {
 				} catch (error) { if (!isEnoent(error)) throw error; changed = true; }
 				if (changed || matched.size !== journalEntries.size) return undefined;
 			}
+			if (generation !== validationGeneration) {
+				for (const reference of preceding) {
+					const current = await this.#resolveRequirementsUnits(reference.source.key, reference.source, journalEntries);
+					if (!current || current.source.integrity !== reference.source.integrity) return undefined;
+				}
+			}
 			const current = await this.#resolveRequirementsUnits(key, resolved.source);
 			if (!current || current.source.integrity !== resolved.source.integrity) return undefined;
 		}
-		if (generation !== this.#requirementsSourceRewriteVersion) return undefined;
+		if (validationGeneration !== this.#requirementsSourceRewriteVersion || journalLocator.sessionId !== this.#sessionId ||
+			(wasApplicable && !this.isRequirementsSourceApplicable(resolved.source))) return undefined;
 		const context = [...preceding.flatMap(reference => reference.context), ...resolved.context];
 		for (const [index, reference] of preceding.entries()) { reference.context = context; reference.contextIndex = index; }
 		return { ...resolved, context, contextIndex: context.length - 1, referents: preceding, unavailableContext };
@@ -2645,9 +2654,9 @@ export class SessionManager {
 			dependencies?.journals.set(JSON.stringify([locator.sessionId, locator.journalPath]), locator);
 			const before = journalEntries ? undefined : this.#requirementsJournalVersion(locator);
 			const entry = journalEntries ? journalEntries.get(locator.entryId) : await this.#requirementsEntry(locator);
+			const live = locator.sessionId === this.#sessionId ? this.getEntry(locator.entryId) : undefined;
+			if ((live?.type === "message" || live?.type === "custom_message") && live.requirementsInvalidated) continue;
 			if (!entry && before === null && locator.retainedBlobHash) {
-				const local = locator.sessionId === this.#sessionId ? this.getEntry(locator.entryId) : undefined;
-				if ((local?.type === "message" || local?.type === "custom_message") && local.requirementsInvalidated) continue;
 				const hash = locator.retainedBlobHash;
 				if (!/^[a-f0-9]{64}$/.test(hash)) continue;
 				dependencies?.blobs.add(hash);
