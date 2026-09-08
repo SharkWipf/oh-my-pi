@@ -95,11 +95,11 @@ export function toRestoredQueuedMessage(message: AgentMessage): RestoredQueuedMe
 	const original = (message.role === "user" || message.role === "custom") ? message.originalSubmission : undefined;
 	return {
 		text: original?.text ?? queueChipText(message),
-		images: original?.images ?? queuedImageContent(message),
+		images: original ? original.images : queuedImageContent(message),
 		...(message.role === "user" || message.role === "custom"
 			? {
 					originalSubmission: original,
-					imageLinks: original?.imageLinks ?? message.imageLinks,
+					imageLinks: original ? original.imageLinks : message.imageLinks,
 					compactionOverride: original?.compactionOverride ?? message.compactionOverride,
 				}
 			: {}),

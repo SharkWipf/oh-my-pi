@@ -625,6 +625,7 @@ export class AgentSession {
 	readonly #preservation: SessionPreservation;
 	#preservationSettingsIdentity: object = {};
 	#preservationPolicyIdentity: object = {};
+	#compactionPendingLive: ReturnType<SessionRequirements["pendingLiveSnapshot"]> | undefined;
 	#preservationSettings: ReturnType<typeof readPreservationPolicySettings> | undefined;
 	#preservedQuery: { query: PreservedMessageQuery; ownership: object; settings: object; sessionId: string; leaf: string | null; tokenizer: Agent["tokenizer"] } | undefined;
 	#preservedQueryBuild: Promise<PreservedMessageQuery> | undefined;
@@ -1819,7 +1820,14 @@ export class AgentSession {
 			isStreaming: () => this.isStreaming,
 			isGeneratingHandoff: () => this.isGeneratingHandoff,
 			compactionOwnership: () => this.#compactionOwnership,
-			compactionPolicyIdentity: () => this.#preservationPolicyIdentity,
+			compactionPolicyIdentity: () => {
+				const pending = this.requirements.pendingLiveSnapshot();
+				if (pending !== this.#compactionPendingLive) {
+					this.#compactionPendingLive = pending;
+					this.#preservationPolicyIdentity = {};
+				}
+				return this.#preservationPolicyIdentity;
+			},
 			compactionSourceSelection: snapshot => this.#compactionSourceSelection(snapshot),
 			captureCompactionRequirements: async () => {
 				await this.requirements.observeCommittedSources();

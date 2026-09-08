@@ -256,6 +256,10 @@ Behavior:
    - appends user message
    - starts agent turn
 
+Normal input accepts optional `originalSubmission: { text, images?, imageLinks?, compactionOverride? }` metadata for hosts that transform input before delivery. `text` is the exact typed text, including a literal `/keep` or `/once` prefix when present; the override separately records its parsed meaning. Prompt, steer, follow-up and custom human input retain original image bytes and links through queue restoration. Accepted transformed originals are persisted with the ordinary journal message; an undelivered queued draft creates no source entry. Identical originals reuse the delivered content. This path does not capture, index or flush requirements memory when V2 is disabled.
+
+`producer` is host provenance, independent of wire role and billing attribution. Normal operator prompts default to `{ type: "human" }`; generated, extension and tool input retain their explicit producers. Hosts invoking `promptCustomMessage` for human input must pass the human producer explicitly. Branch and tree-navigation results include optional rich `sourceInput` metadata for draft restoration; when an original is present its text is already exact and must not receive another preservation-command prefix.
+
 Related APIs:
 
 - `sendUserMessage(content, { deliverAs? })`
