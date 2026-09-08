@@ -118,8 +118,8 @@ test("ordinary delivery and selected original remain distinct adjacent projectio
 	const snap = await import("@oh-my-pi/snapcompact");
 	const tokenizer = new Tokenizer();
 	tokenizer.countMessage = () => 10;
-	const original = createUserMessage("SELECTED_LAST_ORIGINAL");
-	const delivered = createUserMessage("EXPANDED_LAST_BODY with longer ordinary context");
+	const original = { role: "user" as const, content: "SELECTED_LAST_ORIGINAL", timestamp: 0 };
+	const delivered = { role: "user" as const, content: "EXPANDED_LAST_BODY with longer ordinary context", timestamp: 0 };
 	const entry = (id: string, message = createUserMessage(id)): SessionEntry => ({ type: "message", id, parentId: null, timestamp: "2026-09-08T00:00:00.000Z", message });
 	const entries = [entry("old"), entry("mixed", delivered), entry("tail")];
 	const selection = { originalSourceMessage: () => original, selectedSources: [{ entryId: "mixed", order: 1, projection: "original" as const, message: original, spans: [{ blockIndex: 0, start: 0, end: original.content.length }] }] };
