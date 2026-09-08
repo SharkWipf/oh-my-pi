@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Fixed native compaction conflating selected original submissions with their delivered expansions. Both projections retain their own text/image coverage and survive native history reload without changing ordinary allocation.
+- Fixed normalized custom messages counting as zero tokens. Custom text and original images now consume their ordinary local baseline regardless of attribution or display settings.
 - Fixed ordinary source token estimates omitting assistant images and known current native text, code, logs, search context, and computer metadata. Normalized native mirrors are charged once, including after controlled source rewrites and JSON reload.
 - Fixed metadata-only computer screenshots counting as zero before source allocation. Their single image baseline replaces content-image mirrors, matching computer-result serialization.
 - Fixed normalized custom messages counting as zero tokens. Custom text and original images now consume their ordinary local baseline regardless of attribution or display settings.
@@ -11,11 +13,20 @@
 - Fixed repeated compaction losing messages retained by the previous compaction, including turns received while native compaction was running.
 - Added source-addressed compaction coverage with positional rewrite mapping; edited or deleted source intervals no longer claim current coverage in historical artifacts.
 - Fixed native V2 compaction dropping typeless user messages emitted by the bundled Codex serializer and bypassing the retained-token budget for string user content.
-- Native compaction now carries local source provenance through ordinary serializers and preserves selected historical users chronologically without changing the ordinary retained-history allocation. V2 precharges complete selected tool exchanges before allocation and unions partial text/image coverage in one source slot.
+- Native compaction now carries local source provenance through ordinary serializers and preserves selected historical users chronologically without changing the ordinary retained-history allocation. V2 precharges complete selected tool exchanges before allocation, unions partial text/image coverage in one source slot, and reports its actual target, complete-atom charge, and minimum-clamped residual.
 - Native V1 sends selected non-user history as attributed input context with original images, leaves the canonical provider output unchanged, and records unknown item attribution rather than guessing source identities.
 - Local compaction preserves selected source spans chronologically without refunding selected-user cut costs; complete admitted non-user atoms are charged once before the calibrated ordinary walk. Repeated sparse retention no longer resurrects intervening omitted originals.
 - Authored images interleaved with snap archive frames keep their one-time original-image estimate instead of being priced as rasterized transcript frames.
 - Fixed repeated compaction losing messages retained by the previous compaction, including turns received while native compaction was running.
+- Native compaction now carries local source provenance through ordinary serializers and preserves selected historical users chronologically without changing the ordinary retained-history allocation. V2 captures complete selected tool-exchange quotes from original logical sources before any conversion, precharges them once before allocation, unions partial text/image coverage in one source slot, and reports its actual target, source charge, and minimum-clamped residual without repricing rendered history.
+- Native V1 sends selected non-user history as attributed input context with original images, leaves the canonical provider output unchanged, and records unknown item attribution rather than guessing source identities. Complete native atoms retain provider-native server-tool fields, metadata-only computer screenshots, and generated images without replaying whole-history snapshots or duplicating executable calls.
+
+### Added
+
+- Added disposable, request-correlated provider-context transforms before or after the configured transform. Side contexts exclude session-owner transforms unless explicitly opted in.
+- Pre-model-call gates now receive the resolved request model and original context identity alongside the actual post-inband provider context, so accounting and admission can correlate transformed requests without preparing them again.
+- Local compaction preserves selected source spans chronologically without refunding selected-user cut costs; complete admitted non-user atoms are charged once before the calibrated ordinary walk. Repeated sparse retention no longer resurrects intervening omitted originals.
+- Authored images interleaved with snap archive frames keep their one-time original-image estimate instead of being priced as rasterized transcript frames.
 
 ## [18.1.10] - 2026-09-04
 
