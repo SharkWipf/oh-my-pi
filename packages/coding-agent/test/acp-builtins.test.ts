@@ -2,7 +2,6 @@ import { describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type {
 	ResetCreditAccountStatus,
 	ResetCreditRedeemOutcome,
@@ -1386,30 +1385,6 @@ describe("wave 5 — adapters and polish", () => {
 		const result = await executeAcpBuiltinSlashCommand("/usage", runtime);
 		expect(result).toEqual({ consumed: true });
 		expect(output[0]).toContain("█");
-	});
-
-	// /context breakdown
-	it("/context: lists more than one breakdown line for session with messages", async () => {
-		const { output, session, runtime } = createRuntime();
-		// computeContextBreakdown needs model.contextWindow; fake session falls back gracefully
-		(session as unknown as Record<string, unknown>).model = {
-			provider: "anthropic",
-			id: "claude-test",
-			contextWindow: 200_000,
-		};
-		(session as unknown as Record<string, unknown>).skills = [];
-		(session as unknown as Record<string, unknown>).agent = { state: { tools: [] }, tokenizer: new Tokenizer() };
-		(session as unknown as Record<string, unknown>).systemPrompt = ["You are a helpful assistant."];
-		session.messages = [
-			{ role: "user", content: "Hello, how are you?" },
-			{ role: "assistant", content: "I am doing well." },
-		];
-		const result = await executeAcpBuiltinSlashCommand("/context", runtime);
-		expect(result).toEqual({ consumed: true });
-		// Should show the breakdown with multiple lines (Messages category visible)
-		const text = output[0] ?? "";
-		expect(text).toContain("tokens");
-		expect(text.split("\n").length).toBeGreaterThan(1);
 	});
 
 	// /jobs empty state

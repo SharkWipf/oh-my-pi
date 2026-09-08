@@ -39,7 +39,10 @@ function makeCtx(initialQueue: CompactionQueuedMessage[] = []) {
 	const steerCalls: Array<{ text: string; images?: ImageContent[] }> = [];
 	const followUpCalls: Array<{ text: string; images?: ImageContent[] }> = [];
 
+	let ownership = {};
 	const session = {
+		getPreservedMessagesOwnership: () => ownership,
+		isDisposed: false,
 		isStreaming: false,
 		isCompacting: false,
 		extensionRunner: undefined,
@@ -61,7 +64,10 @@ function makeCtx(initialQueue: CompactionQueuedMessage[] = []) {
 
 	const ctx = {
 		session,
-		sessionManager: { captureRequirementsInput: async () => "captured-input" },
+		sessionManager: {
+			captureRequirementsInput: async () => "captured-input",
+			requireRequirementsCapture: () => {},
+		},
 		compactionQueuedMessages: [...initialQueue],
 		pendingMessagesContainer: { clear: () => {}, addChild: () => {}, removeChild: () => {} },
 		editor: {
@@ -83,6 +89,7 @@ function makeCtx(initialQueue: CompactionQueuedMessage[] = []) {
 			imageLinks: undefined as (string | undefined)[] | undefined,
 			pendingImages: [] as ImageContent[],
 			pendingImageLinks: [] as (string | undefined)[],
+			pendingTexts: [],
 		},
 		keybindings: { getDisplayString: () => "Alt+Up" },
 		fileSlashCommands: new Set<string>(),
@@ -97,57 +104,44 @@ function makeCtx(initialQueue: CompactionQueuedMessage[] = []) {
 		showStatus: () => {},
 	} as unknown as InteractiveModeContext;
 
-	return { ctx, session, promptCalls, steerCalls, followUpCalls };
+	return {
+		ctx, session, promptCalls, steerCalls, followUpCalls,
+		changeOwnership: () => {
+			ownership = {};
+		},
+	};
 }
 
 const img = (data: string): ImageContent => ({ type: "image", mimeType: "image/png", data });
 
 describe("compaction queue image forwarding", () => {
-	test("queue acceptance waits for durable capture before consuming the image draft", async () => {
+	test("native queue accepts and restores a rich original without a requirements capture service", async () => {
 		const image = img("aGVsbG8=");
 		const { ctx } = makeCtx();
-		const capture = Promise.withResolvers<string>();
-		ctx.sessionManager.captureRequirementsInput = () => capture.promise;
-		ctx.editor.setText("look at this screenshot");
+		ctx.sessionManager.captureRequirementsInput = async () => { throw new Error("V2 is disabled"); };
+		const originalSubmission = { text: "/once /skill:inspect [Image #1]", images: [image], imageLinks: ["clipboard"], compactionOverride: "exclude" as const };
 		ctx.editor.pendingImages = [image];
 		ctx.editor.pendingImageLinks = ["clipboard"];
-		ctx.editor.imageLinks = ["clipboard"];
-
-		const accepting = new UiHelpers(ctx).queueCompactionMessage("look at this screenshot", "steer", [image]);
-		expect(ctx.compactionQueuedMessages).toEqual([]);
-		expect(ctx.editor.getText()).toBe("look at this screenshot");
-		expect(ctx.editor.pendingImages).toEqual([image]);
-		capture.resolve("captured-input");
-		await accepting;
-		expect(ctx.compactionQueuedMessages[0]?.sourceCaptureId).toBe("captured-input");
-		expect(ctx.editor.getText()).toBe("");
+		await new UiHelpers(ctx).queueCompactionMessage("expanded skill", "steer", [], [], "exclude", originalSubmission);
 		expect(ctx.editor.pendingImages).toEqual([]);
-		expect(ctx.editor.pendingImageLinks).toEqual([]);
-		expect(ctx.editor.imageLinks).toBeUndefined();
+		new InputController(ctx).restoreQueuedMessagesToEditor();
+		expect(ctx.editor.getText()).toBe("/once /skill:inspect [Image #1]");
+		expect(ctx.editor.pendingImages).toEqual([image]);
+		expect(ctx.editor.pendingImageLinks).toEqual(["clipboard"]);
 	});
 
-	test("capture rejection retains the full directive and image draft without accepting a queue entry", async () => {
+	test("a closed session keeps the full directive and image draft unaccepted", async () => {
 		const image = img("aGVsbG8=");
-		const { ctx } = makeCtx();
-		ctx.sessionManager.captureRequirementsInput = async () => {
-			throw new Error("Capture publication failed");
-		};
-		ctx.editor.setText("/once /keep screenshot [Image #1]");
+		const { ctx, session } = makeCtx();
+		session.isDisposed = true;
 		ctx.editor.pendingImages = [image];
 		ctx.editor.pendingImageLinks = ["clipboard"];
 		ctx.editor.imageLinks = ["clipboard"];
-
-		await new UiHelpers(ctx).queueCompactionMessage(
-			"/once /keep screenshot [Image #1]",
-			"followUp",
-			[image],
-			["clipboard"],
-		);
+		await new UiHelpers(ctx).queueCompactionMessage("/once /keep screenshot [Image #1]", "followUp", [image], ["clipboard"]);
 		expect(ctx.compactionQueuedMessages).toEqual([]);
 		expect(ctx.editor.getText()).toBe("/once /keep screenshot [Image #1]");
 		expect(ctx.editor.pendingImages).toEqual([image]);
 		expect(ctx.editor.pendingImageLinks).toEqual(["clipboard"]);
-		expect(ctx.editor.imageLinks).toEqual(["clipboard"]);
 	});
 
 	test("flush forwards the first queued prompt's images via session.prompt", async () => {

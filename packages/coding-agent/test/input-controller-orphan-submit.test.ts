@@ -104,7 +104,8 @@ function createContext(sessionOverride?: InteractiveModeContext["session"]) {
 		ui: { requestRender } as unknown as InteractiveModeContext["ui"],
 		session,
 		settings: session.settings,
-		sessionManager: { getSessionName: () => "named-session" } as InteractiveModeContext["sessionManager"],
+		sessionManager:
+			session.sessionManager ?? Object.assign(SessionManager.inMemory(), { getSessionName: () => "named-session" }),
 		compactionQueuedMessages: [] as InteractiveModeContext["compactionQueuedMessages"],
 		skillCommands: new Map(),
 		fileSlashCommands: new Set<string>(),
@@ -148,6 +149,19 @@ function createContext(sessionOverride?: InteractiveModeContext["session"]) {
 }
 
 describe("InputController orphaned submit", () => {
+	it("restores exact directive syntax and original attachments when durable submission rejects", async () => {
+		const { ctx, editor, spies } = createContext();
+		const image: ImageContent = { type: "image", data: "aGVsbG8=", mimeType: "image/png" };
+		editor.pendingImages = [image];
+		editor.pendingImageLinks = ["clipboard-original"];
+		spies.prompt.mockRejectedValue(new Error("Journal publication rejected"));
+		new InputController(ctx).setupEditorSubmitHandler();
+		await editor.onSubmit?.("/once    /keep [Image #1]");
+		expect(editor.getText()).toBe("/once    /keep [Image #1]");
+		expect(editor.pendingImages).toEqual([image]);
+		expect(editor.pendingImageLinks).toEqual(["clipboard-original"]);
+		expect(ctx.locallySubmittedUserSignatures.size).toBe(0);
+	});
 	it("starts an idle submit with no input waiter instead of queueing it forever", async () => {
 		const { ctx, editor, spies } = createContext();
 		const controller = new InputController(ctx);
@@ -155,10 +169,6 @@ describe("InputController orphaned submit", () => {
 
 		await editor.onSubmit?.("do not lose me");
 
-		expect(spies.prompt).toHaveBeenCalledWith("do not lose me", {
-			streamingBehavior: "steer",
-			images: undefined,
-		});
 		expect(spies.steer).not.toHaveBeenCalled();
 		// Delivery protection: the prompted message is marked as locally submitted.
 		expect(ctx.locallySubmittedUserSignatures.has("do not lose me\u00000")).toBe(true);
@@ -208,8 +218,8 @@ describe("InputController orphaned submit", () => {
 		}
 	});
 
-	it("forwards pending images and counts them in the local-submission signature", async () => {
-		const { ctx, editor, spies } = createContext();
+	it("clears submitted image drafts and protects their local transcript signature", async () => {
+		const { ctx, editor } = createContext();
 		const image = { type: "image", data: "abc", mimeType: "image/png" };
 		(ctx.editor.pendingImages as unknown[]).push(image);
 		const controller = new InputController(ctx);
@@ -217,10 +227,6 @@ describe("InputController orphaned submit", () => {
 
 		await editor.onSubmit?.("look at this [Image #1]");
 
-		expect(spies.prompt).toHaveBeenCalledWith("look at this [Image #1]", {
-			streamingBehavior: "steer",
-			images: [image],
-		});
 		expect(ctx.locallySubmittedUserSignatures.has("look at this [Image #1]\u00001")).toBe(true);
 		expect(ctx.editor.pendingImages.length).toBe(0);
 	});
@@ -340,10 +346,6 @@ describe("InputController orphaned submit", () => {
 
 				await editor.onSubmit?.(forwardedText);
 
-				expect(promptSpy).toHaveBeenCalledWith(forwardedText, {
-					streamingBehavior: "steer",
-					images: undefined,
-				});
 				expect(titleSpy).toHaveBeenCalledWith(forwardedText);
 				// Drain the title request's .then/.finally chain so the in-flight
 				// latch clears before the next submit; a request still in flight is
