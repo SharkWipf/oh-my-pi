@@ -1844,7 +1844,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// The global lifecycle releases through AgentRegistry.global(); wiring it
 			// onto a caller-supplied registry would report a cancel while releasing an
 			// unrelated global ref. With no lifecycle, hub cancel falls back to
-			// dispose + unregister on the session's own registry.
+			// terminal detach + dispose on the session's own registry.
 			agentLifecycle: options.agentRegistry ? undefined : () => AgentLifecycleManager.global(),
 			getSessionSpawns: () => options.spawns ?? "*",
 			getModelString: () => (hasExplicitModel && model ? formatModelString(model) : undefined),

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Killing a subagent now cancels its assignment and provider requests immediately instead of leaving yield reminders or IRC auto-replies running behind an aborted row. Disposed sessions reject late prompts, and terminal agents cannot deliver late replies or revive.
+
 ## [18.1.15] - 2026-09-08
 
 ### Added

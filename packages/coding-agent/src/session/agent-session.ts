@@ -737,6 +737,7 @@ export class AgentSession {
 	#lazyContextRefreshed = new Set<string>();
 	#onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;
 	#sideStreamFn: StreamFn;
+	readonly #ephemeralTurnAbortControllers = new Set<AbortController>();
 	#preferWebsockets: boolean | undefined;
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	#disconnectOwnedMcpManager: (() => Promise<void>) | undefined;
@@ -4458,7 +4459,11 @@ export class AgentSession {
 	 * gap slips past the disposal guards.
 	 */
 	beginDispose(): void {
+		if (this.#isDisposed) return;
 		this.#isDisposed = true;
+		this.#promptGeneration++;
+		for (const controller of this.#ephemeralTurnAbortControllers) controller.abort();
+		for (const controller of this.#usagePreflightAbortControllers) controller.abort();
 		this.#modelDiscoveryAbortController.abort();
 		this.#queuedMessageDrainBlocked = false;
 		this.#usagePreflightReadyForNextModelCall = false;
@@ -4475,6 +4480,11 @@ export class AgentSession {
 		this.agent.hasIrcInterrupts = undefined;
 		this.#advisors.stopRuntime();
 		this.#eval.beginDispose();
+		// Cancel execution before any asynchronous shutdown hook can delay teardown.
+		this.#fallbackExtensionTimers?.clearAll();
+		this.abortRetry();
+		this.abortCompaction();
+		this.agent.abort();
 	}
 
 	/**
@@ -4631,12 +4641,7 @@ export class AgentSession {
 			logger.warn("Failed to emit session_shutdown event", { error: String(error) });
 		}
 
-		// Stop fallback extension timers before aborting deferred work they could enqueue.
-		this.#fallbackExtensionTimers?.clearAll();
-		this.abortRetry();
-		this.abortCompaction();
 		const postPromptDrain = this.#cancelPostPromptTasks();
-		this.agent.abort();
 		try {
 			await withTimeout(
 				postPromptDrain,
@@ -6060,6 +6065,7 @@ export class AgentSession {
 	 * the ACP agent) use this to know whether to expect an `agent_end` event.
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<boolean> {
+		if (this.#isDisposed) return false;
 		// Stamp the operator's submission instant before ANY async preprocessing —
 		// command execution, image normalization, vision-model description — so the
 		// prompt→yield delta includes the whole wait, whatever path the prompt takes.
@@ -6070,6 +6076,7 @@ export class AgentSession {
 		// history rewrite. `abort` still overtakes compaction; ordinary prompts wait
 		// here. No-op when no manual compaction is active.
 		await this.#maintenance.manualCompactionCleanup;
+		if (this.#isDisposed) return false;
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		// Slash/custom-command handling below rewrites `text`; keep the original
 		// so a dropped prompt is handed back exactly as the user typed it.
@@ -6337,6 +6344,7 @@ export class AgentSession {
 		// every pre-dispatch bail (generation bump from abort, disposal, usage
 		// preflight denial) exits silently, and prompt() uses the outcome to hand
 		// the typed text back to the host instead of losing it.
+		if (this.#isDisposed) return false;
 		this.#beginInFlight();
 		const generation = this.#promptGeneration;
 		this.#promptSequence++;
@@ -6438,14 +6446,9 @@ export class AgentSession {
 				}
 			}
 
-			// A prompt issued while the session is already disposing must still run:
-			// the dispose-driven abort settles its turn (see "does not auto-retry
-			// empty reasonless aborts once the session is disposing"). Only drop the
-			// prompt when disposal began during the backend-transition await, where
-			// resuming would start a turn on a torn-down session.
-			const disposingBeforeTransition = this.#isDisposed;
+			// Disposal is terminal, including prompts whose asynchronous setup started earlier.
 			await this.#memory.transition;
-			if ((this.#isDisposed && !disposingBeforeTransition) || this.#promptGeneration !== generation) return false;
+			if (this.#isDisposed || this.#promptGeneration !== generation) return false;
 			const beforeAgentStartSystemPrompt = await this.#buildSystemPromptForAgentStart(expandedText);
 
 			let baseXdevCatalogDelivered = true;
@@ -7695,6 +7698,7 @@ export class AgentSession {
 		try {
 			this.#abortAutolearnCapture();
 			for (const controller of this.#usagePreflightAbortControllers) controller.abort();
+			for (const controller of this.#ephemeralTurnAbortControllers) controller.abort();
 			this.abortRetry();
 			this.#promptGeneration++;
 			this.#scheduledHiddenNextTurnGeneration = undefined;
@@ -8736,6 +8740,7 @@ export class AgentSession {
 	 * tools and any tool calls are discarded. The side request
 	 * does not block on, or interfere with, any in-flight main turn. The
 	 * session's history and persisted state are NOT modified by this call.
+	 * Caller/session abort cancels the request; disposal also rejects future side requests.
 	 *
 	 * Used by `BtwController` (`/btw`) and `OmfgController` (`/omfg`) to share
 	 * the snapshot + stream pipeline. The snapshot includes any in-flight
@@ -8748,87 +8753,104 @@ export class AgentSession {
 		signal?: AbortSignal;
 		dedupeReply?: boolean;
 	}): Promise<{ replyText: string; assistantMessage: AssistantMessage }> {
+		if (this.#isDisposed || this.#abortInProgress) {
+			throw new DOMException("Session is stopping", "AbortError");
+		}
+		args.signal?.throwIfAborted();
 		const model = this.model;
 		if (!model) {
 			throw new Error("No active model on session");
 		}
-		const cacheSessionId = this.sessionId;
-		const snapshot = this.#buildEphemeralSnapshot(args.promptText);
-		const llmMessages = await this.convertMessagesToLlm(snapshot, args.signal);
-		const context = await this.agent.buildSideRequestContext(llmMessages);
-		const options = this.prepareSimpleStreamOptions(
-			{
-				apiKey: this.#modelRegistry.resolver(model, cacheSessionId),
-				// Side-channel turns must not share OpenAI/Codex append-only
-				// conversation state with the main agent turn: IRC and /btw can run
-				// while the main turn is mid-tool-call. Keep the prompt-cache key
-				// stable, but give provider routing a unique request lineage. The
-				// shared provider state map is still required so Codex can allocate
-				// websocket state under that side-channel session id.
-				sessionId: `${cacheSessionId}:side:${Snowflake.next()}`,
-				promptCacheKey: this.agent.promptCacheKey ?? this.agent.sessionId,
-				preferWebsockets: this.#preferWebsockets,
-				providerSessionState: this.#providerSessionState,
-				reasoning: toReasoningEffort(this.thinkingLevel),
-				disableReasoning: shouldDisableReasoning(this.thinkingLevel),
-				hideThinkingSummary: this.agent.hideThinkingSummary,
-				serviceTier: this.#models.effectiveServiceTier(model),
-				signal: args.signal,
-			},
-			model.provider,
-		);
+		// IRC auto-replies have no caller signal, but still belong to this session.
+		const controller = new AbortController();
+		const signal = args.signal ? AbortSignal.any([args.signal, controller.signal]) : controller.signal;
+		this.#ephemeralTurnAbortControllers.add(controller);
+		try {
+			const cacheSessionId = this.sessionId;
+			const snapshot = this.#buildEphemeralSnapshot(args.promptText);
+			const llmMessages = await this.convertMessagesToLlm(snapshot, signal);
+			signal.throwIfAborted();
+			const context = await this.agent.buildSideRequestContext(llmMessages);
+			signal.throwIfAborted();
+			const options = this.prepareSimpleStreamOptions(
+				{
+					apiKey: this.#modelRegistry.resolver(model, cacheSessionId),
+					// Side-channel turns must not share OpenAI/Codex append-only
+					// conversation state with the main agent turn: IRC and /btw can run
+					// while the main turn is mid-tool-call. Keep the prompt-cache key
+					// stable, but give provider routing a unique request lineage. The
+					// shared provider state map is still required so Codex can allocate
+					// websocket state under that side-channel session id.
+					sessionId: `${cacheSessionId}:side:${Snowflake.next()}`,
+					promptCacheKey: this.agent.promptCacheKey ?? this.agent.sessionId,
+					preferWebsockets: this.#preferWebsockets,
+					providerSessionState: this.#providerSessionState,
+					reasoning: toReasoningEffort(this.thinkingLevel),
+					disableReasoning: shouldDisableReasoning(this.thinkingLevel),
+					hideThinkingSummary: this.agent.hideThinkingSummary,
+					serviceTier: this.#models.effectiveServiceTier(model),
+					signal,
+				},
+				model.provider,
+			);
 
-		let providerReplyText = "";
-		let emittedReplyText = "";
-		let assistantMessage: AssistantMessage | undefined;
-		const stream = await this.#sideStreamFn(model, obfuscateProviderContext(this.#obfuscator, context), options);
-		for await (const event of stream) {
-			if (event.type === "text_delta") {
-				providerReplyText += event.delta;
-				if (args.onTextDelta) {
-					const readyText = this.#deobfuscatedProviderTextReadyForDelta(providerReplyText);
-					if (readyText.length > emittedReplyText.length) {
-						const delta = readyText.slice(emittedReplyText.length);
-						emittedReplyText = readyText;
-						args.onTextDelta(delta);
+			let providerReplyText = "";
+			let emittedReplyText = "";
+			let assistantMessage: AssistantMessage | undefined;
+			const stream = await this.#sideStreamFn(model, obfuscateProviderContext(this.#obfuscator, context), options);
+			for await (const event of stream) {
+				// A transport may finish successfully after cancellation; do not publish its late reply.
+				signal.throwIfAborted();
+				if (event.type === "text_delta") {
+					providerReplyText += event.delta;
+					if (args.onTextDelta) {
+						const readyText = this.#deobfuscatedProviderTextReadyForDelta(providerReplyText);
+						if (readyText.length > emittedReplyText.length) {
+							const delta = readyText.slice(emittedReplyText.length);
+							emittedReplyText = readyText;
+							args.onTextDelta(delta);
+						}
 					}
+					continue;
 				}
-				continue;
+				if (event.type === "done") {
+					// A well-formed provider "done" event carries `content: AssistantContentBlock[]`,
+					// but a proxy/wrapper (custom extension providers, gateway-wrapped OAuth streams,
+					// see #4323) can hand back a message whose `content` was dropped or replaced with
+					// `undefined`. Downstream `.content.filter` at the sanitize step below would then
+					// crash the recap turn with `TypeError: undefined is not an object (evaluating
+					// 'H.content.filter')`. Normalize to `[]` so the recap surfaces an empty reply
+					// instead of turning a malformed side-channel response into a session-mute crash.
+					const rawContent = Array.isArray(event.message.content) ? event.message.content : [];
+					assistantMessage = this.#obfuscator?.hasSecrets()
+						? { ...event.message, content: deobfuscateAssistantContent(this.#obfuscator, rawContent) }
+						: { ...event.message, content: rawContent };
+					break;
+				}
+				if (event.type === "error") {
+					throw new Error(event.error.errorMessage || "Ephemeral turn failed");
+				}
 			}
-			if (event.type === "done") {
-				// A well-formed provider "done" event carries `content: AssistantContentBlock[]`,
-				// but a proxy/wrapper (custom extension providers, gateway-wrapped OAuth streams,
-				// see #4323) can hand back a message whose `content` was dropped or replaced with
-				// `undefined`. Downstream `.content.filter` at the sanitize step below would then
-				// crash the recap turn with `TypeError: undefined is not an object (evaluating
-				// 'H.content.filter')`. Normalize to `[]` so the recap surfaces an empty reply
-				// instead of turning a malformed side-channel response into a session-mute crash.
-				const rawContent = Array.isArray(event.message.content) ? event.message.content : [];
-				assistantMessage = this.#obfuscator?.hasSecrets()
-					? { ...event.message, content: deobfuscateAssistantContent(this.#obfuscator, rawContent) }
-					: { ...event.message, content: rawContent };
-				break;
-			}
-			if (event.type === "error") {
-				throw new Error(event.error.errorMessage || "Ephemeral turn failed");
-			}
-		}
 
-		if (!assistantMessage) {
-			throw new Error("Ephemeral turn ended without a final message");
+			signal.throwIfAborted();
+			if (!assistantMessage) {
+				throw new Error("Ephemeral turn ended without a final message");
+			}
+			const replyText = this.#deobfuscateFromProvider(providerReplyText);
+			if (args.onTextDelta && replyText.length > emittedReplyText.length) {
+				args.onTextDelta(replyText.slice(emittedReplyText.length));
+			}
+			const sanitizedMessage: AssistantMessage = {
+				...assistantMessage,
+				content: assistantMessage.content.filter(block => block.type !== "toolCall"),
+			};
+			return {
+				replyText: args.dedupeReply === false ? replyText.trim() : dedupeEphemeralReply(replyText.trim()),
+				assistantMessage: sanitizedMessage,
+			};
+		} finally {
+			this.#ephemeralTurnAbortControllers.delete(controller);
 		}
-		const replyText = this.#deobfuscateFromProvider(providerReplyText);
-		if (args.onTextDelta && replyText.length > emittedReplyText.length) {
-			args.onTextDelta(replyText.slice(emittedReplyText.length));
-		}
-		const sanitizedMessage: AssistantMessage = {
-			...assistantMessage,
-			content: assistantMessage.content.filter(block => block.type !== "toolCall"),
-		};
-		return {
-			replyText: args.dedupeReply === false ? replyText.trim() : dedupeEphemeralReply(replyText.trim()),
-			assistantMessage: sanitizedMessage,
-		};
 	}
 
 	/**
