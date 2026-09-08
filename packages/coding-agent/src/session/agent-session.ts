@@ -44,11 +44,12 @@ import {
 	type ToolChoiceDirective,
 } from "@oh-my-pi/pi-agent-core";
 import {
-	CompactionCancelledError,
 	type CompactionDiagnostics,
+	CompactionCancelledError,
 	type CompactionPreparation,
 	type CompactionResult,
 	calculatePromptTokens,
+	resolveBudgetReserveTokens,
 	collectEntriesForBranchSummary,
 	generateBranchSummary,
 	type ShakeConfig,
@@ -56,6 +57,7 @@ import {
 import type {
 	AssistantMessage,
 	CodexCompactionContext,
+	Context,
 	ImageContent,
 	Message,
 	Model,
@@ -165,7 +167,7 @@ import { containsOrchestrate, renderOrchestrateNotice } from "../modes/orchestra
 import { theme } from "../modes/theme/theme";
 import { parseTurnBudget } from "../modes/turn-budget";
 import { containsUltrathink, ULTRATHINK_NOTICE } from "../modes/ultrathink";
-import { computeNonMessageTokens } from "../modes/utils/context-usage";
+import { computeNonMessageTokens, estimateToolSchemaTokens } from "../modes/utils/context-usage";
 import { containsWorkflow, renderWorkflowNotice } from "../modes/workflow";
 import { type PlanApprovalDetails, resolveApprovedPlan } from "../plan-mode/approved-plan";
 import { listPlanFiles, readPlanFile } from "../plan-mode/plan-files";
@@ -190,8 +192,9 @@ import {
 	deobfuscateToolArguments,
 	obfuscateProviderContext,
 } from "../secrets/message-transform";
-import type { SecretObfuscator } from "../secrets/obfuscator";
+import { REQUIREMENTS_OPERATOR_DECISION_ENTRY } from "../requirements/source-capture";
 import { releaseSharpshooterSession } from "../sharpshooter/backend";
+import type { SecretObfuscator } from "../secrets/obfuscator";
 import { flushSharpshooterExtraction } from "../sharpshooter/extract";
 import {
 	AUTO_THINKING,
@@ -356,7 +359,7 @@ import {
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import { getRestorableSessionModels } from "./session-context";
 import { formatSessionDumpText } from "./session-dump-format";
-import type { BranchSummaryEntry, NewSessionOptions, SessionEntry } from "./session-entries";
+import type { BranchSummaryEntry, NewSessionOptions, SessionEntry, SessionMessageEntry } from "./session-entries";
 import { SessionHandoff, type SessionHandoffHost } from "./session-handoff";
 import {
 	COMPACTION_CHECK_NONE,
@@ -366,7 +369,9 @@ import {
 } from "./session-maintenance";
 import { cleanupEmptyMoveSession, copySessionArtifacts, type SessionManager } from "./session-manager";
 import { SessionMemory, type SessionMemoryHost } from "./session-memory";
-
+import { SessionRequirements, type RequirementsCallReceipt } from "./session-requirements";
+import { getInlineFrameAccounting, getInlineTextAccounting } from "./snapcompact-inline";
+import { getSourceOrigin } from "@oh-my-pi/pi-ai/utils/source-origin";
 import { buildSessionMetadata } from "./session-metadata";
 import { SessionMessageClassifier, type MessageClassificationListener } from "./session-message-classifier";
 import { PreservedMessageQuery, type PreservationSelection, readPreservedUserMessageClassificationMasks } from "./preserved-messages";
@@ -628,6 +633,7 @@ export class AgentSession {
 	readonly #preservation: SessionPreservation;
 	#preservationSettingsIdentity: object = {};
 	#preservationPolicyIdentity: object = {};
+	#compactionPendingLive: ReturnType<SessionRequirements["pendingLiveSnapshot"]> | undefined;
 	#preservationSettings: ReturnType<typeof readPreservationPolicySettings> | undefined;
 	#preservedQuery: { query: PreservedMessageQuery; ownership: object; settings: object; sessionId: string; leaf: string | null; tokenizer: Agent["tokenizer"] } | undefined;
 	#preservedQueryBuild: Promise<PreservedMessageQuery> | undefined;
@@ -756,6 +762,7 @@ export class AgentSession {
 	#lazyContextRefreshed = new Set<string>();
 	#onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;
 	#sideStreamFn: StreamFn;
+	readonly #ephemeralTurnAbortControllers = new Set<AbortController>();
 	#preferWebsockets: boolean | undefined;
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	#disconnectOwnedMcpManager: (() => Promise<void>) | undefined;
@@ -834,6 +841,13 @@ export class AgentSession {
 	#providerSessionState = new Map<string, ProviderSessionState>();
 	#hindsightSessionState: HindsightSessionState | undefined = undefined;
 	readonly #memory: SessionMemory;
+	readonly requirements: SessionRequirements;
+	readonly #disposeRequirementsTransform: () => void;
+	readonly #disposeRequirementsGate: () => void;
+	#preparedRequirementsReceipt: RequirementsCallReceipt | undefined;
+	readonly #countRequirementsTokens = (text: string): number => this.agent.tokenizer.countTokens(text);
+	#disposeAutolearn: (() => void) | undefined;
+	#getMemoryRecoveryContextFiles: () => readonly string[];
 	readonly rawSseDebugBuffer: RawSseDebugBuffer;
 
 	#resetPromptMaintenanceState(): void {
@@ -1239,6 +1253,7 @@ export class AgentSession {
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
+		this.#getMemoryRecoveryContextFiles = config.getMemoryRecoveryContextFiles ?? (() => []);
 		this.#codeModeState = config.codeModeState ?? {};
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
@@ -1447,7 +1462,6 @@ export class AgentSession {
 			takeMnemopiSessionState: () => setMnemopiSessionState(this, undefined),
 			setBaseSystemPrompt: prompt => {
 				this.#tools.setBaseSystemPrompt(prompt);
-				this.agent.setSystemPrompt(prompt);
 			},
 			refreshBaseSystemPrompt: () => this.#tools.refreshBaseSystemPrompt(),
 			replaceMemoryTools: tools => this.#tools.replaceMemoryTools(tools),
@@ -1456,6 +1470,38 @@ export class AgentSession {
 			memoryAgentDir: config.memoryAgentDir,
 			memoryTaskDepth: config.memoryTaskDepth,
 			createMemoryTools: config.createMemoryTools,
+		});
+		this.requirements = new SessionRequirements({
+			sessionManager: this.sessionManager,
+			agentStorage: this.settings.getStorage(),
+			settings: this.settings,
+			modelRegistry: this.#modelRegistry,
+			getContext: () => ({
+				systemPrompt: this.agent.state.systemPrompt,
+				messages: convertToLlm(this.agent.state.messages),
+				tools: this.agent.state.tools,
+			}),
+			getModel: () => this.model,
+			isDisposed: () => this.#isDisposed,
+			promptOperatorSource: async (text, targetRevisionIds, options) => {
+				const message = { role: "user" as const, content: [{ type: "text" as const, text }], timestamp: Date.now(), producer: { type: "human" as const } };
+				const entryId = options?.literal ? this.sessionManager.appendMessage(message) : this.#appendSessionMessage(message);
+				if (targetRevisionIds?.length) this.sessionManager.appendCustomEntry(REQUIREMENTS_OPERATOR_DECISION_ENTRY, { sourceEntryId: entryId, targetRevisionIds: [...targetRevisionIds] });
+				await this.sessionManager.ensureOnDisk();
+				await this.sessionManager.flush();
+				this.agent.appendMessage(message);
+				return entryId;
+			},
+		});
+		if (config.startWithoutMemory) this.requirements.setRecoveryMode("bypass");
+		this.#disposeRequirementsTransform = this.agent.addBeforeModelCallHook(async () => {
+			await this.requirements.refreshCurrentEvidence();
+			const prepared = this.requirements.prepareFragment(this.#countRequirementsTokens);
+			this.#tools.setRequirementsFragment(prepared.fragment);
+			this.#preparedRequirementsReceipt = prepared.receipt;
+		});
+		this.#disposeRequirementsGate = this.agent.addBeforeModelCall(async (context, _signal, request) => {
+			await this.#finalizeRequirementsContext(context, request.model);
 		});
 		this.#disposePreparedCompactionDiagnostics = this.agent.addBeforeModelCall((context, signal, request) => {
 			if (signal?.aborted) return;
@@ -1504,6 +1550,10 @@ export class AgentSession {
 		this.agent.setRawSseEventInterceptor(this.#onSseEvent);
 		this.agent.setOnTurnEnd(async (messages, signal, context) => {
 			if (signal?.aborted) return;
+			const generation = this.#promptGeneration;
+			const compactBeforeGuidance =
+				this.settings.get("advisor.compactBeforeGuidance") && this.#advisors.isAdvisorActive();
+			this.#deferredTerminalAdvisorReview = undefined;
 			const rewindReport = this.#extractRewindReport(messages);
 			if (rewindReport) {
 				this.#pendingRewindReport = undefined;
@@ -1511,6 +1561,24 @@ export class AgentSession {
 			}
 			this.#loopGuards.recordTurn(messages, context);
 			await this.#prewalk.advanceAtTurnEnd(messages, context);
+			if (compactBeforeGuidance) {
+				if (signal?.aborted || generation !== this.#promptGeneration || this.#abortInProgress || this.#isDisposed)
+					return;
+				if (context?.willContinue) {
+					await this.#maintenance.maintainContextMidRun(messages, signal, context);
+					if (signal?.aborted || generation !== this.#promptGeneration || this.#abortInProgress || this.#isDisposed)
+						return;
+					await this.#advisors.onPrimaryTurnEnd(messages, true, signal);
+				} else if (
+					context?.message.role === "assistant" &&
+					context.message.stopReason !== "error" &&
+					context.message.stopReason !== "aborted"
+				) {
+					// Final maintenance belongs to agent_end, including grace and speculation.
+					this.#deferredTerminalAdvisorReview = { generation, message: context.message, signal };
+				}
+				return;
+			}
 			await this.#advisors.onPrimaryTurnEnd(messages, context?.willContinue, signal);
 			await this.#maintenance.maintainContextMidRun(messages, signal, context);
 		});
@@ -1828,7 +1896,14 @@ export class AgentSession {
 			isStreaming: () => this.isStreaming,
 			isGeneratingHandoff: () => this.isGeneratingHandoff,
 			compactionOwnership: () => this.#compactionOwnership,
-			compactionPolicyIdentity: () => this.#preservationPolicyIdentity,
+			compactionPolicyIdentity: () => {
+				const pending = this.requirements.pendingLiveSnapshot();
+				if (pending !== this.#compactionPendingLive) {
+					this.#compactionPendingLive = pending;
+					this.#preservationPolicyIdentity = {};
+				}
+				return this.#preservationPolicyIdentity;
+			},
 			compactionSourceSelection: () => this.#compactionSourceSelection(),
 			protectedSourceEntryIds: () => this.#protectedSourceEntryIds(),
 			preservedSourcesChanged: (changedIds, affectedIds) => this.#preservedSourcesChanged(changedIds, affectedIds),
@@ -2242,6 +2317,7 @@ export class AgentSession {
 	 * No-op when no manager is reachable or this session has no agent id.
 	 */
 	#cancelOwnAsyncJobs(reason?: unknown): void {
+		this.requirements.cancelPending("Session-owned jobs cancelled");
 		if (!this.#agentId) return;
 		releaseCompletionHandles(this.#agentId);
 		WorkPoolRegistry.global().releaseOwner(this.#agentId);
@@ -2549,6 +2625,10 @@ export class AgentSession {
 
 	// Track last assistant message for auto-compaction check
 	#lastAssistantMessage: AssistantMessage | undefined = undefined;
+	/** Successful terminal turn awaiting the ordinary agent_end maintenance boundary. */
+	#deferredTerminalAdvisorReview:
+		| { generation: number; message: AssistantMessage; signal: AbortSignal | undefined }
+		| undefined;
 	/**
 	 * Classifier-refusal turn pruned from active context at settle (#3591).
 	 * Retained until the next run starts so post-settle readers
@@ -2760,12 +2840,13 @@ export class AgentSession {
 			| BashExecutionMessage
 			| PythonExecutionMessage
 			| FileMentionMessage,
+		sourceOrigin?: SessionMessageEntry["sourceOrigin"],
 	): string {
 		const cache = this.#persistedMessageKeys;
 		const wasFresh = cache !== undefined && cache.anchor === this.#persistedMessageKeysAnchor();
+		const compactionOverride = message.role === "user" || message.role === "custom" ? message.compactionOverride : undefined;
 		const entryId = this.sessionManager.appendMessage(message,
-			(message.role === "user" || message.role === "custom") && message.compactionOverride !== undefined
-				? { compactionOverride: message.compactionOverride } : undefined);
+			sourceOrigin || compactionOverride !== undefined ? { sourceOrigin, compactionOverride } : undefined);
 		if (this.#preservedMessageListeners.size > 0) {
 			this.getPreservedMessageQuery();
 			this.#publishPreservedMessages([entryId]);
@@ -2779,6 +2860,8 @@ export class AgentSession {
 			cache.anchor = this.#persistedMessageKeysAnchor();
 		}
 		if (message.role === "user" && message.synthetic !== true && message.attribution !== "agent") this.#messageClassifier.enqueueLive(entryId);
+		if ((message.role === "user" || message.role === "custom") && this.settings.get("requirements.enabled"))
+			void this.requirements.acceptDelivered(entryId).catch(error => this.emitNotice("warning", `Requirements intake failed: ${String(error)}`));
 		return entryId;
 	}
 
@@ -2961,6 +3044,7 @@ export class AgentSession {
 		// A fresh run supersedes the previously settled (and pruned) refusal
 		// turn: state-based lookups take over again.
 		if (event.type === "agent_start") {
+			this.#deferredTerminalAdvisorReview = undefined;
 			this.#prunedTerminalRefusal = undefined;
 			this.#emitRunState("running");
 		}
@@ -2988,6 +3072,10 @@ export class AgentSession {
 		// toolUse) assistant message and skipping settle-only work.
 		if (event.type === "message_end" && event.message.role === "assistant") {
 			this.#lastAssistantMessage = event.message;
+			if (event.message.stopReason === "error" || event.message.stopReason === "aborted") {
+				// A failed queued follow-up may bypass onTurnEnd after an earlier successful stop.
+				this.#deferredTerminalAdvisorReview = undefined;
+			}
 		}
 		// Expected internal transitions stamp a structural suppression flag on the
 		// persisted message BEFORE the obfuscator's display-side copy below, so the
@@ -3325,6 +3413,23 @@ export class AgentSession {
 			// maintenance can emit agent_end, so preserve the state at settle entry.
 			const ttsrAbortPendingAtAgentEnd = this.#ttsr.abortPending;
 			const emitAgentEndNotification = async (options?: { willContinue?: boolean }) => {
+				const deferred = this.#deferredTerminalAdvisorReview;
+				if (deferred && settledMessages.includes(deferred.message)) {
+					// Consume only this settle's receipt before calling the current roster.
+					this.#deferredTerminalAdvisorReview = undefined;
+					if (
+						deferred.generation === this.#promptGeneration &&
+						!deferred.signal?.aborted &&
+						!this.#abortInProgress &&
+						!this.#isDisposed
+					) {
+						await this.#advisors.onPrimaryTurnEnd(
+							[...this.agent.state.messages],
+							options?.willContinue,
+							this.#postPromptTasksAbortController.signal,
+						);
+					}
+				}
 				this.#emitRunState("idle");
 				// Public agent_end is held out of the eager display pass and emitted
 				// here after maintenance routing, tagged isTerminal so subscribers can
@@ -4494,7 +4599,7 @@ export class AgentSession {
 
 	/** Run one abortable auto-learn capture outside the primary agent loop. */
 	async runAutolearnCapture(capture: (signal: AbortSignal) => Promise<void>): Promise<void> {
-		if (this.#autolearnCaptureTask || this.#isDisposed) return;
+		if (this.#autolearnCaptureTask || this.#isDisposed || !this.settings.get("autolearn.enabled")) return;
 		const controller = new AbortController();
 		this.#autolearnCaptureAbortController = controller;
 		const task = (async () => {
@@ -4550,12 +4655,23 @@ export class AgentSession {
 	 * gap slips past the disposal guards.
 	 */
 	beginDispose(): void {
+		if (this.#isDisposed) return;
 		this.#isDisposed = true;
+		this.#promptGeneration++;
+		for (const controller of this.#ephemeralTurnAbortControllers) controller.abort();
+		for (const controller of this.#usagePreflightAbortControllers) controller.abort();
+		this.#deferredTerminalAdvisorReview = undefined;
 		this.#preservedMessageListeners.clear();
 		this.#preservedQuery = undefined;
 		this.#messageClassifier.dispose();
 		this.#disposePreparedCompactionDiagnostics();
 		this.#preparedCompactionDiagnostics = undefined;
+		this.#disposeRequirementsTransform();
+		this.#disposeRequirementsGate();
+		this.#tools.setRequirementsFragment("");
+		this.requirements.dispose();
+		this.#disposeAutolearn?.();
+		this.#disposeAutolearn = undefined;
 		this.#modelDiscoveryAbortController.abort();
 		this.#queuedMessageDrainBlocked = false;
 		this.#usagePreflightReadyForNextModelCall = false;
@@ -4572,6 +4688,11 @@ export class AgentSession {
 		this.agent.hasIrcInterrupts = undefined;
 		this.#advisors.stopRuntime();
 		this.#eval.beginDispose();
+		// Cancel execution before any asynchronous shutdown hook can delay teardown.
+		this.#fallbackExtensionTimers?.clearAll();
+		this.abortRetry();
+		this.abortCompaction();
+		this.agent.abort();
 	}
 
 	/**
@@ -4728,12 +4849,7 @@ export class AgentSession {
 			logger.warn("Failed to emit session_shutdown event", { error: String(error) });
 		}
 
-		// Stop fallback extension timers before aborting deferred work they could enqueue.
-		this.#fallbackExtensionTimers?.clearAll();
-		this.abortRetry();
-		this.abortCompaction();
 		const postPromptDrain = this.#cancelPostPromptTasks();
-		this.agent.abort();
 		try {
 			await withTimeout(
 				postPromptDrain,
@@ -4805,12 +4921,12 @@ export class AgentSession {
 			this.#unsubscribeEvalPreludeSettings();
 			this.#unsubscribeEvalPreludeSettings = undefined;
 		}
+		this.#unsubscribePreservationSettings?.();
+		this.#unsubscribePreservationSettings = undefined;
 		if (this.#unsubscribeIdleCloseSetting) {
 			this.#unsubscribeIdleCloseSetting();
 			this.#unsubscribeIdleCloseSetting = undefined;
 		}
-		this.#unsubscribePreservationSettings?.();
-		this.#unsubscribePreservationSettings = undefined;
 		this.#eventListeners = [];
 		this.#runStateListeners.clear();
 		this.#sessionChangeCallbacks.clear();
@@ -4960,6 +5076,7 @@ export class AgentSession {
 		//     re-deliver stale tool output into the cleared conversation
 		//     (mirrors newSession()).
 		this.#promptGeneration++;
+		this.#deferredTerminalAdvisorReview = undefined;
 		await this.#cancelPostPromptTasks();
 		this.#cancelOwnAsyncJobs();
 
@@ -5445,13 +5562,124 @@ export class AgentSession {
 		this.#memory.endLocalMemoryStartup(signal);
 	}
 
+	get memoryRecoveryContextFiles(): readonly string[] {
+		return this.#getMemoryRecoveryContextFiles();
+	}
+
+	/** Host-owned automatic capture listener; never a model-controlled setting. */
+	setAutolearnDisposer(dispose: () => void): void {
+		this.#disposeAutolearn?.();
+		this.#disposeAutolearn = dispose;
+	}
+
+	/** Revoke V2 only. Ordinary memory and already contaminated history remain. */
+	bypassRequirementsForRun(): void {
+		this.requirements.setRecoveryMode("bypass");
+		this.emitNotice("info", "Future requirements recall bypassed. Existing transcript and provider history are NOT clean; ordinary memory tools remain enabled. AGENTS, rules, skills and context files remain separate.", "memory");
+	}
+
+	/** Use the ordinary fresh transcript/provider boundary with no implicit input carryover. */
+	async retryWithoutMemory(retainedSourceIds: string[] = []) {
+		const retained = [];
+		for (const id of retainedSourceIds) {
+			const sourceKey = id.startsWith("[") ? id : this.sessionManager.getRequirementsSource(id)?.key;
+			if (!sourceKey) throw new Error(`Original authoritative source unavailable: ${id}`);
+			const message = await this.sessionManager.retainRequirementsSource(sourceKey);
+			const [journalId, entryId] = JSON.parse(sourceKey) as [string, string];
+			retained.push({ message, sourceOrigin: { journalId, entryId } });
+		}
+		this.requirements.setRecoveryMode("bypass");
+		this.settings.override("memory.backend", "off");
+		this.settings.override("autolearn.enabled", false);
+		this.settings.override("requirements.enabled", false);
+		this.#disposeAutolearn?.();
+		this.#disposeAutolearn = undefined;
+		this.#abortAutolearnCapture();
+		await this.#drainAutolearnCapture();
+		await this.applyMemoryBackend();
+		this.#providerSessionId = undefined;
+		if (!(await this.newSession())) {
+			throw new Error("Clean retry cancelled before the new session opened. Learned memory is disabled, but existing transcript/provider history is NOT clean.");
+		}
+		for (const { message, sourceOrigin } of retained) {
+			this.#appendSessionMessage(message, sourceOrigin);
+			this.agent.appendMessage(message);
+		}
+		await this.sessionManager.ensureOnDisk();
+		await this.sessionManager.flush();
+		this.emitNotice("info", `Fresh session without learned memory; retained ${retained.length} explicitly selected originals. AGENTS, rules, skills and context files remain enabled and are not certified safe. Already submitted remote writes cannot be retracted.`, "memory");
+		return { sessionId: this.sessionId, retainedSourceIds: [...retainedSourceIds], remoteWritesNotRevocable: true };
+	}
+
 	/** Applies the selected memory backend to runtime state, tools, and prompt. */
 	applyMemoryBackend(): Promise<void> {
 		return this.#memory.applyMemoryBackend();
 	}
 
+	async #finalizeRequirementsContext(context: Context, model: Model): Promise<Context> {
+		const receipt = this.#preparedRequirementsReceipt;
+		this.#preparedRequirementsReceipt = undefined;
+		if (!receipt) return context;
+		if (this.#isDisposed || receipt.signature !== this.requirements.currentSignature()) {
+			this.requirements.recordCallReceipt({ ...receipt, phase: "refused" });
+			throw new Error(
+				"Requirements changed while preparing this request; retry against the current source and scope.",
+			);
+		}
+		if (receipt.tokens === 0 && receipt.revisionIds.length === 0) return context;
+		const contextWindow = model.contextWindow ?? 0;
+		const reserveTokens = resolveBudgetReserveTokens(contextWindow, this.settings.getGroup("compaction"));
+		let irreducibleTokens = this.agent.tokenizer.countTokens(context.systemPrompt ?? []);
+		if (context.tools?.length) irreducibleTokens += estimateToolSchemaTokens(context.tools, this.agent.tokenizer);
+		let unknownPhysical = false;
+		// Only identity-owned system/context frames and their control notes are irreducible.
+		// Ordinary user images, history and tool results remain ordinary compaction inputs.
+		for (const message of context.messages) {
+			if (!Array.isArray(message.content)) continue;
+			for (const block of message.content) {
+				if (block.type === "image") {
+					const fact = getInlineFrameAccounting(block);
+					if (fact && fact.owner !== "tool") irreducibleTokens += fact.estimatedTokens;
+					else if (!fact) {
+						const origin = getSourceOrigin(block);
+						if (origin?.kind === "synthetic" && origin.reason === "system-prompt-raster") unknownPhysical = true;
+					}
+				} else if (block.type === "text") {
+					const fact = getInlineTextAccounting(block);
+					if (fact && fact.owner !== "tool") irreducibleTokens += this.agent.tokenizer.countTokens(block.text);
+					else if (!fact) {
+						const origin = getSourceOrigin(block);
+						if (origin?.kind === "synthetic" && origin.reason === "raster-control") unknownPhysical = true;
+					}
+				}
+			}
+		}
+		const known =
+			!unknownPhysical &&
+			Number.isFinite(irreducibleTokens) &&
+			irreducibleTokens >= 0 &&
+			contextWindow > 0 &&
+			Number.isFinite(reserveTokens);
+		const refused = known && irreducibleTokens > contextWindow - reserveTokens;
+		this.requirements.recordCallReceipt({
+			...receipt,
+			phase: refused ? "refused" : "prepared",
+			capacity: {
+				contextWindow,
+				reserveTokens,
+				irreducibleTokens: known ? irreducibleTokens : null,
+				provenance: known ? "estimated" : "unknown",
+			},
+		});
+		if (refused)
+			throw new Error(
+				`Complete requirements and irreducible prepared input need about ${irreducibleTokens} tokens, exceeding the ${contextWindow - reserveTokens}-token prompt budget. Choose a larger context or explicitly revise scope, quarantine records, or bypass memory; no requirements were silently omitted.`,
+			);
+		return context;
+	}
+
 	/** Rebuilds the stable base prompt for the current tools and model. */
-	refreshBaseSystemPrompt(): Promise<void> {
+	async refreshBaseSystemPrompt(): Promise<void> {
 		return this.#tools.refreshBaseSystemPrompt();
 	}
 
@@ -5669,7 +5897,8 @@ export class AgentSession {
 	async #protectedSourceEntryIds(): Promise<Pick<ReadonlySet<string>, "has">> {
 		const query = await this.preparePreservedMessages();
 		const { P, N } = this.#preservationSelection(query);
-		return { has: id => P.has(id) || N.has(id) };
+		const pending = new Set(this.requirements.pendingLiveSnapshot().entryIds);
+		return { has: id => P.has(id) || N.has(id) || pending.has(id) };
 	}
 
 	async #compactionSourceSelection(): Promise<CompactionSourceSelection> {
@@ -5677,6 +5906,7 @@ export class AgentSession {
 		const selected = this.#preservationSelection(query);
 		const selectedSources: NonNullable<CompactionSourceSelection["selectedSources"]>[number][] = [];
 		const selectionReasons: Record<string, string[]> = {};
+		const pendingSourceEntryIds = new Set(this.requirements.pendingLiveSnapshot().entryIds);
 		for (const id of selected.P) {
 			const candidate = selected.candidate(id);
 			const entry = this.sessionManager.getEntry(id);
@@ -5688,6 +5918,14 @@ export class AgentSession {
 			selectedSources.push({ entryId: id, order, message, projection: message !== entry.message ? "original" : undefined,
 				spans: candidate.spans.map(span => ({ blockIndex: span.blockIndex, start: span.text?.start ?? 0, end: span.text?.end ?? 1 })) });
 		}
+		for (const id of pendingSourceEntryIds) {
+			if (selected.P.has(id)) continue;
+			const entry = this.sessionManager.getEntry(id);
+			const order = query.positionOf(id);
+			if (entry?.type !== "message" || order === undefined || entry.message.role !== "user") continue;
+			const message = getOriginalSourceMessage(entry.message);
+			selectedSources.push({ entryId: id, order, message, projection: message !== entry.message ? "original" : undefined });
+		}
 		const admittedNonUserSources: NonNullable<CompactionSourceSelection["admittedNonUserSources"]>[number][] = [];
 		for (const atom of selected.nonUserAtoms()) for (const entry of atom.entries) {
 			const order = query.positionOf(entry.id);
@@ -5696,7 +5934,7 @@ export class AgentSession {
 			admittedNonUserSources.push({ entryId: entry.id, order, message: entry.message,
 				atomicGroup: { id: atom.id, entryIds: [...atom.memberIds] } });
 		}
-		return { selectedSources, admittedNonUserSources, selectionReasons, selectionQuota: structuredClone(selected.quota), originalSourceMessage: getOriginalSourceMessage };
+		return { selectedSources, admittedNonUserSources, selectionReasons, selectionQuota: structuredClone(selected.quota), pendingSourceEntryIds, originalSourceMessage: getOriginalSourceMessage };
 	}
 
 	buildDisplaySessionContext(): SessionContext {
@@ -6321,6 +6559,7 @@ export class AgentSession {
 	 * the ACP agent) use this to know whether to expect an `agent_end` event.
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<boolean> {
+		if (this.#isDisposed) return false;
 		const originalText = text;
 		if (!options?.synthetic && options?.attribution !== "agent" && options?.producer?.type !== "generated" && options?.compactionOverride === undefined) {
 			const directive = parseCompactionOverridePrompt(text);
@@ -6350,6 +6589,7 @@ export class AgentSession {
 		// here. No-op when no manual compaction is active.
 		await this.#maintenance.manualCompactionCleanup;
 		if (await this.#sessionGenerationChanged(intakeGeneration)) return false;
+		if (this.#isDisposed) return false;
 		const expandPromptTemplates = options?.compactionOverride === undefined && (options?.expandPromptTemplates ?? true);
 		// Slash/custom-command handling below rewrites `text`; keep the original
 		// so a dropped prompt is handed back exactly as the user typed it.
@@ -6666,6 +6906,7 @@ export class AgentSession {
 		// every pre-dispatch bail (generation bump from abort, disposal, usage
 		// preflight denial) exits silently, and prompt() uses the outcome to hand
 		// the typed text back to the host instead of losing it.
+		if (this.#isDisposed) return false;
 		this.#beginInFlight();
 		const generation = this.#promptGeneration;
 		this.#promptSequence++;
@@ -6767,14 +7008,9 @@ export class AgentSession {
 				}
 			}
 
-			// A prompt issued while the session is already disposing must still run:
-			// the dispose-driven abort settles its turn (see "does not auto-retry
-			// empty reasonless aborts once the session is disposing"). Only drop the
-			// prompt when disposal began during the backend-transition await, where
-			// resuming would start a turn on a torn-down session.
-			const disposingBeforeTransition = this.#isDisposed;
+			// Disposal is terminal, including prompts whose asynchronous setup started earlier.
 			await this.#memory.transition;
-			if ((this.#isDisposed && !disposingBeforeTransition) || this.#promptGeneration !== generation) return false;
+			if (this.#isDisposed || this.#promptGeneration !== generation) return false;
 			const beforeAgentStartSystemPrompt = await this.#buildSystemPromptForAgentStart(expandedText);
 
 			let baseXdevCatalogDelivered = true;
@@ -7239,6 +7475,7 @@ export class AgentSession {
 			: normalizedImages?.length
 				? await this.#buildImageDescriptionNotice(normalizedImages)
 				: undefined;
+		if (await this.#sessionGenerationChanged(sessionGeneration)) return;
 		if (mode === "aside") {
 			if (await this.#sessionGenerationChanged(sessionGeneration)) return;
 			const records: AgentMessage[] = [];
@@ -7887,6 +8124,7 @@ export class AgentSession {
 
 	setTodoPhases(phases: TodoPhase[]): void {
 		this.#todo.setPhases(phases);
+		this.#emit({ type: "todo_changed" });
 	}
 
 	/** Active item labels accepted by this pooled turn's incremental yield tool. */
@@ -8149,8 +8387,10 @@ export class AgentSession {
 		try {
 			this.#abortAutolearnCapture();
 			for (const controller of this.#usagePreflightAbortControllers) controller.abort();
+			for (const controller of this.#ephemeralTurnAbortControllers) controller.abort();
 			this.abortRetry();
 			this.#promptGeneration++;
+			this.#deferredTerminalAdvisorReview = undefined;
 			this.#scheduledHiddenNextTurnGeneration = undefined;
 			// Abort the handoff first so generic compaction cancellation cannot replace
 			// the harness reason with an unreasoned "Handoff cancelled".
@@ -8365,6 +8605,8 @@ export class AgentSession {
 			}
 		}
 
+		this.requirements.cancelPending("Session fork");
+		this.requirements.releasePendingLive();
 		await this.#bash.flushPending();
 		// Flush current session to ensure all entries are written
 		await this.sessionManager.flush();
@@ -8405,6 +8647,7 @@ export class AgentSession {
 			this.#advisors.reattachRecorderFeeds();
 			advisorRecordersDetached = false;
 			await this.#memory.resetContextForNewTranscript();
+			void this.requirements.observeCommittedSources().catch(error => this.emitNotice("warning", `Requirements catalog: ${String(error)}`));
 
 			// Emit session_switch event with reason "fork" to hooks
 			if (this.#extensionRunner) {
@@ -8725,6 +8968,8 @@ export class AgentSession {
 		if (!checkpointState) {
 			return;
 		}
+		this.requirements.cancelPending("Rewind source ancestry changed");
+		this.requirements.releasePendingLive();
 		this.#bash.withBranchTransition(() => {
 			try {
 				this.sessionManager.branchWithSummary(checkpointState.checkpointEntryId, report, {
@@ -8766,6 +9011,7 @@ export class AgentSession {
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 		this.#checkpointState = undefined;
 		this.#pendingRewindReport = undefined;
+		void this.requirements.observeCommittedSources().catch(error => this.emitNotice("warning", `Requirements catalog: ${String(error)}`));
 	}
 	/** Plan-mode decision affordances: `ask`, or plan approval via `write xd://propose`. */
 	#isPlanDecisionTool(toolCall: { name: string; arguments?: Record<string, unknown> }): boolean {
@@ -9192,6 +9438,7 @@ export class AgentSession {
 	 * tools and any tool calls are discarded. The side request
 	 * does not block on, or interfere with, any in-flight main turn. The
 	 * session's history and persisted state are NOT modified by this call.
+	 * Caller/session abort cancels the request; disposal also rejects future side requests.
 	 *
 	 * Used by `BtwController` (`/btw`) and `OmfgController` (`/omfg`) to share
 	 * the snapshot + stream pipeline. The snapshot includes any in-flight
@@ -9204,87 +9451,104 @@ export class AgentSession {
 		signal?: AbortSignal;
 		dedupeReply?: boolean;
 	}): Promise<{ replyText: string; assistantMessage: AssistantMessage }> {
+		if (this.#isDisposed || this.#abortInProgress) {
+			throw new DOMException("Session is stopping", "AbortError");
+		}
+		args.signal?.throwIfAborted();
 		const model = this.model;
 		if (!model) {
 			throw new Error("No active model on session");
 		}
-		const cacheSessionId = this.sessionId;
-		const snapshot = this.#buildEphemeralSnapshot(args.promptText);
-		const llmMessages = await this.convertMessagesToLlm(snapshot, args.signal);
-		const context = await this.agent.buildSideRequestContext(llmMessages);
-		const options = this.prepareSimpleStreamOptions(
-			{
-				apiKey: this.#modelRegistry.resolver(model, cacheSessionId),
-				// Side-channel turns must not share OpenAI/Codex append-only
-				// conversation state with the main agent turn: IRC and /btw can run
-				// while the main turn is mid-tool-call. Keep the prompt-cache key
-				// stable, but give provider routing a unique request lineage. The
-				// shared provider state map is still required so Codex can allocate
-				// websocket state under that side-channel session id.
-				sessionId: `${cacheSessionId}:side:${Snowflake.next()}`,
-				promptCacheKey: this.agent.promptCacheKey ?? this.agent.sessionId,
-				preferWebsockets: this.#preferWebsockets,
-				providerSessionState: this.#providerSessionState,
-				reasoning: toReasoningEffort(this.thinkingLevel),
-				disableReasoning: shouldDisableReasoning(this.thinkingLevel),
-				hideThinkingSummary: this.agent.hideThinkingSummary,
-				serviceTier: this.#models.effectiveServiceTier(model),
-				signal: args.signal,
-			},
-			model.provider,
-		);
+		// IRC auto-replies have no caller signal, but still belong to this session.
+		const controller = new AbortController();
+		const signal = args.signal ? AbortSignal.any([args.signal, controller.signal]) : controller.signal;
+		this.#ephemeralTurnAbortControllers.add(controller);
+		try {
+			const cacheSessionId = this.sessionId;
+			const snapshot = this.#buildEphemeralSnapshot(args.promptText);
+			const llmMessages = await this.convertMessagesToLlm(snapshot, signal);
+			signal.throwIfAborted();
+			const context = await this.agent.buildSideRequestContext(llmMessages);
+			signal.throwIfAborted();
+			const options = this.prepareSimpleStreamOptions(
+				{
+					apiKey: this.#modelRegistry.resolver(model, cacheSessionId),
+					// Side-channel turns must not share OpenAI/Codex append-only
+					// conversation state with the main agent turn: IRC and /btw can run
+					// while the main turn is mid-tool-call. Keep the prompt-cache key
+					// stable, but give provider routing a unique request lineage. The
+					// shared provider state map is still required so Codex can allocate
+					// websocket state under that side-channel session id.
+					sessionId: `${cacheSessionId}:side:${Snowflake.next()}`,
+					promptCacheKey: this.agent.promptCacheKey ?? this.agent.sessionId,
+					preferWebsockets: this.#preferWebsockets,
+					providerSessionState: this.#providerSessionState,
+					reasoning: toReasoningEffort(this.thinkingLevel),
+					disableReasoning: shouldDisableReasoning(this.thinkingLevel),
+					hideThinkingSummary: this.agent.hideThinkingSummary,
+					serviceTier: this.#models.effectiveServiceTier(model),
+					signal,
+				},
+				model.provider,
+			);
 
-		let providerReplyText = "";
-		let emittedReplyText = "";
-		let assistantMessage: AssistantMessage | undefined;
-		const stream = await this.#sideStreamFn(model, obfuscateProviderContext(this.#obfuscator, context), options);
-		for await (const event of stream) {
-			if (event.type === "text_delta") {
-				providerReplyText += event.delta;
-				if (args.onTextDelta) {
-					const readyText = this.#deobfuscatedProviderTextReadyForDelta(providerReplyText);
-					if (readyText.length > emittedReplyText.length) {
-						const delta = readyText.slice(emittedReplyText.length);
-						emittedReplyText = readyText;
-						args.onTextDelta(delta);
+			let providerReplyText = "";
+			let emittedReplyText = "";
+			let assistantMessage: AssistantMessage | undefined;
+			const stream = await this.#sideStreamFn(model, obfuscateProviderContext(this.#obfuscator, context), options);
+			for await (const event of stream) {
+				// A transport may finish successfully after cancellation; do not publish its late reply.
+				signal.throwIfAborted();
+				if (event.type === "text_delta") {
+					providerReplyText += event.delta;
+					if (args.onTextDelta) {
+						const readyText = this.#deobfuscatedProviderTextReadyForDelta(providerReplyText);
+						if (readyText.length > emittedReplyText.length) {
+							const delta = readyText.slice(emittedReplyText.length);
+							emittedReplyText = readyText;
+							args.onTextDelta(delta);
+						}
 					}
+					continue;
 				}
-				continue;
+				if (event.type === "done") {
+					// A well-formed provider "done" event carries `content: AssistantContentBlock[]`,
+					// but a proxy/wrapper (custom extension providers, gateway-wrapped OAuth streams,
+					// see #4323) can hand back a message whose `content` was dropped or replaced with
+					// `undefined`. Downstream `.content.filter` at the sanitize step below would then
+					// crash the recap turn with `TypeError: undefined is not an object (evaluating
+					// 'H.content.filter')`. Normalize to `[]` so the recap surfaces an empty reply
+					// instead of turning a malformed side-channel response into a session-mute crash.
+					const rawContent = Array.isArray(event.message.content) ? event.message.content : [];
+					assistantMessage = this.#obfuscator?.hasSecrets()
+						? { ...event.message, content: deobfuscateAssistantContent(this.#obfuscator, rawContent) }
+						: { ...event.message, content: rawContent };
+					break;
+				}
+				if (event.type === "error") {
+					throw new Error(event.error.errorMessage || "Ephemeral turn failed");
+				}
 			}
-			if (event.type === "done") {
-				// A well-formed provider "done" event carries `content: AssistantContentBlock[]`,
-				// but a proxy/wrapper (custom extension providers, gateway-wrapped OAuth streams,
-				// see #4323) can hand back a message whose `content` was dropped or replaced with
-				// `undefined`. Downstream `.content.filter` at the sanitize step below would then
-				// crash the recap turn with `TypeError: undefined is not an object (evaluating
-				// 'H.content.filter')`. Normalize to `[]` so the recap surfaces an empty reply
-				// instead of turning a malformed side-channel response into a session-mute crash.
-				const rawContent = Array.isArray(event.message.content) ? event.message.content : [];
-				assistantMessage = this.#obfuscator?.hasSecrets()
-					? { ...event.message, content: deobfuscateAssistantContent(this.#obfuscator, rawContent) }
-					: { ...event.message, content: rawContent };
-				break;
-			}
-			if (event.type === "error") {
-				throw new Error(event.error.errorMessage || "Ephemeral turn failed");
-			}
-		}
 
-		if (!assistantMessage) {
-			throw new Error("Ephemeral turn ended without a final message");
+			signal.throwIfAborted();
+			if (!assistantMessage) {
+				throw new Error("Ephemeral turn ended without a final message");
+			}
+			const replyText = this.#deobfuscateFromProvider(providerReplyText);
+			if (args.onTextDelta && replyText.length > emittedReplyText.length) {
+				args.onTextDelta(replyText.slice(emittedReplyText.length));
+			}
+			const sanitizedMessage: AssistantMessage = {
+				...assistantMessage,
+				content: assistantMessage.content.filter(block => block.type !== "toolCall"),
+			};
+			return {
+				replyText: args.dedupeReply === false ? replyText.trim() : dedupeEphemeralReply(replyText.trim()),
+				assistantMessage: sanitizedMessage,
+			};
+		} finally {
+			this.#ephemeralTurnAbortControllers.delete(controller);
 		}
-		const replyText = this.#deobfuscateFromProvider(providerReplyText);
-		if (args.onTextDelta && replyText.length > emittedReplyText.length) {
-			args.onTextDelta(replyText.slice(emittedReplyText.length));
-		}
-		const sanitizedMessage: AssistantMessage = {
-			...assistantMessage,
-			content: assistantMessage.content.filter(block => block.type !== "toolCall"),
-		};
-		return {
-			replyText: args.dedupeReply === false ? replyText.trim() : dedupeEphemeralReply(replyText.trim()),
-			assistantMessage: sanitizedMessage,
-		};
 	}
 
 	/**
@@ -9386,6 +9650,8 @@ export class AgentSession {
 			}
 		}
 
+		this.requirements.cancelPending("Session switch or reload");
+		this.requirements.releasePendingLive();
 		this.#disconnectFromAgent();
 		await this.abort({ goalReason: "internal" });
 		await this.#sessionBeforeSwitchReconciler?.();
@@ -9421,8 +9687,7 @@ export class AgentSession {
 		const previousAutoResolvedLevel = this.autoResolvedThinkingLevel();
 		const previousServiceTierByFamily = this.serviceTierByFamily;
 		const previousTools = [...this.agent.state.tools];
-		const previousBaseSystemPrompt = this.#tools.baseSystemPrompt;
-		const previousSystemPrompt = this.agent.state.systemPrompt;
+		const previousPromptState = this.#tools.capturePromptState();
 		const previousBaseSystemPromptBeforeMemoryPromotion = this.#memory.promotionSnapshot;
 		const previousFreshProviderSessionId = this.#freshProviderSessionId;
 		const previousInheritedProviderPromptCacheKey = this.#inheritedProviderPromptCacheKey;
@@ -9627,6 +9892,7 @@ export class AgentSession {
 				const costs = await loadAdvisorTranscriptCosts(this.sessionFile, { providersBySlug });
 				this.#advisors.restoreCost(costs, providersBySlug);
 			}
+			void this.requirements.observeCommittedSources().catch(error => this.emitNotice("warning", `Requirements catalog: ${String(error)}`));
 			this.#bash.finishSessionTransition(bashTransition, true);
 			if (previousSessionState.sessionId !== this.sessionManager.getSessionId()) {
 				this.#notifySessionChangeCallbacks();
@@ -9640,9 +9906,8 @@ export class AgentSession {
 			this.#syncAgentSessionId(previousSessionState.sessionId, false);
 			this.#memory.rekeyForCurrentSessionId();
 			this.agent.setTools(previousTools);
-			this.#tools.setBaseSystemPrompt(previousBaseSystemPrompt);
+			this.#tools.restorePromptState(previousPromptState);
 			this.#memory.restorePromotionSnapshot(previousBaseSystemPromptBeforeMemoryPromotion);
-			this.agent.setSystemPrompt(previousSystemPrompt);
 			this.agent.replaceMessages(previousAgentMessages);
 			this.agent.replaceQueues(previousSteeringMessages, previousFollowUpMessages);
 			this.#irc.restorePending(previousIrcPending);
@@ -10011,7 +10276,6 @@ export class AgentSession {
 		sourceInput?: RestoredQueuedMessage;
 		/** Original image attachments, parallel to the positional markers in {@link editorText}. */
 		editorImages?: ImageContent[];
-		sourceInput?: RestoredQueuedMessage;
 		cancelled: boolean;
 		aborted?: boolean;
 		summaryEntry?: BranchSummaryEntry;
@@ -10246,6 +10510,8 @@ export class AgentSession {
 		// Switch leaf (with or without summary)
 		// Summary is attached at the navigation target position (newLeafId), not the old branch
 		this.#advancePreservedMessagesOwnership();
+		this.requirements.cancelPending("Session tree navigation");
+		this.requirements.releasePendingLive();
 		const bashTransition = this.#bash.beginSessionTransition();
 		let summaryEntry: BranchSummaryEntry | undefined;
 		let branchTransitioned = false;
@@ -10271,6 +10537,7 @@ export class AgentSession {
 		}
 
 		// Update agent state — build display context to populate agent messages.
+		void this.requirements.observeCommittedSources().catch(error => this.emitNotice("warning", `Requirements catalog: ${String(error)}`));
 		const stateContext = this.sessionManager.buildSessionContext();
 		const displayContext = deobfuscateSessionContext(stateContext, this.#obfuscator);
 		this.agent.replaceMessages(displayContext.messages);

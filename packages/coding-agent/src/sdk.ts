@@ -1857,6 +1857,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getPlanReferencePath: () => session?.getPlanReferencePath() ?? "local://PLAN.md",
 			getGoalModeState: () => session?.getGoalModeState(),
 			getGoalRuntime: () => session?.goalRuntime,
+			sendUserMessage: (content, options) => {
+				if (!session) throw new Error("Session is not initialized.");
+				return session.sendUserMessage(content, options);
+			},
 			getUsageStatistics: () => sessionManager.getUsageStatistics(),
 			getTurnBudget: () => sessionManager.getTurnBudget(),
 			recordEvalSubagentUsage: output => sessionManager.recordEvalSubagentOutput(output),

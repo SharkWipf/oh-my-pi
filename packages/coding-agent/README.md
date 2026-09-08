@@ -13,13 +13,14 @@ Package-specific references:
 - [MCP server/tool authoring](../../docs/mcp-server-tool-authoring.md)
 - [DEVELOPMENT](./DEVELOPMENT.md)
 
-## Transient inline image accounting
+## Goal objective delivery
 
-For a prepared provider `Context`, `getInlineFrameAccounting(image)` and `getInlineTextAccounting(textBlock)` from `@oh-my-pi/pi-coding-agent/session/snapcompact-inline` identify actual inline-rendered frames and their control notes. Owners are `system`, `context` (loaded context instructions), or `tool`; tool facts also carry `toolCallId`. Frame `estimatedTokens` comes from the rendering shape and is a local estimate, not exact provider billing. Ordinary original images have no inline fact.
+`goal.injectAsUserMessage` (default `false`) is available under Settings → Tasks → Modes. When enabled, each successful `goal` tool `create` queues only the trimmed objective as an ordinary user follow-up. Budget, status, and progress remain in the existing goal runtime; they are not added to the user message.
 
-Count the transformed system-prompt stub and emitted text, not the replaced prompt. When starting from `Tokenizer.countMessages`, replace each inline image baseline with its frame estimate by adding only `estimatedTokens - IMAGE_TOKEN_ESTIMATE`. Irreducible prompt accounting includes only the `system`/`context` frames and notes, not ordinary history or tool-result frames.
+Delivery uses the normal session queue: a streaming run consumes the follow-up after its current work, while an idle session follows ordinary queue-drain rules. The message becomes durable when delivered, not when queued; restarting does not reconstruct undelivered objectives from saved goal state. Delivered messages keep their journal identity and tool-producer metadata on reload, with unchanged user-role rendering and billing attribution.
 
-Facts use the existing source-origin sidecar and survive explicit image-normalization and blob-decoration clones. Arbitrary untracked clones, changed image/text fields, invalidated hook output, and persisted/reloaded origin maps do not provide current inline facts. Inspect the actual prepared pre-hook context; do not infer ownership from equal text or treat missing facts as a known zero cost.
+`get`, `resume`, `complete`, `drop`, and direct `/goal` commands do not inject another objective. Turning the setting off affects future creates only; it does not rewrite history or add special goal retention. SDK tool hosts outside `createAgentSession` must provide `ToolSession.sendUserMessage` when enabling this option.
+
 ## Long-session runtime reads
 
 `SessionManager` keeps cumulative usage in its existing journal index. `getUsageStatistics()` includes task and background model usage; `getAssistantUsageStatistics()` is the top-level assistant-only subtotal displayed by the footer. Branch navigation does not reset either cumulative total.
@@ -27,6 +28,20 @@ Facts use the existing source-origin sidecar and survive explicit image-normaliz
 Credential pins and retained-context controls use one active branch fold and one reset/compaction checkpoint. Recent sibling branches reuse that checkpoint; navigating to unrelated older history may still require a full ancestry walk. `buildSessionContext({ transcript: true })` intentionally retains full-history export semantics. No historical messages are evicted by these optimizations.
 
 After modifying persisted entries in place, call `await sessionManager.rewriteEntries()` before reading derived state. It rebuilds the index while preserving the selected leaf, including for in-memory sessions. Returned credential maps and usage snapshots may be changed without changing the index.
+
+## Rewind viewport
+
+With an empty editor, press Escape twice to open rewind at the recent tail. Up/Down choose rendered turns; Left/Right move between sibling branches at a fork or between user turns otherwise. Enter rewinds to the outlined source entry; Escape cancels. Home/End, PageUp/PageDown, and the mouse wheel inspect history without changing the selected rewind destination.
+
+Rewind uses journal-entry anchors rather than guessed global row numbers. Edge arrows indicate more history; cold history remains accessible without pre-rendering it. The first open indexes source descriptors cooperatively with a cancellable loading view. Only demanded transcript components are instantiated, and offscreen components are released. Reopening unchanged history reuses the source index and bounded last-visible window; source rewrites, branch changes, and relevant presentation changes invalidate that view. A single large message or grouped tool card still costs the work required by its own renderer.
+## Transient inline image accounting
+
+For a prepared provider `Context`, `getInlineFrameAccounting(image)` and `getInlineTextAccounting(textBlock)` from `@oh-my-pi/pi-coding-agent/session/snapcompact-inline` identify actual inline-rendered frames and their control notes. Owners are `system`, `context` (loaded context instructions), or `tool`; tool facts also carry `toolCallId`. Frame `estimatedTokens` comes from the rendering shape and is a local estimate, not exact provider billing. Ordinary original images have no inline fact.
+
+Count the transformed system-prompt stub and emitted text, not the replaced prompt. When starting from `Tokenizer.countMessages`, replace each inline image baseline with its frame estimate by adding only `estimatedTokens - IMAGE_TOKEN_ESTIMATE`. Irreducible prompt accounting includes only the `system`/`context` frames and notes, not ordinary history or tool-result frames.
+
+Facts use the existing source-origin sidecar and survive explicit image-normalization and blob-decoration clones. Arbitrary untracked clones, changed image/text fields, invalidated hook output, and persisted/reloaded origin maps do not provide current inline facts. Inspect the actual prepared pre-hook context; do not infer ownership from equal text or treat missing facts as a known zero cost.
+
 
 ## Memory backends
 
@@ -48,6 +63,18 @@ The agent supports three mutually-exclusive memory backends, selected via the `m
    - `HINDSIGHT_BANK_MISSION`, `HINDSIGHT_DEBUG`
 
 Switching backends mid-session immediately replaces the live backend, memory tools, listeners, and system-prompt context. Existing users with `memories.enabled = true|false` are migrated to `memory.backend = "local"|"off"` exactly once on first launch; afterward, `memory.backend` is the sole runtime selector.
+
+## Context controls and source directives
+
+Interactive `/context` opens the fullscreen source manager; `/context usage` and `/context details` open the physical usage and inventory views. Headless `/context` reports usage, with the same explicit `usage` and `details` arguments. The manager starts at the newest real user in chronological order. Source rows stay one terminal-cell-truncated line; first/recent badges describe admitted policy positions rather than filtered row numbers.
+
+Use the visible Actions menu (`a`) or `n` for Never, `y` for Always, `-`/Backspace for Auto, and Space/Enter to cycle. Independent role and stored-state filters (`f`) compose with chronological search (`/`). Inspect (`i`) distinguishes stored manual state, effective policy, eleven-category facts, pending/failed work, source quota and installed representation. Source settings (`l`) links the relevant stage and limits to native settings controls. Never disables additional preservation, not ordinary retention or deletion; hard-recent may temporarily protect a stored Never source. Manual tool exchanges are indivisible.
+
+Reset row (`r`) affects the selected complete source group. Reset all (`R`) captures non-Auto groups throughout the current branch after its clear boundary, including hidden rows; confirmation identifies the scope. Newer edits are skipped, and neither action removes successful classification facts or settings. Classify selected (`c`) and missing-only backfill (`C`) show the resolved model and request-cost warning; backfill offers a positive worker count, progress, cancellation and explicit resume. Closing the menu does not cancel session jobs.
+
+Context settings use typed limit, enum, number, model and regex submenus. First/recent limits are independent; the shared Always cap can link to either edge. Regex rules expose separate Final and case-insensitive controls. Policy edits update the next-compaction preview immediately but do not rewrite already installed PNG/native artifacts. Percentage limits remain visibly unavailable without an effective model maximum.
+
+Prefix ordinary input with `/keep` or `/once` to store Always or Never source state. The directive is not emitted as authored body text; literal remainder, original image references and source-capture identity survive submission, steering/follow-up queues and editor restoration across TUI, ACP, RPC and collaboration. There are no `/pin` or `/unpin` source commands.
 
 ## Source preservation policy API
 

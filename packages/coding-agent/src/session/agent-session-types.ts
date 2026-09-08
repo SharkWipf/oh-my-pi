@@ -126,6 +126,10 @@ export interface InitialRetryFallbackState {
 
 /** Dependencies and initial state used to construct an AgentSession. */
 export interface AgentSessionConfig {
+	/** Run without learned-memory startup, recall or automatic writes. */
+	startWithoutMemory?: boolean;
+	/** Explicit context files remain enabled during memory recovery. */
+	getMemoryRecoveryContextFiles?: () => readonly string[];
 	agent: Agent;
 	/** Shared with the provider stream wrapper: current Codex Code Mode tool exposure snapshot for turn metadata. */
 	codeModeState?: { namespacesInfo?: unknown };
