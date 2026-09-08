@@ -71,8 +71,6 @@ export interface SessionEntryBase {
 	timestamp: string;
 	/** Initial user override, recorded with the source before asynchronous work starts. */
 	compactionOverride?: "keep" | "exclude";
-	/** Original namespace identity; not a human-authorship attestation. */
-	sourceOrigin?: { journalId: string; entryId: string };
 }
 
 export interface SessionMessageEntry extends SessionEntryBase {
