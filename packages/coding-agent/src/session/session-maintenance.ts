@@ -532,17 +532,15 @@ export class SessionMaintenance {
 	}
 
 	async #pruneToolOutputs(operation: CompactionOperation): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
-		const protectedSourceEntryIds = await this.#host.protectedSourceEntryIds();
 		if (!this.#compactionOwnerValid(operation)) throw new CompactionCancelledError();
 		let rewrite: Promise<void> | undefined;
 		const branchEntries = operation.manager.getBranch();
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
-		const result = pruneToolOutputs(
+		const result = await pruneToolOutputs(
 			branchEntries,
 			this.#tokenizer,
 			this.#withPlanProtection({
 				...DEFAULT_PRUNE_CONFIG,
-				protectedSourceEntryIds,
 				pruneUseless: this.#host.settings.getGroup("compaction").dropUseless,
 				// Cache-stable boundary: never re-write the warm, already-sent prefix
 				// (deep stale/age victims) or summarized-away entries every turn.
@@ -552,6 +550,11 @@ export class SessionMaintenance {
 					this.#host.model()?.thinking?.prefixBinding === true ? 0 : PRUNE_CACHE_WARM_SUFFIX_TOKENS,
 			}),
 			(maps, apply) => { rewrite = this.#rewriteSources(operation, maps, apply); },
+			async () => {
+				const protectedIds = await this.#host.protectedSourceEntryIds();
+				if (!this.#compactionOwnerValid(operation)) throw new CompactionCancelledError();
+				return protectedIds;
+			},
 		);
 		await rewrite;
 		if (!this.#compactionOwnerValid(operation)) throw new CompactionCancelledError();
@@ -580,16 +583,14 @@ export class SessionMaintenance {
 	async #pruneStaleToolResults(operation: CompactionOperation): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
 		const { supersedeReads, dropUseless } = this.#host.settings.getGroup("compaction");
 		if (!supersedeReads && !dropUseless) return undefined;
-		const protectedSourceEntryIds = await this.#host.protectedSourceEntryIds();
 		if (!this.#compactionOwnerValid(operation)) throw new CompactionCancelledError();
 		let rewrite: Promise<void> | undefined;
 		const branchEntries = operation.manager.getBranch();
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
-		const result = pruneSupersededToolResults(
+		const result = await pruneSupersededToolResults(
 			branchEntries,
 			this.#tokenizer,
 			this.#withPlanProtection({
-				protectedSourceEntryIds,
 				supersedeKey: supersedeReads ? readToolSupersedeKey : undefined,
 				pruneUseless: dropUseless,
 				protectedTools: [...DEFAULT_PRUNE_CONFIG.protectedTools],
@@ -601,6 +602,11 @@ export class SessionMaintenance {
 				suffixTokenLimit: this.#host.model()?.thinking?.prefixBinding === true ? 0 : undefined,
 			}),
 			(maps, apply) => { rewrite = this.#rewriteSources(operation, maps, apply); },
+			async () => {
+				const protectedIds = await this.#host.protectedSourceEntryIds();
+				if (!this.#compactionOwnerValid(operation)) throw new CompactionCancelledError();
+				return protectedIds;
+			},
 		);
 		await rewrite;
 		if (!this.#compactionOwnerValid(operation)) throw new CompactionCancelledError();
