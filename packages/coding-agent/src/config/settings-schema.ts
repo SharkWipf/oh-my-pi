@@ -569,6 +569,18 @@ export const SETTINGS_SCHEMA = {
 				"Start on the active model, then switch to a fast/cheap model (default the 'smol' role) at the first edit/write after the plan nudge's todo list exists — the strong model plans, commits the todos, and starts the implementation before handing off. Overridable per session with --prewalk / --no-prewalk.",
 		},
 	},
+	"advisor.compactBeforeGuidance": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Advisor",
+			label: "Compact Before Guidance",
+			description:
+				"Run ordinary context maintenance before advisor review, respecting speculative compaction and its grace period.",
+			condition: "advisorEnabled",
+		},
+	},
 	"advisor.syncBacklog": {
 		type: "enum",
 		values: ["off", "1", "3", "5"] as const,
