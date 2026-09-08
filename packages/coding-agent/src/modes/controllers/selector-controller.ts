@@ -1327,9 +1327,7 @@ export class SelectorController {
 			selector.resume(onSelect, done);
 			this.#rewind.invalidate = invalidate;
 		} else {
-			const entries = manager.getBranch().filter((entry): entry is SessionMessageEntry => entry.type === "message");
-			if (entries.length === 0) { this.ctx.showStatus("No messages to branch from"); return; }
-			selector = new RewindSelectorComponent(entries, {
+			selector = new RewindSelectorComponent(signal => this.#collectRewindMessages(manager, signal), {
 				ui: this.ctx.ui,
 				getTool: name => this.ctx.session.getToolByName(name),
 				isBuiltInTool: name => this.ctx.session.hasBuiltInTool(name),
@@ -1370,7 +1368,37 @@ export class SelectorController {
 			this.ctx.showStatus("Unable to open rewind: " + String(error));
 		});
 		this.ctx.ui.setFocus(selector);
-		this.ctx.ui.requestRender();
+		// Acquisition starts only after the loading surface is visible and accepts Esc.
+		this.ctx.ui.renderNow();
+	}
+
+	async #collectRewindMessages(manager: SessionManager, signal: AbortSignal): Promise<SessionMessageEntry[]> {
+		const entries: SessionMessageEntry[] = [];
+		let id = manager.getLeafId();
+		let deadline = performance.now() + 8;
+		while (id !== null) {
+			if (signal.aborted) return [];
+			const entry = manager.getEntry(id);
+			if (!entry) break;
+			if (entry.type === "message") entries.push(entry);
+			id = entry.parentId;
+			if (performance.now() >= deadline) {
+				await new Promise<void>(resolve => setImmediate(resolve));
+				deadline = performance.now() + 8;
+			}
+		}
+		// Restore transcript order without a second branch or a blocking reversal.
+		for (let left = 0, right = entries.length - 1; left < right; left++, right--) {
+			if (signal.aborted) return [];
+			const entry = entries[left]!;
+			entries[left] = entries[right]!;
+			entries[right] = entry;
+			if (performance.now() >= deadline) {
+				await new Promise<void>(resolve => setImmediate(resolve));
+				deadline = performance.now() + 8;
+			}
+		}
+		return entries;
 	}
 
 	/**

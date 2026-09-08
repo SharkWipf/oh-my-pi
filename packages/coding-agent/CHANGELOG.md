@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Esc-Esc rewind now indexes source entries cooperatively and constructs transcript renderers only when its source-anchored viewport needs them. Reopening unchanged history reuses the index; journal rewrites and branch changes invalidate it. Sibling paths use indexed child lookups instead of rebuilding the whole session tree for each step.
+- Esc-Esc rewind now paints its cancellable loading surface before collecting the cold branch through cooperative parent/ID traversal, then indexes source entries cooperatively and constructs transcript renderers only when its source-anchored viewport needs them. Reopening unchanged history reuses the index; journal rewrites and branch changes invalidate it. Sibling paths use indexed child lookups instead of rebuilding the whole session tree for each step.
 - Grouped Read cards now refresh their display at render time, avoiding quadratic display rebuilding while replaying long read runs. Rewind retains the bounded visible window rather than constructing empty assistant prefixes throughout a read run.
 - The startup update notice counts every change in a release: bullets written above a `###` heading now count under `Other`, and `+`/`*` markers and lightly indented bullets count like `-`.
 - Fixed Codex Astra retaining its larger window after disabling Extended Context, including cached models; explicit model overrides still take precedence.

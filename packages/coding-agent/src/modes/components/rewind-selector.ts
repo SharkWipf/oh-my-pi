@@ -70,6 +70,7 @@ export class RewindSelectorComponent implements Component {
 	#cancelled = false;
 	#indexed = 0;
 	#sourceCount = 0;
+	#sourceWork = new AbortController();
 	readonly ready: Promise<void>;
 	#viewport = new OutlineViewport();
 	#prefixViewport = new OutlineViewport();
@@ -88,15 +89,26 @@ export class RewindSelectorComponent implements Component {
 	#branchesLoading = false;
 	#branchError: string | undefined;
 
-	constructor(entries: SessionMessageEntry[], private readonly deps: RewindSelectorDeps) {
+	constructor(
+		entries: SessionMessageEntry[] | ((signal: AbortSignal) => Promise<SessionMessageEntry[]>),
+		private readonly deps: RewindSelectorDeps,
+	) {
 		this.#builder = this.#newBuilder();
-		this.#sourceCount = entries.length;
-		this.ready = this.#buildIndex(entries);
+		this.ready = typeof entries === "function" ? this.#loadSource(entries) : this.#buildIndex(entries);
 	}
 
 	get isLoading(): boolean { return this.#loading; }
 
+	async #loadSource(load: (signal: AbortSignal) => Promise<SessionMessageEntry[]>): Promise<void> {
+		// The owner paints the cancellable overlay before acquisition starts.
+		await new Promise<void>(resolve => setImmediate(resolve));
+		if (this.#cancelled) return;
+		const entries = await load(this.#sourceWork.signal);
+		if (!this.#cancelled) await this.#buildIndex(entries);
+	}
+
 	async #buildIndex(entries: SessionMessageEntry[]): Promise<void> {
+		this.#sourceCount = entries.length;
 		let deadline = performance.now() + 8;
 		for (const entry of entries) {
 			if (this.#cancelled) return;
@@ -167,6 +179,7 @@ export class RewindSelectorComponent implements Component {
 
 	dispose(): void {
 		this.#cancelled = true;
+		this.#sourceWork.abort();
 		this.#stopSlide();
 		this.#branchWork?.abort();
 		for (const column of this.#columns) { column.cancelled = true; column.builder?.dispose(); }
@@ -382,7 +395,7 @@ export class RewindSelectorComponent implements Component {
 				...this.#border.render(width),
 				" Rewind — indexing source messages",
 				...this.#border.render(width),
-				fit(" " + this.#indexed + "/" + this.#sourceCount + " sources indexed; Esc cancels", width),
+				fit(this.#sourceCount === 0 ? " Collecting source messages; Esc cancels" : " " + this.#indexed + "/" + this.#sourceCount + " sources indexed; Esc cancels", width),
 				...Array.from({ length: Math.max(0, height - 5) }, () => ""),
 				...this.#border.render(width),
 			];

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, it } from "bun:test";
+import { afterEach, beforeEach, expect, it, spyOn } from "bun:test";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Settings, resetSettingsForTest } from "../src/config/settings";
 import { RewindSelectorComponent } from "../src/modes/components/rewind-selector";
@@ -18,6 +18,15 @@ it("reopens at the current source tail after navigation, append, branch and same
 	const rootId = manager.appendMessage({ role: "user", content: "Root request", timestamp: 1 });
 	manager.appendMessage({ role: "user", content: "Original tail", timestamp: 2 });
 	let mounted: RewindSelectorComponent | undefined;
+	let painted = false;
+	const getEntry = manager.getEntry.bind(manager);
+	const readSource = spyOn(manager, "getEntry").mockImplementation(id => {
+		if (!painted) throw new Error("Rewind read source before its first frame");
+		return getEntry(id);
+	});
+	const eagerBranch = spyOn(manager, "getBranch").mockImplementation(() => {
+		throw new Error("Rewind eagerly materialized the branch");
+	});
 	const displayed = new Set<RewindSelectorComponent>();
 	const session = { getToolByName: () => undefined, hasBuiltInTool: () => true };
 	const controller = new SelectorController({
@@ -36,6 +45,10 @@ it("reopens at the current source tail after navigation, append, branch and same
 			},
 			setFocus() {},
 			requestRender() {},
+			renderNow() {
+				mounted?.render(100);
+				painted = true;
+			},
 			requestComponentRender() {},
 		},
 		editor: {},
@@ -54,6 +67,17 @@ it("reopens at the current source tail after navigation, append, branch and same
 		.filter(row => row.includes(theme.boxDotted.vertical))
 		.join("\n");
 	try {
+		controller.showUserMessageSelector();
+		if (!mounted) throw new Error("Rewind overlay did not mount");
+		const cancelled = mounted;
+		expect(cancelled.isLoading).toBe(true);
+		expect(readSource).not.toHaveBeenCalled();
+		cancelled.handleInput("\u001b");
+		expect(mounted).toBeUndefined();
+		await cancelled.ready;
+		expect(readSource).not.toHaveBeenCalled();
+		painted = false;
+
 		const first = await open();
 		expect(outlined(first)).toContain("Original tail");
 		first.handleInput("\u001b[A");
@@ -86,6 +110,8 @@ it("reopens at the current source tail after navigation, append, branch and same
 		expect(outlined(rewritten)).not.toContain("Root request");
 		rewritten.handleInput("\u001b");
 	} finally {
+		readSource.mockRestore();
+		eagerBranch.mockRestore();
 		for (const selector of displayed) selector.dispose();
 		manager.releaseRetainedEntries();
 	}
