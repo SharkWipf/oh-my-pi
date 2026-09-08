@@ -1,6 +1,6 @@
 import type { Model } from "@oh-my-pi/pi-ai";
-import { getSourceOrigin } from "@oh-my-pi/pi-ai/utils/source-origin";
 import { visitOpenAIResponsesLogicalContent, visitOpenAIResponsesSourceContent } from "@oh-my-pi/pi-ai/utils";
+import { getSourceOrigin } from "@oh-my-pi/pi-ai/utils/source-origin";
 import type { ModelTokenizer } from "@oh-my-pi/pi-catalog/types";
 import * as natives from "@oh-my-pi/pi-natives";
 import { stringifyJson } from "@oh-my-pi/pi-utils";

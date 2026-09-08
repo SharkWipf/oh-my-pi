@@ -1,9 +1,11 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+
 import type { SessionManager } from "../session/session-manager";
 import type { RequirementsObservation, RequirementsSource, RequirementsUnit } from "./types";
 
 export type { UserMessageProducer } from "@oh-my-pi/pi-ai";
+
 export const REQUIREMENTS_OPERATOR_DECISION_ENTRY = "requirements_operator_decision";
 export interface ResolvedRequirementsSource {
 	operatorTargetRevisionIds?: string[];

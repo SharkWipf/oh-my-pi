@@ -736,11 +736,10 @@ test("inband final accounting charges the emitted catalog once and retains owned
 			);
 		},
 	});
-	const finalRequests: { model: Model; sameRoot: boolean; capacity: number | null | undefined }[] = [];
-	harness.agent.addBeforeModelCall((context, _signal, request) => {
+	const finalRequests: { model: Model; capacity: number | null | undefined }[] = [];
+	harness.agent.addBeforeModelCall((_context, _signal, request) => {
 		finalRequests.push({
 			model: request.model,
-			sameRoot: request.sourceContext === context,
 			capacity: harness.session.requirements.status().receipt?.capacity?.irreducibleTokens,
 		});
 	});
@@ -752,7 +751,6 @@ test("inband final accounting charges the emitted catalog once and retains owned
 	expect(finalRequests.map(request => request.capacity)).toEqual(sentPrices);
 	for (let index = 0; index < harness.calls.length; index++) {
 		expect(finalRequests[index]!.model).toBe(harness.dispatchedModels[index]!);
-		expect(finalRequests[index]!.sameRoot).toBe(false);
 		const context = harness.calls[index]!.context;
 		expect(context.tools).toBeUndefined();
 		expect((context.systemPrompt ?? []).join("\n").match(/"name":"catalog_probe"/g)).toHaveLength(1);

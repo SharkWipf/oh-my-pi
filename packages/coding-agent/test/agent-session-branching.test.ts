@@ -205,20 +205,14 @@ describe("AgentSession branch title metadata", () => {
 });
 
 describe("AgentSession historical image prompts", () => {
-	it("branches with the original captured draft and disposition instead of transformed delivery", async () => {
+	it("branches with the accepted original draft and disposition instead of transformed delivery", async () => {
 		const ctx = await createTestSession({ inMemory: true });
 		try {
 			const text = "Inspect [Image #1, 1x1]";
-			const sourceCaptureId = await ctx.sessionManager.captureRequirementsInput(
-				text,
-				[HISTORICAL_IMAGE],
-				undefined,
-				"keep",
-			);
 			const entryId = ctx.sessionManager.appendMessage({
 				...historicalImagePrompt("Transformed delivery"),
 				content: "Transformed delivery",
-				sourceCaptureId,
+				originalSubmission: { text: `/keep ${text}`, images: [HISTORICAL_IMAGE], compactionOverride: "keep" },
 				compactionOverride: "keep",
 			});
 
@@ -234,20 +228,14 @@ describe("AgentSession historical image prompts", () => {
 		}
 	});
 
-	it("navigates with captured images and once disposition instead of normalized delivery", async () => {
+	it("navigates with original images and once disposition instead of normalized delivery", async () => {
 		const ctx = await createTestSession({ inMemory: true });
 		try {
 			const text = "Compare [Image #1, 1x1]";
-			const sourceCaptureId = await ctx.sessionManager.captureRequirementsInput(
-				text,
-				[HISTORICAL_IMAGE],
-				undefined,
-				"exclude",
-			);
 			const entryId = ctx.sessionManager.appendMessage({
 				...historicalImagePrompt("Transformed delivery"),
 				content: "Transformed delivery",
-				sourceCaptureId,
+				originalSubmission: { text: `/once ${text}`, images: [HISTORICAL_IMAGE], compactionOverride: "exclude" },
 				compactionOverride: "exclude",
 			});
 			ctx.sessionManager.appendMessage(assistantMsg("Compared."));
@@ -259,26 +247,6 @@ describe("AgentSession historical image prompts", () => {
 				editorImages: [HISTORICAL_IMAGE],
 				cancelled: false,
 			});
-		} finally {
-			await ctx.cleanup();
-		}
-	});
-
-	it("leaves the branch intact when a referenced original source is unavailable", async () => {
-		const ctx = await createTestSession({ inMemory: true });
-		try {
-			const entryId = ctx.sessionManager.appendMessage({
-				...historicalImagePrompt("Transformed delivery"),
-				sourceCaptureId: "missing-original",
-			});
-			ctx.sessionManager.appendMessage(assistantMsg("Compared."));
-			const leaf = ctx.sessionManager.getLeafId();
-			const sessionId = ctx.sessionManager.getSessionId();
-			await expect(ctx.session.navigateTree(entryId)).rejects.toThrow();
-			expect(ctx.sessionManager.getLeafId()).toBe(leaf);
-			await expect(ctx.session.branch(entryId)).rejects.toThrow();
-			expect(ctx.sessionManager.getLeafId()).toBe(leaf);
-			expect(ctx.sessionManager.getSessionId()).toBe(sessionId);
 		} finally {
 			await ctx.cleanup();
 		}

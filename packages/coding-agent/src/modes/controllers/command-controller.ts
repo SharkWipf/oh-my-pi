@@ -688,7 +688,11 @@ export class CommandController {
 				this.ctx.ui.requestRender();
 			}, prepared);
 			const handle = this.ctx.ui.showOverlay(component, {
-				anchor: "bottom-center", width: "100%", maxHeight: "100%", margin: 0, fullscreen: true,
+				anchor: "bottom-center",
+				width: "100%",
+				maxHeight: "100%",
+				margin: 0,
+				fullscreen: true,
 			});
 			this.ctx.ui.setFocus(component);
 			this.ctx.ui.requestRender();

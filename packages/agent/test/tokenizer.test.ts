@@ -90,7 +90,6 @@ describe("Tokenizer", () => {
 		expect(tokenizer.countMessage(mixed)).toBe(1200 + 5024);
 		expect(tokenizer.countMessage(mixed, { excludeEncryptedReasoning: true })).toBe(1200 + 5024);
 	});
-
 	test("charges a metadata-only computer screenshot without charging content mirrors again", () => {
 		const tokenizer = new Tokenizer();
 		const screenshot: ToolResultMessage = {

@@ -10273,6 +10273,7 @@ export class AgentSession {
 		} = {},
 	): Promise<{
 		editorText?: string;
+		sourceInput?: RestoredQueuedMessage;
 		/** Original image attachments, parallel to the positional markers in {@link editorText}. */
 		editorImages?: ImageContent[];
 		cancelled: boolean;

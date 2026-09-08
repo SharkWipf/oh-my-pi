@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed OpenAI, Azure Responses, and Codex thinking summaries arriving only in final snapshots: late text and unseen suffixes now reach streaming clients before completion, while divergent display text remains append-only and replay signatures retain the authoritative provider item.
+- Buffered raw Responses reasoning until completion so readable summaries take precedence, retaining raw-only fallback and completing reasoning when a terminal snapshot omits per-item completion.
 ### Added
 
 - Added guarded transient inline-rendering facts to source-origin metadata. Known clone operations preserve them; changed blocks, unknown hook output, and persisted metadata cannot retain stale physical attribution.
@@ -9,31 +13,21 @@
 
 - Preserve local source and original-image provenance through Codex, OpenAI, and Azure ordinary request builders, native replay, one-to-many tool emissions, and clone/filter operations without adding provider-wire fields.
 - Prevent a mapped full native snapshot from duplicating its existing input prefix; arbitrary in-place or replacement request hooks retain authority and invalidate unsupported source attribution.
-## [18.1.15] - 2026-09-08
-
-### Fixed
-
-- GitHub Copilot sign-in keeps the GitHub-owned Copilot CLI OAuth app on Enterprise domains: private instances run their own OAuth registry and reject the github.com-registered OpenCode client, which is now used only for public github.com sign-ins ([#11285](https://github.com/can1357/oh-my-pi/pull/11285) by [@H4vC](https://github.com/H4vC))
-- GitHub Copilot sign-in uses the minimal-grant OpenCode OAuth app again (`read:user` only): GitHub renders each app's existing per-user grant on the consent page, so Enterprise organizations that block the Copilot CLI app's broad historic grant can log in as on 18.1.4. API request identity still mimics the Copilot CLI, and tokens minted by either app keep working ([#11280](https://github.com/can1357/oh-my-pi/pull/11280) by [@H4vC](https://github.com/H4vC)).
-- GitHub Copilot plan/model-policy 403s no longer count as credential failures for credential-lifetime decisions: the token is valid, so stored credentials are preserved instead of wiped ([#11280](https://github.com/can1357/oh-my-pi/pull/11280) by [@H4vC](https://github.com/H4vC)).
-- Fixed custom `google-generative-ai` providers failing mid-turn model fallback when Gemini 3 tool calls are replayed without their original thought signature ([#11270](https://github.com/can1357/oh-my-pi/issues/11270)).
-
-## [18.1.14] - 2026-09-07
-
-### Fixed
-
-- Fixed reasoning-off requests (e.g. GitHub Copilot `gpt-6-astra`) surfacing `400 Unsupported value: 'none' … Supported values are: …` instead of retrying at the lowest allowed effort: the reasoning-effort fallback now recognizes `Supported values` phrasing ([#11128](https://github.com/can1357/oh-my-pi/pull/11128) by [@H4vC](https://github.com/H4vC)).
-- Fixed Cursor GPT off-tier requests sending raw `-none` sibling ids (e.g. `gpt-5.6-sol-none-fast`), which the Run endpoint rejects; they now normalize to the base model id with no reasoning parameter, matching every other effort tier ([#11128](https://github.com/can1357/oh-my-pi/pull/11128) by [@H4vC](https://github.com/H4vC)).
 
 ### Fixed
 
 - Kept differing original-submission and delivered-message source coordinates distinct through native history deduplication, persistence, and controlled rewrites. Ordinary messages still need no source metadata.
-- Escaped reserved Harmony markers in typed native replay text at Responses, Azure Responses, and Codex request boundaries without changing identifiers, schemas, encrypted replay state, or image bytes and original-image provenance.
-- Native Responses source capture now records actual normalized text/tool/image correspondence and preserves it through controlled rewrites and JSON replay. Shared logical readers expose typed visible fields and images without counting native mirrors twice or traversing opaque provider state.
+### Added
+
+- Added guarded transient inline-rendering facts to source-origin metadata. Known clone operations preserve them; changed blocks, unknown hook output, and persisted metadata cannot retain stale physical attribution.
+
 ### Fixed
 
-- Fixed OpenAI, Azure Responses, and Codex thinking summaries arriving only in final snapshots: late text and unseen suffixes now reach streaming clients before completion, while divergent display text remains append-only and replay signatures retain the authoritative provider item.
-- Buffered raw Responses reasoning until completion so readable summaries take precedence, retaining raw-only fallback and completing reasoning when a terminal snapshot omits per-item completion.
+- Escaped reserved Harmony markers in typed native replay text at Responses, Azure Responses, and Codex request boundaries without changing identifiers, schemas, encrypted replay state, or image bytes and original-image provenance.
+- Native Responses source capture now records actual normalized text/tool/image correspondence and preserves it through controlled rewrites and JSON replay. Shared logical readers expose typed visible fields and images without counting native mirrors twice or traversing opaque provider state.
+### Added
+
+- Added guarded transient inline-rendering facts to source-origin metadata. Known clone operations preserve them; changed blocks, unknown hook output, and persisted metadata cannot retain stale physical attribution.
 ## [18.1.15] - 2026-09-08
 
 ### Fixed
