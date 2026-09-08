@@ -16,6 +16,9 @@
 ### Fixed
 
 - Requirements extraction, literal adoption and restoration retain the initiating lifecycle signal through asynchronous evidence preparation. Disposing the owning session prevents delayed preparation from issuing fresh model calls or reacquiring publication authority, and aborts in-flight requirements requests.
+- Original requirements evidence remains readable when unrelated conversation entries append during resolution; addressed source rewrites and lifecycle changes still invalidate the read.
+- Exact-source requirements actions no longer wait for unrelated cold catalog enumeration. Current accepted requirements can be recalled while historical catalog coverage remains explicitly incomplete.
+- Cataloging accepted originals at new locators preserves their reviewed state after evidence refresh. Completing catalog observation refreshes the next coverage receipt without rewriting earlier request receipts.
 
 ## [18.1.15] - 2026-09-08
 
