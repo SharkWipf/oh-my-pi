@@ -12,6 +12,11 @@
 - Revalidated consumed local and scoped foreign original evidence before provider dispatch without observing the whole historical catalog. Evidence availability and explicit quarantine are independent; identical originals returning never silently restore quarantined requirements.
 - Normalized requirements storage into indexed changed-row transactions and current scoped heads; historical catalogs and lineage are not loaded for normal recall. Publication joins persisted independent obligation/candidate decisions and compares exact current head identities.
 - Existing session-delete confirmations now expose active evidence dependencies and offer cancellation, needed-original BlobStore retention, or exact requirement withdrawal. Scoped clear prevents historical backfill from recreating old authority; newly accepted operator decisions remain usable.
+
+### Fixed
+
+- Requirements extraction, literal adoption and restoration retain the initiating lifecycle signal through asynchronous evidence preparation. Disposing the owning session prevents delayed preparation from issuing fresh model calls or reacquiring publication authority, and aborts in-flight requirements requests.
+
 ## [18.1.15] - 2026-09-08
 
 ### Added
