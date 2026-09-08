@@ -24,6 +24,7 @@ import {
 import { getRoleInfo } from "../../config/model-roles";
 import { settings } from "../../config/settings";
 import type { SettingPath, SettingTab } from "../../config/settings-schema";
+import { confirmRequirementsJournalDeletion } from "../../requirements/commands";
 import { disableProvider, enableProvider } from "../../discovery";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
@@ -61,7 +62,7 @@ import {
 	PRESERVED_USER_MESSAGE_CATEGORY_SETTING_PATHS,
 } from "../../session/preserved-message-settings";
 import { isPreservationUser } from "../../session/preserved-messages";
-import type { SessionEntry, SessionMessageEntry, SessionTreeNode } from "../../session/session-entries";
+import type { SessionEntry, SessionMessageEntry } from "../../session/session-entries";
 import type { SessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
 import { loadPinnedSessionIds } from "../../session/session-pins";
@@ -128,6 +129,14 @@ const MANUAL_LOGIN_PROMPT = "Paste the authorization code (or full redirect URL)
 
 export class SelectorController {
 	constructor(private ctx: InteractiveModeContext) {}
+
+	#rewind: {
+		selector: RewindSelectorComponent;
+		manager: SessionManager;
+		presentation: readonly unknown[];
+		invalidate: () => void;
+		unsubscribe?: () => void;
+	} | undefined;
 	/**
 	 * Mount a primary fullscreen menu through the one polished modal path shared
 	 * by Settings, Model Hub, and Agent Hub.
@@ -1722,51 +1731,126 @@ export class SelectorController {
 	}
 
 	showUserMessageSelector(): void {
-		const entries = this.ctx.sessionManager
-			.getBranch()
-			.filter((entry): entry is SessionMessageEntry => entry.type === "message");
-		if (entries.length === 0) {
-			this.ctx.showStatus("No messages to branch from");
-			return;
+		const manager = this.ctx.sessionManager;
+		const linkTargets = getAssistantMessageLinkTargets(this.ctx);
+		const presentation: readonly unknown[] = [
+			theme, manager.getCwd(), this.ctx.effectiveHideThinkingBlock, this.ctx.proseOnlyThinking,
+			linkTargets, this.ctx.session.extensionRunner,
+			settings.get("display.showTokenUsage"), settings.get("display.showTurnTime"),
+			settings.get("display.hideToolActivity"), settings.get("display.cacheMissMarker"),
+			settings.get("terminal.showImages"), settings.get("read.toolResultPreview"),
+		];
+		if (this.#rewind && (this.#rewind.manager !== manager || presentation.some((value, index) => value !== this.#rewind!.presentation[index]))) {
+			this.#rewind.unsubscribe?.();
+			this.#rewind.invalidate();
+			this.#rewind = undefined;
 		}
-
+		let overlayHandle: OverlayHandle | undefined;
+		let closed = false;
+		let selecting = false;
+		let invalidated = false;
+		let selector: RewindSelectorComponent;
 		const done = () => {
+			if (closed) return;
+			closed = true;
 			overlayHandle?.hide();
-			selector?.dispose();
+			if (invalidated || selector.isLoading) {
+				if (this.#rewind?.selector === selector) {
+					this.#rewind.unsubscribe?.();
+					this.#rewind = undefined;
+				}
+				selector.dispose();
+			} else selector.suspend();
 			this.focusActiveEditorArea();
 			this.ctx.ui.requestRender();
 		};
-		const selector = new RewindSelectorComponent(entries, {
-			ui: this.ctx.ui,
-			getTool: name => this.ctx.session.getToolByName(name),
-			isBuiltInTool: name => this.ctx.session.hasBuiltInTool(name),
-			getMessageRenderer: type => this.ctx.session.extensionRunner?.getMessageRenderer(type),
-			cwd: this.ctx.sessionManager.getCwd(),
-			hideThinkingBlock: () => this.ctx.effectiveHideThinkingBlock,
-			proseOnlyThinking: () => this.ctx.proseOnlyThinking,
-			linkTargets: getAssistantMessageLinkTargets(this.ctx),
-			requestRender: () => this.ctx.ui.requestRender(),
-			siblingPaths: entryId => this.#siblingBranchPaths(entryId),
-			onSelect: entryId => void this.#rewindFromTranscript(entryId, done),
-			onCancel: done,
-		});
-		if (selector.targetCount === 0) {
-			selector.dispose();
+		const invalidate = () => {
+			invalidated = true;
+			if (selecting) return; // Keep the old overlay until navigateTree finishes repainting.
+			if (closed) selector.dispose();
+			else done();
+		};
+		const onSelect = (entryId: string) => {
+			selecting = true;
+			void this.#rewindFromTranscript(entryId, done).finally(() => { selecting = false; });
+		};
+		if (this.#rewind) {
+			selector = this.#rewind.selector;
+			selector.resume(onSelect, done);
+			this.#rewind.invalidate = invalidate;
+		} else {
+			selector = new RewindSelectorComponent(signal => this.#collectRewindMessages(manager, signal), {
+				ui: this.ctx.ui,
+				getTool: name => this.ctx.session.getToolByName(name),
+				isBuiltInTool: name => this.ctx.session.hasBuiltInTool(name),
+				getMessageRenderer: type => this.ctx.session.extensionRunner?.getMessageRenderer(type),
+				cwd: manager.getCwd(),
+				hideThinkingBlock: () => this.ctx.effectiveHideThinkingBlock,
+				proseOnlyThinking: () => this.ctx.proseOnlyThinking,
+				linkTargets,
+				requestRender: () => this.ctx.ui.requestRender(),
+				siblingPaths: (entryId, signal) => this.#siblingBranchPaths(entryId, signal),
+				onSelect,
+				onCancel: done,
+			});
+			const cached = { selector, manager, presentation, invalidate, unsubscribe: undefined as (() => void) | undefined };
+			this.#rewind = cached;
+			cached.unsubscribe = manager.subscribeSourceChanges(() => {
+				if (this.#rewind === cached) this.#rewind = undefined;
+				cached.unsubscribe?.();
+				cached.invalidate();
+			});
+		}
+		if (!selector.isLoading && selector.targetCount === 0) {
+			invalidate();
 			this.ctx.showStatus("No messages to branch from");
 			return;
 		}
-		// Fullscreen alternate-screen overlay: the transcript replica draws over
-		// the live one, and the normal screen stays untouched until the rewind
-		// itself rewrites it.
-		const overlayHandle = this.ctx.ui.showOverlay(selector, {
-			anchor: "bottom-center",
-			width: "100%",
-			maxHeight: "100%",
-			margin: 0,
-			fullscreen: true,
+		overlayHandle = this.ctx.ui.showOverlay(selector, {
+			anchor: "bottom-center", width: "100%", maxHeight: "100%", margin: 0, fullscreen: true,
+		});
+		void selector.ready.then(() => {
+			if (!closed && !invalidated && selector.targetCount === 0) {
+				invalidate();
+				this.ctx.showStatus("No messages to branch from");
+			}
+		}, error => {
+			if (closed) return;
+			invalidate();
+			this.ctx.showStatus("Unable to open rewind: " + String(error));
 		});
 		this.ctx.ui.setFocus(selector);
-		this.ctx.ui.requestRender();
+		// Acquisition starts only after the loading surface is visible and accepts Esc.
+		this.ctx.ui.renderNow();
+	}
+
+	async #collectRewindMessages(manager: SessionManager, signal: AbortSignal): Promise<SessionMessageEntry[]> {
+		const entries: SessionMessageEntry[] = [];
+		let id = manager.getLeafId();
+		let deadline = performance.now() + 8;
+		while (id !== null) {
+			if (signal.aborted) return [];
+			const entry = manager.getEntry(id);
+			if (!entry) break;
+			if (entry.type === "message") entries.push(entry);
+			id = entry.parentId;
+			if (performance.now() >= deadline) {
+				await new Promise<void>(resolve => setImmediate(resolve));
+				deadline = performance.now() + 8;
+			}
+		}
+		// Restore transcript order without a second branch or a blocking reversal.
+		for (let left = 0, right = entries.length - 1; left < right; left++, right--) {
+			if (signal.aborted) return [];
+			const entry = entries[left]!;
+			entries[left] = entries[right]!;
+			entries[right] = entry;
+			if (performance.now() >= deadline) {
+				await new Promise<void>(resolve => setImmediate(resolve));
+				deadline = performance.now() + 8;
+			}
+		}
+		return entries;
 	}
 
 	/**
@@ -1775,30 +1859,32 @@ export class SelectorController {
 	 * descendants (children are timestamp-ordered, so the last child chain is
 	 * the branch's latest continuation) and filtered to message entries.
 	 */
-	#siblingBranchPaths(entryId: string): BranchVariantPath[] {
-		const entry = this.ctx.sessionManager.getEntry(entryId);
+	async #siblingBranchPaths(entryId: string, signal: AbortSignal): Promise<BranchVariantPath[]> {
+		const manager = this.ctx.sessionManager;
+		const entry = manager.getEntry(entryId);
 		if (!entry) return [];
-		const forest = this.ctx.sessionManager.getTree();
-		const byId = new Map<string, SessionTreeNode>();
-		const stack = [...forest];
-		while (stack.length > 0) {
-			const node = stack.pop()!;
-			byId.set(node.entry.id, node);
-			stack.push(...node.children);
-		}
-		const siblings =
-			entry.parentId === null
-				? forest.filter(node => node.entry.id !== entryId)
-				: (byId.get(entry.parentId)?.children ?? []).filter(node => node.entry.id !== entryId);
+		const siblings = entry.parentId === null
+			? manager.getTree().map(node => node.entry).filter(sibling => sibling.id !== entryId)
+			: manager.getChildren(entry.parentId).filter(sibling => sibling.id !== entryId)
+				.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 		const paths: BranchVariantPath[] = [];
+		let deadline = performance.now() + 8;
 		for (const sibling of siblings) {
 			const entries: SessionMessageEntry[] = [];
-			let node: SessionTreeNode | undefined = sibling;
-			while (node) {
-				if (node.entry.type === "message") entries.push(node.entry);
-				node = node.children.at(-1);
+			let current: SessionEntry | undefined = sibling;
+			while (current) {
+				if (signal.aborted) return [];
+				if (current.type === "message") entries.push(current);
+				const children = manager.getChildren(current.id);
+				// Match stable tree order, including the last inserted equal-time child.
+				children.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+				current = children.at(-1);
+				if (performance.now() >= deadline) {
+					await new Promise<void>(resolve => setImmediate(resolve));
+					deadline = performance.now() + 8;
+				}
 			}
-			if (entries.length > 0) paths.push({ rootId: sibling.entry.id, entries });
+			if (entries.length > 0) paths.push({ rootId: sibling.id, entries });
 		}
 		return paths;
 	}
@@ -2237,7 +2323,8 @@ export class SelectorController {
 				: undefined;
 			onSelectSession = session => this.handleResumeSession(session.path);
 			selectorOptions = {
-				onDelete: async (session: SessionInfo) => {
+				onDelete: async (session, choose) => {
+					if (!(await confirmRequirementsJournalDeletion(this.ctx.settings, session.path, choose))) return false;
 					if (!(await this.#detachActiveSessionBeforeDeletion(session.path))) {
 						return false;
 					}
@@ -2403,6 +2490,10 @@ export class SelectorController {
 			return;
 		}
 
+		if (!(await confirmRequirementsJournalDeletion(this.ctx.settings, sessionFile, (title, options) => this.ctx.showHookSelector(title, options)))) {
+			this.ctx.showStatus("Delete cancelled");
+			return;
+		}
 		if (!(await this.#detachActiveSessionBeforeDeletion(sessionFile))) {
 			this.ctx.showStatus("Delete cancelled");
 			return;

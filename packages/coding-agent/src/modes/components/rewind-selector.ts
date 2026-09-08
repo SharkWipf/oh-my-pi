@@ -1,34 +1,10 @@
-/**
- * Fullscreen esc-esc rewind selector.
- *
- * Replays the current session's branch with {@link ChatTranscriptBuilder} on
- * the alternate screen (`ui.showOverlay(..., { fullscreen: true })`) and moves
- * a dotted outline over the rendered transcript block the rewind would land
- * on, instead of listing user messages in a detached picker. Entries that
- * render nothing (notices, hidden custom messages, tool results folded into
- * their call cards) are never outlined: results fold into the turn that
- * rendered their call so rewinding a turn keeps its tool output, and the rest
- * are skipped entirely.
- *
- * When the outlined turn has sibling branches in the session tree, the region
- * below the divergence renders as a horizontal strip of half-width columns —
- * the current path first, each alternate branch beside it — and Left/Right
- * slide between them with an eased camera animation. Sibling columns are
- * fully rendered transcripts of that branch's most-recent path, built lazily
- * and cached per divergence.
- *
- * Keys: Up/Down step through rendered items in transcript order (within the
- * active column when a strip is open), Left/Right slide between branch
- * variants at a fork and jump between user turns elsewhere, Enter rewinds to
- * the outlined item, Esc cancels.
- */
+/** Fullscreen source-anchored rewind over the shared transcript builder. */
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import {
 	type Component,
 	matchesKey,
 	padding,
 	routeSgrMouseInput,
-	ScrollView,
 	sliceByColumn,
 	type TUI,
 	truncateToWidth,
@@ -36,22 +12,14 @@ import {
 import type { MessageRenderer } from "../../extensibility/extensions/types";
 import type { SessionMessageEntry } from "../../session/session-entries";
 import { theme } from "../theme/theme";
-import {
-	matchesAppToolsExpand,
-	matchesSelectCancel,
-	matchesSelectDown,
-	matchesSelectUp,
-} from "../utils/keybinding-matchers";
+import { matchesAppToolsExpand, matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../utils/keybinding-matchers";
 import { ChatTranscriptBuilder } from "./chat-transcript-builder";
 import { DynamicBorder } from "./dynamic-border";
 import { fit } from "./overlay-box";
 import {
-	appendOutlineEntries,
-	type ComposedColumn,
-	composeOutlineColumn,
-	OutlineRowCache,
+	appendOutlineEntry,
 	type OutlineTarget,
-	outlineVisibility,
+	OutlineViewport,
 	positionRail,
 	userMessageHasText,
 	userMessageText,
@@ -66,7 +34,6 @@ export interface BranchVariantPath {
 export interface RewindSelectorDeps {
 	ui: TUI;
 	getTool?: (name: string) => AgentTool | undefined;
-	/** Whether the active registry entry came from a built-in factory. */
 	isBuiltInTool?: (name: string) => boolean;
 	getMessageRenderer?: (customType: string) => MessageRenderer | undefined;
 	cwd: string;
@@ -74,72 +41,120 @@ export interface RewindSelectorDeps {
 	proseOnlyThinking?: () => boolean;
 	linkTargets?: ReadonlyMap<string, string>;
 	requestRender: () => void;
-	/** Sibling branch paths of `entryId`'s turn (excluding the turn itself). */
-	siblingPaths?: (entryId: string) => BranchVariantPath[];
-	/** Rewind the session to `entryId` (a message entry anywhere in the tree). */
+	siblingPaths?: (entryId: string, signal: AbortSignal) => BranchVariantPath[] | Promise<BranchVariantPath[]>;
 	onSelect: (entryId: string) => void;
 	onCancel: () => void;
 }
 
-/** Lazily built transcript column for one alternate branch. */
-interface SiblingColumn {
-	rootId: string;
-	builder: ChatTranscriptBuilder;
-	targets: OutlineTarget[];
-	/** Short label for the column header: the branch's first user prompt. */
+interface SiblingColumn extends BranchVariantPath {
+	builder?: ChatTranscriptBuilder;
+	targets?: OutlineTarget[];
+	viewport: OutlineViewport;
 	label: string;
+	loading?: boolean;
+	cancelled?: boolean;
+	error?: string;
 }
 
-/** Rows the frame chrome occupies: top rule, header, rule, footer hint, bottom rule. */
 const CHROME_ROWS = 5;
-/** Blank columns between branch-strip columns. */
 const STRIP_GAP = 2;
-/** Duration of the branch-swap camera slide. */
 const SLIDE_MS = 160;
+const NO_COMPONENTS: ReadonlySet<Component> = new Set();
 
 export class RewindSelectorComponent implements Component {
 	#builder: ChatTranscriptBuilder;
-	#scrollView: ScrollView;
 	#border = new DynamicBorder();
 	#targets: OutlineTarget[] = [];
 	#selected = 0;
-	/** Per-main-target "renders at least one non-blank row", refreshed each frame. */
-	#mainVisible: boolean[] | undefined;
-	/** Same, for the active sibling column. */
-	#siblingVisible: boolean[] | undefined;
+	#loading = true;
+	#cancelled = false;
+	#indexed = 0;
+	#sourceCount = 0;
+	#sourceWork = new AbortController();
+	readonly ready: Promise<void>;
+	#viewport = new OutlineViewport();
+	#prefixViewport = new OutlineViewport();
+	#stripViewport = new OutlineViewport();
 	#scrollToSelection = true;
 	#expanded = false;
-	#rowCache = new OutlineRowCache();
-
-	// Branch strip: present when the selected turn has sibling branches.
-	// Column 0 is the current path; siblings follow in tree order.
-	#variantCache = new Map<string, SiblingColumn[]>();
-	/** 0 = current path column; 1..n = sibling column index + 1. */
+	#width = 80;
+	#height = 35;
+	#stripRoot: string | undefined;
+	#columns: SiblingColumn[] = [];
 	#activeVariant = 0;
-	/** Selected target within the active sibling column. */
 	#siblingSelected = 0;
-	/** Camera slide between variant positions (fractional column index). */
 	#slide: { from: number; to: number; startedAt: number } | undefined;
 	#slideTimer: NodeJS.Timeout | undefined;
+	#branchWork: AbortController | undefined;
+	#branchesLoading = false;
+	#branchError: string | undefined;
 
 	constructor(
-		entries: SessionMessageEntry[],
+		entries: SessionMessageEntry[] | ((signal: AbortSignal) => Promise<SessionMessageEntry[]>),
 		private readonly deps: RewindSelectorDeps,
 	) {
 		this.#builder = this.#newBuilder();
-		this.#targets = appendOutlineEntries(this.#builder, entries);
-		this.#selected = Math.max(0, this.#targets.length - 1);
-		this.#scrollView = new ScrollView([], {
-			height: 10,
-			scrollbar: "auto",
-			theme: { track: t => theme.fg("dim", t), thumb: t => theme.fg("accent", t) },
-		});
+		this.ready = typeof entries === "function" ? this.#loadSource(entries) : this.#buildIndex(entries);
 	}
 
-	/** Number of selectable rewind points on the current path; hosts skip mounting when zero. */
-	get targetCount(): number {
-		return this.#targets.length;
+	get isLoading(): boolean { return this.#loading; }
+
+	async #loadSource(load: (signal: AbortSignal) => Promise<SessionMessageEntry[]>): Promise<void> {
+		// The owner paints the cancellable overlay before acquisition starts.
+		await new Promise<void>(resolve => setImmediate(resolve));
+		if (this.#cancelled) return;
+		const entries = await load(this.#sourceWork.signal);
+		if (!this.#cancelled) await this.#buildIndex(entries);
 	}
+
+	async #buildIndex(entries: SessionMessageEntry[]): Promise<void> {
+		this.#sourceCount = entries.length;
+		let deadline = performance.now() + 8;
+		for (const entry of entries) {
+			if (this.#cancelled) return;
+			appendOutlineEntry(this.#builder, entry, this.#targets);
+			this.#indexed++;
+			if (performance.now() >= deadline) {
+				this.deps.requestRender();
+				await new Promise<void>(resolve => setImmediate(resolve));
+				deadline = performance.now() + 8;
+			}
+		}
+		if (this.#cancelled) return;
+		this.#selected = Math.max(0, this.#targets.length - 1);
+		this.#loading = false;
+		this.#scrollToSelection = true;
+		this.deps.requestRender();
+	}
+
+	/** Keep the last bounded viewport warm; cancel only incomplete source work. */
+	suspend(): void {
+		this.#stopSlide();
+		this.#branchWork?.abort();
+		if (this.#branchesLoading || this.#columns.some(column => column.loading)) {
+			for (const column of this.#columns) { column.cancelled = true; column.builder?.dispose(); }
+			this.#columns = [];
+			this.#stripRoot = undefined;
+			this.#branchesLoading = false;
+		}
+	}
+
+	/** Reopening starts at the recent tail, without replaying unchanged sources. */
+	resume(onSelect: (entryId: string) => void, onCancel: () => void): void {
+		this.deps.onSelect = onSelect;
+		this.deps.onCancel = onCancel;
+		this.#selected = Math.max(0, this.#targets.length - 1);
+		this.#activeVariant = 0;
+		this.#siblingSelected = 0;
+		if (this.#expanded) {
+			this.#builder.setExpanded(false);
+			for (const column of this.#columns) column.builder?.setExpanded(false);
+		}
+		this.#expanded = false;
+		this.#scrollToSelection = true;
+	}
+
+	get targetCount(): number { return this.#targets.length; }
 
 	#newBuilder(): ChatTranscriptBuilder {
 		return new ChatTranscriptBuilder({
@@ -152,64 +167,109 @@ export class RewindSelectorComponent implements Component {
 			proseOnlyThinking: this.deps.proseOnlyThinking,
 			linkTargets: this.deps.linkTargets,
 			requestRender: this.deps.requestRender,
+			deferComponents: true,
 		});
 	}
 
 	invalidate(): void {
 		this.#builder.container.invalidate();
-		for (const columns of this.#variantCache.values()) {
-			for (const column of columns) column.builder.container.invalidate();
-		}
+		for (const column of this.#columns) column.builder?.container.invalidate();
+		this.#scrollToSelection = true;
 	}
 
 	dispose(): void {
+		this.#cancelled = true;
+		this.#sourceWork.abort();
 		this.#stopSlide();
+		this.#branchWork?.abort();
+		for (const column of this.#columns) { column.cancelled = true; column.builder?.dispose(); }
 		this.#builder.dispose();
-		for (const columns of this.#variantCache.values()) {
-			for (const column of columns) column.builder.dispose();
-		}
-		this.#variantCache.clear();
+		this.#columns = [];
 	}
 
-	// ========================================================================
-	// Branch strip
-	// ========================================================================
-
-	/** Sibling columns for the selected turn, built lazily and cached per divergence. */
 	#stripColumns(): SiblingColumn[] {
 		const target = this.#targets[this.#selected];
 		if (!target || !this.deps.siblingPaths) return [];
-		const cached = this.#variantCache.get(target.turnId);
-		if (cached) return cached;
-		const columns: SiblingColumn[] = [];
-		for (const sibling of this.deps.siblingPaths(target.turnId)) {
-			if (sibling.entries.length === 0) continue;
-			const builder = this.#newBuilder();
-			builder.setExpanded(this.#expanded);
-			const targets = appendOutlineEntries(builder, sibling.entries);
-			const firstUser = sibling.entries.find(
-				entry => entry.message.role === "user" && userMessageHasText(entry.message),
-			);
-			const label =
-				firstUser && firstUser.message.role === "user" ? userMessageText(firstUser.message) : sibling.rootId;
-			columns.push({ rootId: sibling.rootId, builder, targets, label });
-		}
-		this.#variantCache.set(target.turnId, columns);
-		return columns;
+		if (this.#stripRoot === target.turnId) return this.#columns;
+		this.#branchWork?.abort();
+		for (const column of this.#columns) { column.cancelled = true; column.builder?.dispose(); }
+		this.#stripRoot = target.turnId;
+		this.#columns = [];
+		this.#stripViewport = new OutlineViewport();
+		this.#branchError = undefined;
+		const work = new AbortController();
+		this.#branchWork = work;
+		const accept = (paths: BranchVariantPath[]) => {
+			if (work.signal.aborted) return;
+			this.#branchesLoading = false;
+			for (const sibling of paths) {
+				if (sibling.entries.length === 0) continue;
+				// A branch caption need not scan an entire cold assistant run.
+				const first = sibling.entries[0]!;
+				const label = first.message.role === "user" && userMessageHasText(first.message) ? userMessageText(first.message) : sibling.rootId;
+				this.#columns.push({ ...sibling, label, viewport: new OutlineViewport() });
+			}
+			this.#scrollToSelection = true;
+			this.deps.requestRender();
+		};
+		const paths = this.deps.siblingPaths(target.turnId, work.signal);
+		if (paths instanceof Promise) {
+			this.#branchesLoading = true;
+			void paths.then(accept, error => {
+				if (work.signal.aborted) return;
+				this.#branchesLoading = false;
+				this.#branchError = String(error);
+				this.deps.requestRender();
+			});
+		} else accept(paths);
+		return this.#columns;
 	}
 
-	/** The target the dotted outline currently rests on. */
+	#materialize(column: SiblingColumn): { builder: ChatTranscriptBuilder; targets: OutlineTarget[] } {
+		if (!column.builder) {
+			column.builder = this.#newBuilder();
+			column.builder.setExpanded(this.#expanded);
+			column.targets = [];
+			column.loading = true;
+			void this.#buildColumn(column).catch(error => {
+				if (column.cancelled) return;
+				column.loading = false;
+				column.error = String(error);
+				this.deps.requestRender();
+			});
+		}
+		return { builder: column.builder, targets: column.targets! };
+	}
+
+	async #buildColumn(column: SiblingColumn): Promise<void> {
+		let deadline = performance.now() + 8;
+		for (const entry of column.entries) {
+			if (column.cancelled) return;
+			appendOutlineEntry(column.builder!, entry, column.targets!);
+			if (performance.now() >= deadline) {
+				await new Promise<void>(resolve => setImmediate(resolve));
+				deadline = performance.now() + 8;
+			}
+		}
+		if (column.cancelled) return;
+		column.loading = false;
+		this.#scrollToSelection = true;
+		this.deps.requestRender();
+	}
+
 	#outlinedTarget(): OutlineTarget | undefined {
 		if (this.#activeVariant > 0) {
-			return this.#stripColumns()[this.#activeVariant - 1]?.targets[this.#siblingSelected];
+			const column = this.#stripColumns()[this.#activeVariant - 1];
+			if (!column) return undefined;
+			const { targets } = this.#materialize(column);
+			return column.loading || column.error ? undefined : targets[this.#siblingSelected];
 		}
 		return this.#targets[this.#selected];
 	}
 
 	#slideTo(variant: number): void {
 		const now = Date.now();
-		const from = this.#slidePosition(now);
-		this.#slide = { from, to: variant, startedAt: now };
+		this.#slide = { from: this.#slidePosition(now), to: variant, startedAt: now };
 		this.#activeVariant = variant;
 		this.#scrollToSelection = true;
 		this.#slideTimer ??= setInterval(() => {
@@ -221,59 +281,45 @@ export class RewindSelectorComponent implements Component {
 
 	#stopSlide(): void {
 		this.#slide = undefined;
-		if (this.#slideTimer !== undefined) {
-			clearInterval(this.#slideTimer);
-			this.#slideTimer = undefined;
-		}
+		clearInterval(this.#slideTimer);
+		this.#slideTimer = undefined;
 	}
 
-	/** Fractional variant position of the camera at `now` (eased). */
 	#slidePosition(now: number): number {
 		if (!this.#slide) return this.#activeVariant;
 		const t = Math.min(1, (now - this.#slide.startedAt) / SLIDE_MS);
-		const eased = 1 - (1 - t) ** 3;
-		return this.#slide.from + (this.#slide.to - this.#slide.from) * eased;
+		return this.#slide.from + (this.#slide.to - this.#slide.from) * (1 - (1 - t) ** 3);
 	}
 
-	// ========================================================================
-	// Input
-	// ========================================================================
+	#activeViewport(): OutlineViewport {
+		const columns = this.#stripColumns();
+		if (columns.length === 0) return this.#viewport;
+		return this.#activeVariant === 0 ? this.#stripViewport : columns[this.#activeVariant - 1]!.viewport;
+	}
 
 	handleInput(data: string): void {
+		if (this.#loading) {
+			if (matchesSelectCancel(data) || matchesKey(data, "escape")) this.deps.onCancel();
+			return;
+		}
 		if (data.startsWith("\x1b[<")) {
 			routeSgrMouseInput(data, event => {
-				if (event.wheel !== null) {
-					// A wheel notch at either end moves nothing: repainting it
-					// anyway makes the frame twitch under a fast wheel.
-					const before = this.#scrollView.getScrollOffset();
-					this.#scrollView.scroll(event.wheel * 3);
-					if (this.#scrollView.getScrollOffset() !== before) this.deps.requestRender();
-				}
+				if (event.wheel !== null && this.#activeViewport().scroll(event.wheel * 3)) this.deps.requestRender();
 				return true;
 			});
 			return;
 		}
-		if (matchesSelectCancel(data) || matchesKey(data, "escape")) {
-			this.deps.onCancel();
-			return;
-		}
+		if (matchesSelectCancel(data) || matchesKey(data, "escape")) { this.deps.onCancel(); return; }
 		if (matchesAppToolsExpand(data)) {
 			this.#expanded = !this.#expanded;
 			this.#builder.setExpanded(this.#expanded);
-			for (const columns of this.#variantCache.values()) {
-				for (const column of columns) column.builder.setExpanded(this.#expanded);
-			}
+			for (const column of this.#columns) column.builder?.setExpanded(this.#expanded);
+			this.#scrollToSelection = true;
 			this.deps.requestRender();
 			return;
 		}
-		if (matchesSelectUp(data)) {
-			this.#moveVertical(-1);
-			return;
-		}
-		if (matchesSelectDown(data)) {
-			this.#moveVertical(1);
-			return;
-		}
+		if (matchesSelectUp(data)) { this.#moveVertical(-1); return; }
+		if (matchesSelectDown(data)) { this.#moveVertical(1); return; }
 		if (matchesKey(data, "left")) {
 			if (this.#activeVariant > 0) this.#slideTo(this.#activeVariant - 1);
 			else this.#move(-1, target => target.isUserTurn);
@@ -281,12 +327,11 @@ export class RewindSelectorComponent implements Component {
 		}
 		if (matchesKey(data, "right")) {
 			const columns = this.#stripColumns();
+			if (this.#branchesLoading) return;
 			if (this.#activeVariant < columns.length) {
 				this.#siblingSelected = 0;
 				this.#slideTo(this.#activeVariant + 1);
-			} else if (this.#activeVariant === 0) {
-				this.#move(1, target => target.isUserTurn);
-			}
+			} else if (this.#activeVariant === 0) this.#move(1, target => target.isUserTurn);
 			return;
 		}
 		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
@@ -294,39 +339,43 @@ export class RewindSelectorComponent implements Component {
 			if (target) this.deps.onSelect(target.entryId);
 			return;
 		}
-		// Page/home/end/shift+arrow scrolling without moving the selection.
-		if (this.#scrollView.handleScrollKey(data)) {
-			this.deps.requestRender();
-		}
+		const viewport = this.#activeViewport();
+		let changed = false;
+		if (matchesKey(data, "home")) changed = viewport.home();
+		else if (matchesKey(data, "end")) changed = viewport.end();
+		else if (matchesKey(data, "pageUp")) changed = viewport.scroll(-Math.max(1, this.#height - 1));
+		else if (matchesKey(data, "pageDown")) changed = viewport.scroll(Math.max(1, this.#height - 1));
+		else if (matchesKey(data, "shift+up")) changed = viewport.scroll(-5);
+		else if (matchesKey(data, "shift+down")) changed = viewport.scroll(5);
+		if (changed) this.deps.requestRender();
 	}
 
-	/** Up/Down: step within the active column; leaving a sibling column's top exits the strip. */
 	#moveVertical(delta: -1 | 1): void {
-		if (this.#activeVariant > 0) {
-			const targets = this.#stripColumns()[this.#activeVariant - 1]?.targets ?? [];
-			let index = this.#siblingSelected + delta;
-			while (index >= 0 && index < targets.length && this.#siblingVisible?.[index] === false) index += delta;
-			if (index >= 0 && index < targets.length) {
-				this.#siblingSelected = index;
-				this.#scrollToSelection = true;
-				this.deps.requestRender();
-			} else if (delta === -1) {
-				// Off the top of an alternate: return to the current path above the fork.
-				this.#activeVariant = 0;
-				this.#siblingSelected = 0;
-				this.#stopSlide();
-				this.#move(-1, () => true);
-			}
-			return;
+		if (this.#activeVariant === 0) { this.#move(delta, () => true); return; }
+		const column = this.#stripColumns()[this.#activeVariant - 1]!;
+		const { builder, targets } = this.#materialize(column);
+		if (column.loading || column.error) return;
+		column.viewport.configure(builder.container.children, targets[this.#siblingSelected], this.#columnWidth(), this.#height);
+		let index = this.#siblingSelected + delta;
+		while (index >= 0 && index < targets.length && !column.viewport.visible(targets[index]!)) index += delta;
+		if (index >= 0 && index < targets.length) {
+			this.#siblingSelected = index;
+			this.#scrollToSelection = true;
+			this.deps.requestRender();
+		} else if (delta === -1) {
+			this.#activeVariant = 0;
+			this.#siblingSelected = 0;
+			this.#stopSlide();
+			this.#move(-1, () => true);
 		}
-		this.#move(delta, () => true);
 	}
 
-	/** Step the main selection by `delta` to the nearest visible target passing `accept`. */
 	#move(delta: -1 | 1, accept: (target: OutlineTarget) => boolean): void {
+		this.#viewport.configure(this.#builder.container.children, this.#targets[this.#selected], this.#width - 1, this.#height);
 		let index = this.#selected + delta;
 		while (index >= 0 && index < this.#targets.length) {
-			if (this.#isMainSelectable(index) && accept(this.#targets[index]!)) {
+			const target = this.#targets[index]!;
+			if (accept(target) && this.#viewport.visible(target)) {
 				this.#selected = index;
 				this.#activeVariant = 0;
 				this.#siblingSelected = 0;
@@ -339,188 +388,138 @@ export class RewindSelectorComponent implements Component {
 		}
 	}
 
-	#isMainSelectable(index: number): boolean {
-		return this.#mainVisible?.[index] ?? true;
-	}
-
-	// ========================================================================
-	// Render
-	// ========================================================================
-
 	render(width: number): readonly string[] {
-		const termHeight = process.stdout.rows || 40;
-		// ScrollView reserves the last column for the scrollbar; the outline
-		// consumes two columns each side ("┆ " / " ┆"), unselected rows a
-		// matching two-column left gutter so blocks never shift while stepping.
+		if (this.#loading) {
+			const height = Math.max(CHROME_ROWS, process.stdout.rows || 40);
+			return [
+				...this.#border.render(width),
+				" Rewind — indexing source messages",
+				...this.#border.render(width),
+				fit(this.#sourceCount === 0 ? " Collecting source messages; Esc cancels" : " " + this.#indexed + "/" + this.#sourceCount + " sources indexed; Esc cancels", width),
+				...Array.from({ length: Math.max(0, height - 5) }, () => ""),
+				...this.#border.render(width),
+			];
+		}
+		if (width !== this.#width || this.#height !== Math.max(3, (process.stdout.rows || 40) - CHROME_ROWS)) this.#scrollToSelection = true;
+		this.#width = width;
+		this.#height = Math.max(3, (process.stdout.rows || 40) - CHROME_ROWS);
 		const contentWidth = Math.max(1, width - 1);
 		const children = this.#builder.container.children;
-		const mainInner = Math.max(10, contentWidth - 4);
-		const childRows = this.#rowCache.rows(children, mainInner);
-
-		this.#mainVisible = outlineVisibility(childRows, this.#targets);
-		if (!this.#isMainSelectable(this.#selected)) {
-			// The current target collapsed (e.g. expansion toggle): rest on the
-			// nearest visible one above, falling back to the nearest below.
+		this.#viewport.configure(children, this.#targets[this.#selected], contentWidth, this.#height);
+		if (this.#targets.length > 0 && !this.#viewport.visible(this.#targets[this.#selected]!)) {
 			let above = this.#selected - 1;
-			while (above >= 0 && !this.#isMainSelectable(above)) above--;
+			while (above >= 0 && !this.#viewport.visible(this.#targets[above]!)) above--;
 			let below = this.#selected + 1;
-			while (below < this.#targets.length && !this.#isMainSelectable(below)) below++;
+			while (above < 0 && below < this.#targets.length && !this.#viewport.visible(this.#targets[below]!)) below++;
 			if (above >= 0) this.#selected = above;
 			else if (below < this.#targets.length) this.#selected = below;
-			this.#activeVariant = 0;
-			this.#siblingSelected = 0;
+			this.#viewport.configure(children, this.#targets[this.#selected], contentWidth, this.#height);
 		}
-
 		const columns = this.#stripColumns();
-		const composed =
-			columns.length > 0
-				? this.#renderStrip(childRows, columns, contentWidth)
-				: composeOutlineColumn(
-						childRows,
-						0,
-						children.length,
-						this.#targets,
-						this.#selected,
-						contentWidth,
-						undefined,
-					);
-		const lines = composed.lines;
-
-		const viewportHeight = Math.max(3, termHeight - CHROME_ROWS);
-		this.#scrollView.setLines(lines);
-		this.#scrollView.setHeight(viewportHeight);
-		if (this.#scrollToSelection && composed.selStart >= 0) {
-			const offset = this.#scrollView.getScrollOffset();
-			const top = Math.max(0, composed.selStart - 1);
-			const bottom = Math.min(lines.length, composed.selEnd + 1);
-			if (top < offset) this.#scrollView.setScrollOffset(top);
-			else if (bottom > offset + viewportHeight) this.#scrollView.setScrollOffset(bottom - viewportHeight);
-			this.#scrollToSelection = false;
+		let lines: string[];
+		if (columns.length > 0) lines = this.#renderStrip(columns, contentWidth);
+		else {
+			if (this.#scrollToSelection) this.#viewport.follow();
+			lines = this.#viewport.render();
+			this.#builder.releaseOutside(this.#viewport.finish());
 		}
-
-		const output: string[] = [];
+		this.#scrollToSelection = false;
+		const viewport = this.#activeViewport();
+		const output: string[] = [...this.#border.render(width)];
+		output.push(` ${theme.icon.rewind} ${theme.bold("Rewind")}${theme.sep.dot}${theme.fg("dim", "pick the point to continue from")}`);
 		output.push(...this.#border.render(width));
-		output.push(
-			` ${theme.icon.rewind} ${theme.bold("Rewind")}${theme.sep.dot}${theme.fg("dim", "pick the point to continue from")}`,
-		);
-		output.push(...this.#border.render(width));
-		output.push(...this.#scrollView.render(width));
+		for (let row = 0; row < this.#height; row++) {
+			const rail = row === 0 && viewport.moreAbove ? "↑" : row === this.#height - 1 && viewport.moreBelow ? "↓" : " ";
+			output.push(fit(lines[row] ?? "", contentWidth) + theme.fg("dim", rail));
+		}
 		const position = this.#targets.length > 0 ? `${this.#selected + 1}/${this.#targets.length}  ` : "";
-		const lateral = columns.length > 0 ? "←/→ branches" : "←/→ user turns";
+		const lateral = this.#branchesLoading ? "loading branches" : this.#branchError ? "branch error: " + this.#branchError : columns.length > 0 ? "←/→ branches" : "←/→ user turns";
 		output.push(` ${theme.fg("dim", `${position}↑/↓ step  ${lateral}  enter rewind  ctrl+o expand  esc cancel`)}`);
 		output.push(...this.#border.render(width));
 		return output;
 	}
 
-	/**
-	 * Shared prefix at full width, then the divergence as a camera-positioned
-	 * strip of half-width branch columns (current path first, siblings after).
-	 */
-	#renderStrip(mainRows: (readonly string[])[], columns: SiblingColumn[], contentWidth: number): ComposedColumn {
+	#columnWidth(): number { return Math.max(24, Math.floor((this.#width - 1 - STRIP_GAP) / 2)); }
+
+	#renderStrip(columns: SiblingColumn[], contentWidth: number): string[] {
 		const anchor = this.#targets[this.#selected]!;
-		const colWidth = Math.max(24, Math.floor((contentWidth - STRIP_GAP) / 2));
-		const colInner = Math.max(10, colWidth - 4);
+		const colWidth = this.#columnWidth();
 		const count = columns.length + 1;
-
-		// Shared history above the fork, full width, never outlined.
-		const prefix = composeOutlineColumn(mainRows, 0, anchor.start, [], -1, contentWidth, undefined);
-
-		// Column 0: the current path from the fork down, re-rendered at column width.
-		const suffixRows = this.#rowCache.rows(this.#builder.container.children.slice(anchor.start), colInner);
-		const suffixTargets = this.#targets.slice(this.#selected).map(target => ({
-			...target,
-			start: target.start - anchor.start,
-			end: target.end - anchor.start,
-		}));
-		const composedColumns: ComposedColumn[] = [
-			composeOutlineColumn(
-				suffixRows,
-				0,
-				suffixRows.length,
-				suffixTargets,
-				this.#activeVariant === 0 ? 0 : -1,
-				colWidth,
-				this.#columnHeader(0, count, "current", colWidth),
-			),
-		];
-		for (let index = 0; index < columns.length; index++) {
-			const column = columns[index]!;
-			const rows = this.#rowCache.rows(column.builder.container.children, colInner);
-			if (this.#activeVariant === index + 1) {
-				this.#siblingVisible = outlineVisibility(rows, column.targets);
-			}
-			composedColumns.push(
-				composeOutlineColumn(
-					rows,
-					0,
-					rows.length,
-					column.targets,
-					this.#activeVariant === index + 1 ? this.#siblingSelected : -1,
-					colWidth,
-					this.#columnHeader(index + 1, count, column.label, colWidth),
-				),
-			);
-		}
-
-		// Camera over the strip: keep the active (possibly mid-slide) column centered.
 		const stride = colWidth + STRIP_GAP;
-		const totalWidth = count * colWidth + (count - 1) * STRIP_GAP;
-		const cameraAt = (position: number) =>
-			Math.max(
-				0,
-				Math.min(position * stride - (contentWidth - colWidth) / 2, Math.max(0, totalWidth - contentWidth)),
-			);
-		const position = this.#slidePosition(Date.now());
-		const camera = cameraAt(position);
-
-		const height = Math.max(...composedColumns.map(column => column.lines.length));
-		const lines = prefix.lines;
-		// With more branches than the window fits, a dot rail tracks the active
-		// column and dim ellipses flag content beyond the visible edge.
-		// Edge markers follow the slide's destination, not the eased camera,
-		// so they flip in step with the dot rail.
+		const totalWidth = count * stride - STRIP_GAP;
+		const cameraAt = (position: number) => Math.max(0, Math.min(position * stride - (contentWidth - colWidth) / 2, Math.max(0, totalWidth - contentWidth)));
+		const camera = cameraAt(this.#slidePosition(Date.now()));
+		const railRows = count > 2 ? 2 : 0;
+		const capacity = Math.max(1, this.#height - railRows - 2);
+		const rendered = new Map<number, string[]>();
+		const retained = new Set<Component>();
+		let height = 0;
+		for (let index = 0; index < count; index++) {
+			const x = index * stride - camera;
+			if ((x >= contentWidth || x + colWidth <= 0) && index !== this.#activeVariant) continue;
+			let viewport: OutlineViewport;
+			let builder: ChatTranscriptBuilder;
+			let target: OutlineTarget | undefined;
+			let label: string;
+			if (index === 0) {
+				viewport = this.#stripViewport;
+				builder = this.#builder;
+				target = this.#activeVariant === 0 ? anchor : undefined;
+				label = "current";
+			} else {
+				const column = columns[index - 1]!;
+				const materialized = this.#materialize(column);
+				if (column.loading || column.error) {
+					const rows = [...this.#columnHeader(index, count, column.label, colWidth), fit(column.error ?? "Indexing branch sources…", colWidth)];
+					rendered.set(index, rows);
+					height = Math.max(height, rows.length);
+					continue;
+				}
+				builder = materialized.builder;
+				viewport = column.viewport;
+				target = this.#activeVariant === index ? materialized.targets[this.#siblingSelected] : undefined;
+				label = column.label;
+			}
+			viewport.configure(builder.container.children, target, colWidth, capacity, index === 0 ? anchor.start : 0);
+			if (this.#scrollToSelection && index === this.#activeVariant) viewport.follow();
+			const rows = [...this.#columnHeader(index, count, label, colWidth), ...viewport.render()];
+			height = Math.max(height, rows.length);
+			rendered.set(index, rows);
+			const used = viewport.finish();
+			if (index === 0) for (const child of used) retained.add(child);
+			else builder.releaseOutside(used);
+		}
+		for (let index = 0; index < columns.length; index++) {
+			if (!rendered.has(index + 1)) columns[index]!.builder?.releaseOutside(NO_COMPONENTS);
+		}
+		this.#prefixViewport.configure(this.#builder.container.children, undefined, contentWidth, Math.max(0, this.#height - railRows - height), 0, anchor.start);
+		this.#prefixViewport.end();
+		const lines = this.#prefixViewport.render();
+		for (const child of this.#prefixViewport.finish()) retained.add(child);
+		this.#builder.releaseOutside(retained);
 		if (count > 2) {
 			const settled = cameraAt(this.#activeVariant);
-			lines.push(
-				positionRail(
-					count,
-					this.#activeVariant,
-					settled > 0.5,
-					settled + contentWidth < totalWidth - 0.5,
-					contentWidth,
-				),
-				"",
-			);
+			lines.push(positionRail(count, this.#activeVariant, settled > 0.5, settled + contentWidth < totalWidth - 0.5, contentWidth), "");
 		}
-		const active = composedColumns[this.#activeVariant]!;
-		const selStart = active.selStart >= 0 ? lines.length + active.selStart : -1;
-		const selEnd = active.selEnd >= 0 ? lines.length + active.selEnd : -1;
 		for (let row = 0; row < height; row++) {
 			let line = "";
 			let filled = 0;
-			for (let index = 0; index < count; index++) {
-				const x0 = index * stride - camera;
-				const x1 = x0 + colWidth;
-				const visible0 = Math.max(0, x0);
-				const visible1 = Math.min(contentWidth, x1);
-				if (visible1 <= visible0) continue;
-				const source = fit(composedColumns[index]!.lines[row] ?? "", colWidth);
-				const slice = sliceByColumn(source, visible0 - x0, visible1 - visible0, true);
-				line += padding(Math.max(0, visible0 - filled)) + fit(slice, visible1 - visible0);
-				filled = visible1;
+			for (const [index, rows] of rendered) {
+				const x = index * stride - camera;
+				const start = Math.max(0, x);
+				const end = Math.min(contentWidth, x + colWidth);
+				if (end <= start) continue;
+				const slice = sliceByColumn(fit(rows[row] ?? "", colWidth), start - x, end - start, true);
+				line += padding(Math.max(0, start - filled)) + fit(slice, end - start);
+				filled = end;
 			}
 			lines.push(line);
 		}
-		return { lines, selStart, selEnd };
+		return lines;
 	}
 
-	/** Two caption rows leading a strip column: `⎇ i/n · label` plus a spacer. */
 	#columnHeader(index: number, count: number, label: string, columnWidth: number): string[] {
-		const caption = truncateToWidth(
-			`${theme.icon.branch} ${index + 1}/${count} ${theme.sep.dot} ${label}`,
-			columnWidth - 2,
-		);
-		const active = index === this.#activeVariant;
-		return [` ${theme.fg(active ? "accent" : "dim", caption)}`, ""];
+		const caption = truncateToWidth(`${theme.icon.branch} ${index + 1}/${count} ${theme.sep.dot} ${label}`, columnWidth - 2);
+		return [` ${theme.fg(index === this.#activeVariant ? "accent" : "dim", caption)}`, ""];
 	}
 }

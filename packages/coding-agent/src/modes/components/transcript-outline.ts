@@ -71,6 +71,11 @@ export function stripPromptZones(rows: readonly string[]): readonly string[] {
 export class OutlineRowCache {
 	#stripped = new WeakMap<Component, { rows: readonly string[]; stripped: readonly string[] }>();
 
+	/** Drop rows when a lazy transcript releases the corresponding component. */
+	forget(child: Component): void {
+		this.#stripped.delete(child);
+	}
+
 	rows(children: readonly Component[], width: number): Array<readonly string[]> {
 		const columns: Array<readonly string[]> = [];
 		for (const child of children) {
@@ -98,35 +103,38 @@ export class OutlineRowCache {
  */
 export function appendOutlineEntries(builder: ChatTranscriptBuilder, entries: SessionMessageEntry[]): OutlineTarget[] {
 	const targets: OutlineTarget[] = [];
-	for (const entry of entries) {
-		const children = builder.container.children;
-		const before = children.length;
-		builder.append([entry]);
-		const after = children.length;
-		let start = before;
-		while (start < after && isUsageRowBlock(children[start]!)) {
-			const previous = targets.at(-1);
-			if (previous && previous.end === start) previous.end = start + 1;
-			start++;
-		}
-		const previous = targets.at(-1);
-		if (entry.message.role === "toolResult" && previous) {
-			previous.entryId = entry.id;
-			previous.entries.push(entry);
-			if (after > previous.end) previous.end = after;
-			continue;
-		}
-		if (start >= after) continue;
-		targets.push({
-			entryId: entry.id,
-			turnId: entry.id,
-			isUserTurn: entry.message.role === "user" && userMessageHasText(entry.message),
-			start,
-			end: after,
-			entries: [entry],
-		});
-	}
+	for (const entry of entries) appendOutlineEntry(builder, entry, targets);
 	return targets;
+}
+
+/** Append one source while retaining target folding across cooperative yields. */
+export function appendOutlineEntry(builder: ChatTranscriptBuilder, entry: SessionMessageEntry, targets: OutlineTarget[]): void {
+	const children = builder.container.children;
+	const before = children.length;
+	builder.append([entry]);
+	const after = children.length;
+	let start = before;
+	while (start < after && isUsageRowBlock(children[start]!)) {
+		const previous = targets.at(-1);
+		if (previous && previous.end === start) previous.end = start + 1;
+		start++;
+	}
+	const previous = targets.at(-1);
+	if (entry.message.role === "toolResult" && previous) {
+		previous.entryId = entry.id;
+		previous.entries.push(entry);
+		if (after > previous.end) previous.end = after;
+		return;
+	}
+	if (start >= after) return;
+	targets.push({
+		entryId: entry.id,
+		turnId: entry.id,
+		isUserTurn: entry.message.role === "user" && userMessageHasText(entry.message),
+		start,
+		end: after,
+		entries: [entry],
+	});
 }
 
 /** Per-target "renders at least one non-blank row" flags at the given rows. */
@@ -248,3 +256,190 @@ export function userMessageHasText(message: SessionMessageEntry["message"]): boo
 	if (typeof message.content === "string") return message.content.trim().length > 0;
 	return message.content.some(block => block.type === "text" && block.text.trim().length > 0);
 }
+
+/**
+ * Row-demand viewport over the builder's source-owned children. The anchor is a
+ * child and an intra-child row, never an estimated full-transcript row number.
+ * Only traversed children are rendered; the rail reports more history rather
+ * than inventing a global row count before cold history has been measured.
+ */
+export class OutlineViewport {
+	#cache = new OutlineRowCache();
+	#retained = new Set<Component>();
+	#touched = new Set<Component>();
+	#shown = new Set<Component>();
+	#rows = new Map<number, readonly string[]>();
+	#children: readonly Component[] = [];
+	#target: OutlineTarget | undefined;
+	#from = 0;
+	#to = 0;
+	#width = 80;
+	#height = 1;
+	#child = 0;
+	#row = 0;
+	#lastEnd = 0;
+	#initialized = false;
+	moreAbove = false;
+	moreBelow = false;
+
+	configure(children: readonly Component[], target: OutlineTarget | undefined, width: number, height: number,
+		from = 0, to = children.length): void {
+		this.#children = children;
+		this.#target = target;
+		this.#width = width;
+		this.#height = Math.max(0, height);
+		this.#from = from;
+		this.#to = to;
+		this.#child = Math.max(from, Math.min(this.#child, to));
+		this.#rows.clear();
+		this.#touched.clear();
+	}
+
+	/** Examine a candidate on demand; invisible targets do not become stops. */
+	visible(target: OutlineTarget): boolean {
+		for (let child = target.start; child < target.end; child++) {
+			if (this.#raw(child).some(row => /\S/.test(row))) return true;
+		}
+		return false;
+	}
+
+	#raw(index: number): readonly string[] {
+		const child = this.#children[index];
+		if (!child) return [];
+		this.#touched.add(child);
+		return this.#cache.rows([child], Math.max(10, this.#width - 4))[0]!;
+	}
+
+	#unit(index: number): number {
+		const target = this.#target;
+		return target && index >= target.start && index < target.end ? target.start : index;
+	}
+
+	#next(index: number): number {
+		return index === this.#target?.start ? this.#target.end : index + 1;
+	}
+
+	#block(index: number): readonly string[] {
+		const cached = this.#rows.get(index);
+		if (cached) return cached;
+		let rows: string[];
+		if (index === this.#target?.start) {
+			const source: string[] = [];
+			for (let child = index; child < this.#target.end; child++) source.push(...this.#raw(child));
+			let head = 0;
+			let tail = source.length;
+			while (head < tail && !/\S/.test(source[head]!)) head++;
+			while (tail > head && !/\S/.test(source[tail - 1]!)) tail--;
+			rows = source.slice(0, head);
+			if (head < tail) rows.push(...outlineRows(source.slice(head, tail), Math.max(10, this.#width - 4)));
+			rows.push(...source.slice(tail));
+		} else {
+			rows = this.#raw(index).map(row => row ? `  ${row}` : row);
+		}
+		this.#rows.set(index, rows);
+		return rows;
+	}
+
+	#forward(amount: number): void {
+		while (this.#child < this.#to) {
+			this.#child = this.#unit(this.#child);
+			const length = this.#block(this.#child).length;
+			const remaining = Math.max(0, length - this.#row);
+			if (amount < remaining) { this.#row += amount; return; }
+			amount -= remaining;
+			this.#child = this.#next(this.#child);
+			this.#row = 0;
+			if (amount === 0 && this.#child < this.#to && this.#block(this.#child).length > 0) return;
+		}
+	}
+
+	#backward(amount: number): void {
+		while (amount > 0) {
+			const within = Math.min(amount, this.#row);
+			this.#row -= within;
+			amount -= within;
+			if (amount === 0 || this.#child <= this.#from) return;
+			this.#child = this.#unit(this.#child - 1);
+			this.#row = this.#block(this.#child).length;
+		}
+	}
+
+	/** Follow the selected source without traversing unrelated preceding history. */
+	follow(): void {
+		const target = this.#target;
+		if (!target) return;
+		if (this.#initialized && target.start >= this.#child && target.end < this.#lastEnd) return;
+		this.#child = target.start;
+		this.#row = this.#block(target.start).length;
+		this.#backward(this.#height);
+		this.#initialized = true;
+	}
+
+	home(): boolean {
+		const changed = this.#child !== this.#from || this.#row !== 0;
+		this.#child = this.#from;
+		this.#row = 0;
+		this.#initialized = true;
+		return changed;
+	}
+
+	end(): boolean {
+		const child = this.#child;
+		const row = this.#row;
+		this.#child = this.#to;
+		this.#row = 0;
+		this.#backward(this.#height);
+		this.#initialized = true;
+		return child !== this.#child || row !== this.#row;
+	}
+
+	scroll(delta: number): boolean {
+		const child = this.#child;
+		const row = this.#row;
+		if (delta > 0) this.#forward(delta);
+		else this.#backward(-delta);
+		// Clamp against the actual trailing rows, not a guessed transcript size.
+		const available = this.#collect().length;
+		if (available < this.#height) this.#backward(this.#height - available);
+		this.#initialized = true;
+		return child !== this.#child || row !== this.#row;
+	}
+
+	#collect(): string[] {
+		const lines: string[] = [];
+		this.#shown.clear();
+		let child = this.#unit(this.#child);
+		let row = this.#row;
+		while (child < this.#to && lines.length < this.#height) {
+			const block = this.#block(child);
+			const count = Math.max(0, Math.min(block.length - row, this.#height - lines.length));
+			if (count > 0) {
+				for (let index = child; index < this.#next(child); index++) this.#shown.add(this.#children[index]!);
+			}
+			for (let i = 0; i < count; i++) lines.push(block[row + i]!);
+			row += count;
+			if (row < block.length) break;
+			child = this.#next(child);
+			row = 0;
+		}
+		this.#lastEnd = child;
+		this.moreAbove = this.#child > this.#from || this.#row > 0;
+		this.moreBelow = child < this.#to;
+		return lines;
+	}
+
+	render(): string[] {
+		if (!this.#initialized) this.home();
+		return this.#collect();
+	}
+
+	/** Release candidate probes and offscreen rows, retaining only the painted units. */
+	finish(): ReadonlySet<Component> {
+		for (const child of this.#retained) if (!this.#shown.has(child)) this.#cache.forget(child);
+		for (const child of this.#touched) if (!this.#shown.has(child)) this.#cache.forget(child);
+		this.#retained = new Set(this.#shown);
+		this.#rows.clear();
+		return this.#retained;
+	}
+}
+
