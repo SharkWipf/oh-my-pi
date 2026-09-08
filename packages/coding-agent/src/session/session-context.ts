@@ -307,6 +307,7 @@ export interface SessionContextSourceInventory {
 	orders: ReadonlyMap<string, number>;
 	total: number;
 }
+
 /** Render a resolved chronological path with optional already-folded branch controls. */
 export function buildSessionContextFromPath(
 	path: SessionEntry[],

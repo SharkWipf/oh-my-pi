@@ -1,6 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, ImageContent, Message, Model, Usage, UsageReport } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, OriginalSubmission, Message, Model, Usage, UsageReport } from "@oh-my-pi/pi-ai";
 import type { Component, Container, EditorTheme, Loader, Spacer, Text, TUI } from "@oh-my-pi/pi-tui";
 import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
@@ -53,6 +53,8 @@ export type CompactionQueuedMessage = {
 
 export type SubmittedUserInput = {
 	text: string;
+	originalSubmission?: OriginalSubmission;
+	compactionOverride?: "keep" | "exclude";
 	images?: ImageContent[];
 	imageLinks?: (string | undefined)[];
 	customType?: string;

@@ -1794,12 +1794,12 @@ export class SessionMaintenance {
 	/**
 	 * Local pre-compaction context for a snapcompact preparation, measured on the
 	 * exact same non-message overhead and tokenizer as
-	 * {@link #projectSnapcompactContextTokens}: fixed overhead + the region that
-	 * would be archived (`messagesToSummarize` + `turnPrefixMessages`) + the kept
-	 * tail (`recentMessages`). Comparing the projection against this
-	 * self-consistent baseline isolates the single thing snapcompact changes —
-	 * the archived region becomes an imaged summary — so a result whose frames
-	 * cost more tokens than the text they replace is rejected, while genuine
+	 * {@link #projectSnapcompactContextTokens}: fixed overhead + the live prior
+	 * summary/archive + the newly archived region (`messagesToSummarize` +
+	 * `turnPrefixMessages`) + the kept tail (`recentMessages`). Comparing the
+	 * projection against this baseline isolates what snapcompact changes —
+	 * the prior archive and fresh region become a new imaged summary — so an
+	 * inflating result is rejected, while genuine
 	 * reductions are not. Recomputed from the live messages rather than
 	 * `preparation.tokensBefore`, which carries only provider usage (zero for
 	 * imported sessions with no usage metadata, or a deflated figure behind a
@@ -1815,6 +1815,8 @@ export class SessionMaintenance {
 	#projectPreSnapcompactContextTokens(preparation: CompactionPreparation): number {
 		const opts = { excludeEncryptedReasoning: true } as const;
 		let tokens = computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer);
+		const previousSummary = this.#host.messages().find(message => message.role === "compactionSummary");
+		if (previousSummary) tokens += this.#tokenizer.countMessage(previousSummary, opts);
 		tokens += this.#tokenizer.countMessages(preparation.messagesToSummarize, opts);
 		tokens += this.#tokenizer.countMessages(preparation.turnPrefixMessages, opts);
 		tokens += this.#tokenizer.countMessages(preparation.recentMessages, opts);

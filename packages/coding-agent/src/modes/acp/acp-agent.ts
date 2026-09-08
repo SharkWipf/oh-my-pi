@@ -854,6 +854,7 @@ export class AcpAgent implements Agent {
 				.filter(block => block.type === "text")
 				.map(block => block.text)
 				.join("\n\n");
+
 			const converted = this.#convertPromptBlocks(params.prompt);
 			const pendingPrompt = Promise.withResolvers<PromptResponse>();
 			record.promptTurn = {
@@ -871,6 +872,7 @@ export class AcpAgent implements Agent {
 			record.promptTurn.unsubscribe = record.session.subscribe(event => {
 				this.#trackPromptEvent(record, event);
 			});
+			const promptTurn = record.promptTurn;
 
 			// Autonomous turns stream without an owning promptTurn, so the implicit-cancel
 			// guard above cannot fire and a client prompt lands on AgentSession's busy
@@ -976,7 +978,7 @@ export class AcpAgent implements Agent {
 			return;
 		}
 
-		const builtinResult = await executeAcpBuiltinSlashCommand(text, {
+		const builtinResult = await executeAcpBuiltinSlashCommand(originalText, {
 			session: record.session,
 			sessionManager: record.session.sessionManager,
 			settings: record.session.settings,
