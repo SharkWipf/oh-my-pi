@@ -37,10 +37,17 @@ describe("Tokenizer", () => {
 		const tokenizer = new Tokenizer();
 		const text = "A durable custom source.";
 		const scalar = createCustomMessage("notice", text, false, undefined, "2026-09-07", "agent");
-		const illustrated = createCustomMessage("manual", [
-			{ type: "text", text },
-			{ type: "image", data: "cG5n", mimeType: "image/png", detail: "high" },
-		], true, undefined, "2026-09-07", "user");
+		const illustrated = createCustomMessage(
+			"manual",
+			[
+				{ type: "text", text },
+				{ type: "image", data: "cG5n", mimeType: "image/png", detail: "high" },
+			],
+			true,
+			undefined,
+			"2026-09-07",
+			"user",
+		);
 		expect(tokenizer.countMessage(scalar)).toBe(6);
 		expect(tokenizer.countMessage(illustrated)).toBe(1206);
 		expect(tokenizer.countMessage(illustrated, { excludeEncryptedReasoning: true })).toBe(1206);
@@ -71,10 +78,15 @@ describe("Tokenizer", () => {
 	test("charges a metadata-only computer screenshot without charging content mirrors again", () => {
 		const tokenizer = new Tokenizer();
 		const screenshot: ToolResultMessage = {
-			role: "toolResult", toolCallId: "call_screen", toolName: "computer",
-			content: [], isError: false, timestamp: 0,
+			role: "toolResult",
+			toolCallId: "call_screen",
+			toolName: "computer",
+			content: [],
+			isError: false,
+			timestamp: 0,
 			providerMetadata: {
-				type: "computer", screenshot: { type: "computer_screenshot", file_id: "file-screen" },
+				type: "computer",
+				screenshot: { type: "computer_screenshot", file_id: "file-screen" },
 				acknowledgedSafetyChecks: [],
 			},
 		};
@@ -83,7 +95,9 @@ describe("Tokenizer", () => {
 		const image: ImageContent = { type: "image", data: "cG5n", mimeType: "image/png" };
 		// The computer-result serializer emits its one screenshot instead of content images.
 		expect(tokenizer.countMessage({ ...screenshot, content: [image, { ...image }] })).toBe(1200);
-		expect(tokenizer.countMessage({ ...screenshot, providerMetadata: undefined, content: [image, { ...image }] })).toBe(2400);
+		expect(
+			tokenizer.countMessage({ ...screenshot, providerMetadata: undefined, content: [image, { ...image }] }),
+		).toBe(2400);
 	});
 
 	test("prices current native logical text, computer metadata and images without counting opaque snapshots", () => {
@@ -92,21 +106,55 @@ describe("Tokenizer", () => {
 		const checks = [{ id: "check", code: "reason", message: "visible safety" }];
 		const search = { type: "search", queries: ["visible query"] };
 		const items = [
-			{ type: "code_interpreter_call", code: "visible code", outputs: [{ type: "logs", logs: "visible log" }, { type: "image", url: "data:image/png;base64,cG5n" }], encrypted_content: "opaque".repeat(1000) },
+			{
+				type: "code_interpreter_call",
+				code: "visible code",
+				outputs: [
+					{ type: "logs", logs: "visible log" },
+					{ type: "image", url: "data:image/png;base64,cG5n" },
+				],
+				encrypted_content: "opaque".repeat(1000),
+			},
 			{ type: "web_search_call", action: search, signature: "opaque".repeat(1000) },
 			{ type: "unknown_extension", text: "opaque".repeat(1000) },
 		];
 		const message: AssistantMessage = {
-			role: "assistant", provider: "openai", api: "openai-responses", model: "fixture", timestamp: 0, stopReason: "stop",
-			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-			content: [{ type: "toolCall", id: "call", name: "computer", arguments: {}, providerMetadata: { type: "computer", providerItemId: "item", actions, pendingSafetyChecks: checks } }],
+			role: "assistant",
+			provider: "openai",
+			api: "openai-responses",
+			model: "fixture",
+			timestamp: 0,
+			stopReason: "stop",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			content: [
+				{
+					type: "toolCall",
+					id: "call",
+					name: "computer",
+					arguments: {},
+					providerMetadata: { type: "computer", providerItemId: "item", actions, pendingSafetyChecks: checks },
+				},
+			],
 			providerPayload: createOpenAIResponsesHistoryPayload("openai", items),
 		};
 		const metadata = ["computer", "{}", JSON.stringify(actions), JSON.stringify(checks)];
-		const expected = tokenizer.countTokens(["visible code", "visible log", JSON.stringify(search), ...metadata]) + 1200;
+		const expected =
+			tokenizer.countTokens(["visible code", "visible log", JSON.stringify(search), ...metadata]) + 1200;
 		expect(tokenizer.countMessage(message)).toBe(expected);
 		expect(tokenizer.countMessage(message, { excludeEncryptedReasoning: true })).toBe(expected);
-		expect(tokenizer.countMessage({ ...message, providerPayload: createOpenAIResponsesHistoryPayload("openai", items, false) })).toBe(tokenizer.countTokens(metadata));
+		expect(
+			tokenizer.countMessage({
+				...message,
+				providerPayload: createOpenAIResponsesHistoryPayload("openai", items, false),
+			}),
+		).toBe(tokenizer.countTokens(metadata));
 	});
 
 	test("charges normalized generated images once and never revives deleted native mirrors after JSON reload", () => {
@@ -114,27 +162,64 @@ describe("Tokenizer", () => {
 		const image: ImageContent = { type: "image", data: "cG5n", mimeType: "image/png" };
 		const text: TextContent = { type: "text", text: "equal source" };
 		const message: AssistantMessage = {
-			role: "assistant", provider: "openai", api: "openai-responses", model: "fixture", timestamp: 0, stopReason: "stop",
-			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+			role: "assistant",
+			provider: "openai",
+			api: "openai-responses",
+			model: "fixture",
+			timestamp: 0,
+			stopReason: "stop",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
 			content: [image, { ...image }, text],
-			providerPayload: createOpenAIResponsesHistoryPayload("openai", [
-				{ type: "image_generation_call", result: image.data }, { type: "image_generation_call", result: image.data },
-				{ type: "message", role: "assistant", content: [{ type: "output_text", text: text.text }] },
-			], true, [{ itemIndex: 0, contentIndex: 0 }, { itemIndex: 1, contentIndex: 1 }, { itemIndex: 2, contentIndex: 2 }]),
+			providerPayload: createOpenAIResponsesHistoryPayload(
+				"openai",
+				[
+					{ type: "image_generation_call", result: image.data },
+					{ type: "image_generation_call", result: image.data },
+					{ type: "message", role: "assistant", content: [{ type: "output_text", text: text.text }] },
+				],
+				true,
+				[
+					{ itemIndex: 0, contentIndex: 0 },
+					{ itemIndex: 1, contentIndex: 1 },
+					{ itemIndex: 2, contentIndex: 2 },
+				],
+			),
 		};
 		expect(tokenizer.countMessage(message)).toBe(2400 + tokenizer.countTokens(text.text));
 		bindMessageSource(message, "source", 0);
 		const payload = message.providerPayload;
-		if (payload?.type !== "openaiResponsesHistory" || !payload.origins) throw new Error("Expected captured source origins");
-		const rewritten: AssistantMessage = JSON.parse(JSON.stringify({
-			...message, content: [image, text], providerPayload: {
-				...payload, origins: remapNativeItemOrigins(payload.origins, [{ entryId: "source", blocks: [
-					{ oldBlockIndex: 0, newBlockIndex: null }, { oldBlockIndex: 1, newBlockIndex: 0 }, { oldBlockIndex: 2, newBlockIndex: 1 },
-				] }]),
-			},
-		}));
+		if (payload?.type !== "openaiResponsesHistory" || !payload.origins)
+			throw new Error("Expected captured source origins");
+		const rewritten: AssistantMessage = JSON.parse(
+			JSON.stringify({
+				...message,
+				content: [image, text],
+				providerPayload: {
+					...payload,
+					origins: remapNativeItemOrigins(payload.origins, [
+						{
+							entryId: "source",
+							blocks: [
+								{ oldBlockIndex: 0, newBlockIndex: null },
+								{ oldBlockIndex: 1, newBlockIndex: 0 },
+								{ oldBlockIndex: 2, newBlockIndex: 1 },
+							],
+						},
+					]),
+				},
+			}),
+		);
 		expect(tokenizer.countMessage(rewritten)).toBe(1200 + tokenizer.countTokens(text.text));
-		expect(tokenizer.countMessage(rewritten, { excludeEncryptedReasoning: true })).toBe(1200 + tokenizer.countTokens(text.text));
+		expect(tokenizer.countMessage(rewritten, { excludeEncryptedReasoning: true })).toBe(
+			1200 + tokenizer.countTokens(text.text),
+		);
 	});
 
 	test("defaults to null encoding and byte estimation", () => {
