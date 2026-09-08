@@ -9,7 +9,7 @@
 
 ### Fixed
 
-- Classifier requests now use named boolean categories instead of ordinal bit strings, with complete response validation and unchanged packed v1 saved facts.
+- Classifier requests now use named boolean categories instead of ordinal bit strings, with complete response validation and unchanged packed v1 saved facts. Instructions require every applicable overlapping category and assess each instruction's scope independently.
 - Preservation previews distinguish unavailable model-percentage limits from finite zero and expose source cap blockers; large manual-reset captures use bounded lazy source enumeration.
 - Quarantined classification records remain visibly invalidated after reload without fabricating category labels, and backfill readers skip history before the latest clear boundary.
 - Visible human custom-message journal sources retain manual protection and ordinary raw accounting without being promoted to automatic user classifications or windows.
