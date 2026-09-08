@@ -10,6 +10,10 @@ import {
 	type SessionEntry,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import {
+	buildCompactionV2ReplacementHistory,
+	buildCompactionV2RequestFromBody,
+} from "@oh-my-pi/pi-agent-core/compaction/compaction-v2-streaming";
+import {
 	buildCompactionV2Request,
 	buildOpenAiNativeHistory,
 	CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE,
@@ -37,6 +41,7 @@ import type {
 	UserMessage,
 } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import * as piUtils from "@oh-my-pi/pi-utils";
 
@@ -826,6 +831,107 @@ describe("remote compaction input forwarding", () => {
 });
 
 describe("requestCompactionV2Streaming", () => {
+	test("retains bundled Codex serialized users in the replacement context within budget", async () => {
+		const model = getBundledModel<"openai-codex-responses">("openai-codex", "gpt-5.4");
+		const body = await buildTransformedCodexRequestBody(
+			model,
+			{
+				systemPrompt: ["base instructions", "workspace instructions"],
+				messages: [
+					{ role: "user", content: "older000", timestamp: 1 },
+					{ role: "user", content: [{ type: "text", text: "newer" }], timestamp: 2 },
+				],
+			},
+			{ forceReasoningOff: true, responsesLite: model.useResponsesLite, sessionId: "wire-retention" },
+		);
+		const prefix = JSON.stringify(body.input);
+		const request = buildCompactionV2RequestFromBody(model, body, { retainedMessageBudget: 3 });
+		const compactionItem = { type: "compaction", encrypted_content: "wire-retention" };
+		const result = await requestCompactionV2Streaming(model, "test-key", request, undefined, {
+			preferWebsockets: false,
+			retryWait: async () => {},
+			fetch: async (_input, init) => {
+				const payload = init?.body;
+				const sent = JSON.parse(
+					payload instanceof Uint8Array
+						? new TextDecoder().decode(Bun.zstdDecompressSync(payload))
+						: String(payload),
+				);
+				expect(JSON.stringify(sent.input.slice(0, -1))).toBe(prefix);
+				expect(sent.reasoning.effort).toBe("none");
+				return sseResponse([
+					{ type: "response.output_item.done", item: compactionItem },
+					{ type: "response.done", response: { id: "wire-response" } },
+				]);
+			},
+		});
+		expect(result.replacementHistory).toEqual([
+			{ role: "user", content: [{ type: "input_text", text: "olde" }] },
+			{ role: "user", content: [{ type: "input_text", text: "newer" }] },
+			compactionItem,
+		]);
+		expect(JSON.stringify(body.input)).toBe(prefix);
+	});
+
+	test("prices string and array users equally across exact and partial retention boundaries", () => {
+		const compaction = { type: "compaction", encrypted_content: "budget" };
+		const older = { role: "user", content: "old!" };
+		const stringUser = {
+			type: "message",
+			role: "user",
+			id: "user-id",
+			content: `ABCD${"x".repeat(992)}EFGH`,
+		};
+		const arrayUser = { ...stringUser, content: [{ type: "input_text", text: stringUser.content }] };
+		expect(buildCompactionV2ReplacementHistory([older, stringUser], compaction, 1).replacementHistory).toEqual([
+			{ ...stringUser, content: "ABCD" },
+			compaction,
+		]);
+		expect(buildCompactionV2ReplacementHistory([older, arrayUser], compaction, 1).replacementHistory).toEqual([
+			{ ...arrayUser, content: [{ type: "input_text", text: "ABCD" }] },
+			compaction,
+		]);
+		expect(buildCompactionV2ReplacementHistory([older, stringUser], compaction, 250).replacementHistory).toEqual([
+			stringUser,
+			compaction,
+		]);
+		expect(buildCompactionV2ReplacementHistory([older, arrayUser], compaction, 251).replacementHistory).toEqual([
+			older,
+			arrayUser,
+			compaction,
+		]);
+		expect(
+			buildCompactionV2ReplacementHistory([{ ...stringUser, type: undefined }], compaction, 0).replacementHistory,
+		).toEqual([{ ...stringUser, type: undefined, content: "ABCD" }, compaction]);
+	});
+
+	test("retains image and text blocks only when their combined budget fits", () => {
+		const compaction = { type: "compaction", encrypted_content: "images" };
+		const image = { type: "input_image", image_url: "data:image/png;base64,aW1hZ2U=", detail: "high" };
+		const text = { type: "input_text", text: "ABCD1234" };
+		const user = { role: "user", content: [image, text] };
+		expect(buildCompactionV2ReplacementHistory([user], compaction, 766)).toMatchObject({
+			replacementHistory: [{ ...user, content: [image, { ...text, text: "ABCD" }] }, compaction],
+			retainedImageCount: 1,
+		});
+		expect(buildCompactionV2ReplacementHistory([user], compaction, 2)).toMatchObject({
+			replacementHistory: [{ ...user, content: [text] }, compaction],
+			retainedImageCount: 0,
+		});
+	});
+
+	test("excludes contextual users and non-message wire items in either accepted content shape", () => {
+		const compaction = { type: "compaction", encrypted_content: "filtered" };
+		const user = { role: "user", content: "real user" };
+		const input = [
+			{ role: "user", content: "  <environment_context>workspace" },
+			{ role: "user", content: [{ type: "input_text", text: "<user_instructions>rules" }] },
+			{ role: "developer", content: "instructions" },
+			{ type: "function_call", role: "user", content: "not a message" },
+			user,
+		];
+		expect(buildCompactionV2ReplacementHistory(input, compaction).replacementHistory).toEqual([user, compaction]);
+	});
 	test("posts a compaction_trigger Responses stream and installs Codex-style replacement history", async () => {
 		const userItem = { type: "message", role: "user", content: [{ type: "input_text", text: "real user" }] };
 		const compactionItem = { type: "compaction", encrypted_content: "enc_123" };
