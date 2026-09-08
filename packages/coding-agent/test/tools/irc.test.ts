@@ -247,6 +247,73 @@ describe("IRC", () => {
 			expect(registry.get("0-Parked")?.status).toBe("idle");
 		});
 
+		it("send from a stopped sender does not revive the recipient", async () => {
+			registry.register({ id: "0-Stopped", displayName: "task", kind: "sub", session: null, status: "aborted" });
+			registry.register({ id: "0-Parked", displayName: "task", kind: "sub", session: null, status: "parked" });
+			const recipient = makeFakeSession();
+			let revivals = 0;
+			AgentLifecycleManager.global().adopt("0-Parked", {
+				idleTtlMs: 0,
+				revive: async () => {
+					revivals++;
+					return recipient.session;
+				},
+			});
+			const receipt = await bus.send({ from: "0-Stopped", to: "0-Parked", body: "late work" });
+			expect(receipt.outcome).toBe("failed");
+			expect(revivals).toBe(0);
+			expect(recipient.delivered).toEqual([]);
+		});
+
+		it("send cannot outlive its sender while awaiting recipient revival", async () => {
+			const sender = makeFakeSession();
+			const recipient = makeFakeSession();
+			const senderRef = registry.register({ id: "0-Sender", displayName: "task", kind: "sub", session: sender.session });
+			registry.register({ id: "0-Parked", displayName: "task", kind: "sub", session: null, status: "parked" });
+			const started = Promise.withResolvers<void>();
+			const revived = Promise.withResolvers<AgentSession>();
+			AgentLifecycleManager.global().adopt("0-Parked", {
+				idleTtlMs: 0,
+				revive: () => {
+					started.resolve();
+					return revived.promise;
+				},
+			});
+			const pending = bus.send({ from: "0-Sender", to: "0-Parked", body: "late work" });
+			await started.promise;
+			registry.detachSession("0-Sender", senderRef);
+			registry.setStatus("0-Sender", "aborted", senderRef);
+			revived.resolve(recipient.session);
+			expect((await pending).outcome).toBe("failed");
+			expect(recipient.delivered).toEqual([]);
+			expect(bus.unreadCount("0-Parked")).toBe(0);
+		});
+
+		it("keeps an accepted final message when its sender parks during recipient revival", async () => {
+			const { session: sender } = createRealSession();
+			sessions.push(sender);
+			const recipient = makeFakeSession();
+			registry.register({ id: "0-Sender", displayName: "task", kind: "sub", session: sender, status: "idle" });
+			registry.register({ id: "0-Parked", displayName: "task", kind: "sub", session: null, status: "parked" });
+			const started = Promise.withResolvers<void>();
+			const revived = Promise.withResolvers<AgentSession>();
+			const lifecycle = AgentLifecycleManager.global();
+			lifecycle.adopt("0-Sender", { idleTtlMs: 0 });
+			lifecycle.adopt("0-Parked", {
+				idleTtlMs: 0,
+				revive: () => {
+					started.resolve();
+					return revived.promise;
+				},
+			});
+			const pending = bus.send({ from: "0-Sender", to: "0-Parked", body: "final result" });
+			await started.promise;
+			await lifecycle.park("0-Sender");
+			revived.resolve(recipient.session);
+			expect((await pending).outcome).toBe("revived");
+			expect(recipient.delivered.map(message => message.body)).toEqual(["final result"]);
+		});
+
 		it("send fails cleanly when a parked recipient has no reviver", async () => {
 			registry.register({ id: "0-Parked", displayName: "task", kind: "sub", session: null, status: "parked" });
 			AgentLifecycleManager.global().adopt("0-Parked", { idleTtlMs: 0 });

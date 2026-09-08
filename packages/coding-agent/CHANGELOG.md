@@ -47,6 +47,10 @@
 
 - Added `goal.injectAsUserMessage` to queue objective-only ordinary user follow-ups after successful goal tool creation, retaining host tool provenance without duplicate lifecycle or `/goal` injection.
 - Added opt-in `advisor.compactBeforeGuidance`: active advisors review after ordinary primary context maintenance, including speculative compaction and grace deferral. Successful terminal reviews use the current roster once after final maintenance and are discarded on session invalidation.
+### Fixed
+
+- Killing a subagent now cancels its assignment and provider requests immediately instead of leaving yield reminders or IRC auto-replies running behind an aborted row. Disposed sessions reject late prompts, and terminal agents cannot deliver late replies or revive.
+
 ## [18.1.15] - 2026-09-08
 
 ### Added
