@@ -61,6 +61,7 @@ function makeCtx(initialQueue: CompactionQueuedMessage[] = []) {
 
 	const ctx = {
 		session,
+		sessionManager: { captureRequirementsInput: async () => "captured-input" },
 		compactionQueuedMessages: [...initialQueue],
 		pendingMessagesContainer: { clear: () => {}, addChild: () => {}, removeChild: () => {} },
 		editor: {
@@ -102,28 +103,51 @@ function makeCtx(initialQueue: CompactionQueuedMessage[] = []) {
 const img = (data: string): ImageContent => ({ type: "image", mimeType: "image/png", data });
 
 describe("compaction queue image forwarding", () => {
-	test("queueCompactionMessage stores images and consumes pending-image state", () => {
+	test("queue acceptance waits for durable capture before consuming the image draft", async () => {
 		const image = img("aGVsbG8=");
 		const { ctx } = makeCtx();
+		const capture = Promise.withResolvers<string>();
+		ctx.sessionManager.captureRequirementsInput = () => capture.promise;
+		ctx.editor.setText("look at this screenshot");
 		ctx.editor.pendingImages = [image];
 		ctx.editor.pendingImageLinks = ["clipboard"];
 		ctx.editor.imageLinks = ["clipboard"];
 
-		new UiHelpers(ctx).queueCompactionMessage("look at this screenshot", "steer", [image]);
-
-		expect(ctx.compactionQueuedMessages).toEqual([
-			{ text: "look at this screenshot", mode: "steer", images: [image] },
-		]);
-		// Pending state is consumed so the next message does not resend the image.
+		const accepting = new UiHelpers(ctx).queueCompactionMessage("look at this screenshot", "steer", [image]);
+		expect(ctx.compactionQueuedMessages).toEqual([]);
+		expect(ctx.editor.getText()).toBe("look at this screenshot");
+		expect(ctx.editor.pendingImages).toEqual([image]);
+		capture.resolve("captured-input");
+		await accepting;
+		expect(ctx.compactionQueuedMessages[0]?.sourceCaptureId).toBe("captured-input");
+		expect(ctx.editor.getText()).toBe("");
 		expect(ctx.editor.pendingImages).toEqual([]);
 		expect(ctx.editor.pendingImageLinks).toEqual([]);
 		expect(ctx.editor.imageLinks).toBeUndefined();
 	});
 
-	test("empty image list is normalized to undefined on the queued entry", () => {
+	test("capture rejection retains the full directive and image draft without accepting a queue entry", async () => {
+		const image = img("aGVsbG8=");
 		const { ctx } = makeCtx();
-		new UiHelpers(ctx).queueCompactionMessage("no images here", "followUp", []);
-		expect(ctx.compactionQueuedMessages).toEqual([{ text: "no images here", mode: "followUp", images: undefined }]);
+		ctx.sessionManager.captureRequirementsInput = async () => {
+			throw new Error("Capture publication failed");
+		};
+		ctx.editor.setText("/once /keep screenshot [Image #1]");
+		ctx.editor.pendingImages = [image];
+		ctx.editor.pendingImageLinks = ["clipboard"];
+		ctx.editor.imageLinks = ["clipboard"];
+
+		await new UiHelpers(ctx).queueCompactionMessage(
+			"/once /keep screenshot [Image #1]",
+			"followUp",
+			[image],
+			["clipboard"],
+		);
+		expect(ctx.compactionQueuedMessages).toEqual([]);
+		expect(ctx.editor.getText()).toBe("/once /keep screenshot [Image #1]");
+		expect(ctx.editor.pendingImages).toEqual([image]);
+		expect(ctx.editor.pendingImageLinks).toEqual(["clipboard"]);
+		expect(ctx.editor.imageLinks).toEqual(["clipboard"]);
 	});
 
 	test("flush forwards the first queued prompt's images via session.prompt", async () => {

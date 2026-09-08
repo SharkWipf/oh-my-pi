@@ -10008,7 +10008,8 @@ export class AgentSession {
 		} = {},
 	): Promise<{
 		editorText?: string;
-		/** Image attachments of the target user message, parallel to the positional `[Image #N]` markers in {@link editorText}. */
+		sourceInput?: RestoredQueuedMessage;
+		/** Original image attachments, parallel to the positional markers in {@link editorText}. */
 		editorImages?: ImageContent[];
 		sourceInput?: RestoredQueuedMessage;
 		cancelled: boolean;
