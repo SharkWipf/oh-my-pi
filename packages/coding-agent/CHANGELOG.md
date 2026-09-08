@@ -44,6 +44,9 @@
 ### Fixed
 
 - Killing a subagent now cancels its assignment and provider requests immediately instead of leaving yield reminders or IRC auto-replies running behind an aborted row. Disposed sessions reject late prompts, and terminal agents cannot deliver late replies or revive.
+- Original requirements evidence remains readable when unrelated conversation entries append during resolution; addressed source rewrites and lifecycle changes still invalidate the read.
+- Exact-source requirements actions no longer wait for unrelated cold catalog enumeration. Current accepted requirements can be recalled while historical catalog coverage remains explicitly incomplete.
+- Cataloging accepted originals at new locators preserves their reviewed state after evidence refresh. Completing catalog observation refreshes the next coverage receipt without rewriting earlier request receipts.
 
 ## [18.1.15] - 2026-09-08
 

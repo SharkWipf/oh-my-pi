@@ -3,6 +3,8 @@ import { unlink, writeFile } from "node:fs/promises";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { resolveRequirementsSource } from "../src/requirements/source-capture";
 import { SessionManager } from "../src/session/session-manager";
+import { FileSessionStorage } from "../src/session/session-storage";
+import { createAssistantMessage } from "./helpers/agent-session-setup";
 
 const managers: SessionManager[] = [];
 afterEach(async () => {
@@ -140,5 +142,70 @@ describe("accepted original source authority", () => {
 		session.invalidateRequirementsSources([id]);
 		await unlink(journalPath);
 		expect((await session.observeRequirementsEvidence([retained]))[0].integrity).toBeNull();
+	});
+	test("later assistant and human entries preserve original A while reset still revokes it", async () => {
+		const session = manager();
+		for (let index = 0; index < 512; index++) append(session, `history ${index}`);
+		const id = append(session, "current exact original");
+		const source = session.getRequirementsSource(id)!;
+		const resolving = session.resolveRequirementsEvidence(source.key, source);
+		await Bun.sleep(0);
+		session.appendMessage(createAssistantMessage("unrelated later response"));
+		const resolved = await resolving;
+		expect(resolved?.units[0].text).toBe("current exact original");
+		expect(resolved?.context).toHaveLength(513);
+		const catalogVersion = session.getRequirementsSourceVersion();
+		const priorHuman = session.resolveRequirementsEvidence(source.key, source);
+		await Bun.sleep(0);
+		const laterHuman = append(session, "new independent human request");
+		expect(session.getRequirementsSourceVersion()).not.toBe(catalogVersion);
+		expect(session.getRequirementsSource(laterHuman)!.key).not.toBe(source.key);
+		expect((await priorHuman)?.units[0].text).toBe("current exact original");
+		const abandoned = session.resolveRequirementsEvidence(source.key, source);
+		await Bun.sleep(0);
+		session.appendResetBoundary();
+		expect(await abandoned).toBeUndefined();
+	});
+
+	test("a concurrent journal append is not a missing source, but a changed original still fails the fence", async () => {
+		using temp = TempDir.createSync("requirements-journal-read-race-");
+		class PausedStorage extends FileSessionStorage {
+			pause?: { entered: () => void; release: Promise<void> };
+			override async readText(path: string): Promise<string> {
+				const text = await super.readText(path);
+				const pause = this.pause;
+				this.pause = undefined;
+				if (pause) { pause.entered(); await pause.release; }
+				return text;
+			}
+		}
+		const storage = new PausedStorage();
+		const session = SessionManager.create(temp.path(), temp.path(), storage);
+		try {
+			const id = append(session, "exact committed original");
+			await session.ensureOnDisk();
+			await session.flush();
+			const source = session.getRequirementsSource(id)!;
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			storage.pause = { entered: entered.resolve, release: release.promise };
+			const resolving = session.resolveRequirementsEvidence(source.key, source, { context: false });
+			await entered.promise;
+			session.appendMessage(createAssistantMessage("concurrent response"));
+			await session.flush();
+			release.resolve();
+			expect((await resolving)?.units[0].text).toBe("exact committed original");
+			const changedEntered = Promise.withResolvers<void>();
+			const changedRelease = Promise.withResolvers<void>();
+			storage.pause = { entered: changedEntered.resolve, release: changedRelease.promise };
+			const changed = session.resolveRequirementsEvidence(source.key, source, { context: false });
+			await changedEntered.promise;
+			const entry = session.getEntry(id)!;
+			if (entry.type !== "message" || entry.message.role !== "user") throw new Error("Missing original");
+			entry.message.content = "authored replacement";
+			await session.rewriteEntries();
+			changedRelease.resolve();
+			expect(await changed).toBeUndefined();
+		} finally { await session.close(); }
 	});
 });

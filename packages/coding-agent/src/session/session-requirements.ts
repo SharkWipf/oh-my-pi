@@ -290,13 +290,9 @@ export class SessionRequirements {
 					const { source } = next.value;
 					keys.add(source.key);
 					const prior = this.#storage.getRequirementsSourceMetadata(source.key);
-					if (!prior) changed.push(source);
-					else if (source.locators.some(locator => !prior.locators.some(current =>
+					if (!prior || source.locators.some(locator => !prior.locators.some(current =>
 						current.sessionId === locator.sessionId && current.entryId === locator.entryId && current.journalPath === locator.journalPath
-					))) {
-						const retained = this.#storage.getRequirementsSource(source.key)!;
-						changed.push({ ...retained, locators: source.locators });
-					}
+					))) changed.push(source);
 					// A scheduling quantum, not a source count/retention limit: drain every descriptor.
 					if (performance.now() - sliceStarted >= 8) {
 						intake();
@@ -330,6 +326,9 @@ export class SessionRequirements {
 			if (!current()) return;
 			this.#hasObserved = true;
 			this.#observedVersion = version;
+			// Coverage can become current without changing accepted heads or their evidence generation.
+			this.#applicableCache = undefined;
+			this.#composition = undefined;
 		})();
 		this.#observing = work;
 		try {
@@ -596,6 +595,14 @@ export class SessionRequirements {
 		visit(input.source);
 		for (const reference of input.references) visit(reference);
 	}
+	#sourceInScope(source: RequirementsSource): boolean {
+		const manager = this.host.sessionManager;
+		return (
+			(source.locators.some(locator => locator.sessionId === manager.getSessionId()) &&
+				manager.isRequirementsSourceApplicable(source)) ||
+			this.#consumptionSnapshot().sources.some(current => current.key === source.key)
+		);
+	}
 	async processPending(sourceKey?: string): Promise<void> {
 		const signal = this.#controller.signal;
 		this.#assertAvailable(signal);
@@ -611,8 +618,8 @@ export class SessionRequirements {
 			if (sourceKey && !selected) throw new Error(`Unknown source: ${sourceKey}`);
 			if (selected?.referenceOnly)
 				throw new Error("Referents are evidence only; retry the human source that adopted them");
-			// Catalog authorization remains broad for an explicit foreign-source retry.
-			if (sourceKey && !this.#sourceKeys.has(sourceKey) && !this.#consumptionSnapshot().sources.some(source => source.key === sourceKey))
+			// Resolve exact local ancestry or current dependencies without waiting for historical indexing.
+			if (selected && !this.#sourceInScope(selected))
 				throw new Error("Foreign requirements source is not associated with the current scope");
 			// Indexed current input, not historical unknown-origin descriptors, drives automatic work.
 			const candidates = selected ? [selected] : this.#storage.getRequirementsPendingSources();
@@ -720,14 +727,14 @@ export class SessionRequirements {
 			return this.status();
 		}
 		if (action.kind === "retry") {
-			await this.observeCommittedSources(true);
+			if (!action.sourceKey) await this.observeCommittedSources(true);
 			this.#assertAvailable(signal);
 			const sources = action.sourceKey
 				? [this.#storage.getRequirementsSource(action.sourceKey)].filter((source): source is RequirementsSource => !!source)
 				: this.#storage.getRequirementsPendingSources();
 			for (const source of sources) {
 				if (source.referenceOnly || source.state === "complete") continue;
-				if (!this.#sourceKeys.has(source.key) && !this.#consumptionSnapshot().sources.some(current => current.key === source.key)) continue;
+				if (!this.#sourceInScope(source)) continue;
 				const resolved = await this.inspectSource(source.key);
 				this.#assertAvailable(signal);
 				this.#storage.setRequirementsSourceDisposition(source.key, resolved.source.integrity, "pending", "Operator requested original-position retry/backfill");
@@ -736,7 +743,7 @@ export class SessionRequirements {
 			}
 			return this.status();
 		}
-		await this.observeCommittedSources(true);
+		// Exact actions consume addressed sources/revisions, not the unrelated historical catalog.
 		signal.throwIfAborted();
 		if (action.kind === "gap") {
 			const source = this.#storage.getRequirementsSource(action.sourceKey);
@@ -746,17 +753,16 @@ export class SessionRequirements {
 			return this.status();
 		}
 		if (action.kind === "evidence") {
-			await this.observeCommittedSources(true);
 			this.#assertAvailable(signal);
-			if (!this.#sourceKeys.has(action.sourceKey) && !this.#consumptionSnapshot().sources.some(source => source.key === action.sourceKey))
+			const source = this.#storage.getRequirementsSource(action.sourceKey);
+			if (!source) throw new Error(`Unknown requirements source: ${action.sourceKey}`);
+			if (!this.#sourceInScope(source))
 				throw new Error("Foreign requirements source is not associated with the current scope");
 			for (const key of action.referentKeys) {
 				await this.inspectSource(key);
 				this.#assertAvailable(signal);
 			}
 			this.#extraEvidence.set(action.sourceKey, [...action.referentKeys]);
-			const source = this.#storage.getRequirementsSource(action.sourceKey);
-			if (!source) throw new Error(`Unknown requirements source: ${action.sourceKey}`);
 			this.#storage.setRequirementsSourceDisposition(
 				source.key,
 				source.integrity,
