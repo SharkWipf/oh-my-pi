@@ -240,10 +240,10 @@ export class SessionRequirements {
 			generation: snapshot.state.generation,
 		};
 	}
-	#assertAvailable(): void {
+	#assertAvailable(signal = this.#controller.signal): void {
+		signal.throwIfAborted();
 		if (!this.#enabled) throw new Error("Requirements disabled; accepted data remains inspectable");
 		if (this.#bypass !== "off") throw new Error("Requirements publication suspended by memory recovery mode");
-		this.#controller.signal.throwIfAborted();
 	}
 	async observeCommittedSources(explicit = false): Promise<void> {
 		if (this.#disposed || this.host.isDisposed() || (!explicit && (!this.#enabled || this.#bypass !== "off"))) return;
@@ -598,15 +598,16 @@ export class SessionRequirements {
 		for (const reference of input.references) visit(reference);
 	}
 	async processPending(sourceKey?: string): Promise<void> {
+		const signal = this.#controller.signal;
+		this.#assertAvailable(signal);
 		if (this.#run) {
 			await this.#run;
+			this.#assertAvailable(signal);
 			return this.processPending(sourceKey);
 		}
-		this.#assertAvailable();
-		const signal = this.#controller.signal;
 		const run = (async () => {
 			if (!sourceKey) await this.observeCommittedSources();
-			this.#assertAvailable();
+			this.#assertAvailable(signal);
 			const selected = sourceKey ? this.#storage.getRequirementsSource(sourceKey) : undefined;
 			if (sourceKey && !selected) throw new Error(`Unknown source: ${sourceKey}`);
 			if (selected?.referenceOnly)
@@ -626,6 +627,7 @@ export class SessionRequirements {
 				let processingIntegrity = source.integrity;
 				try {
 					const input = await this.#evidencePackage(source.key);
+					this.#assertAvailable(signal);
 					processingIntegrity = input.source.source.integrity;
 					this.#storage.authorizeRequirementsOwner(input.authority);
 					this.#authorizedOwnerSessionId = input.authority.ownerSessionId;
@@ -693,6 +695,7 @@ export class SessionRequirements {
 		this.releasePendingLive();
 	}
 	async applyOperatorAction(action: RequirementsOperatorAction): Promise<unknown> {
+		const signal = this.#controller.signal;
 		const actor = `operator:${this.host.sessionManager.getSessionId()}`;
 		if (action.kind === "inspect") {
 			const revision = this.#storage.getRequirementsRevision(action.revisionId);
@@ -719,6 +722,7 @@ export class SessionRequirements {
 		}
 		if (action.kind === "retry") {
 			await this.observeCommittedSources(true);
+			this.#assertAvailable(signal);
 			const sources = action.sourceKey
 				? [this.#storage.getRequirementsSource(action.sourceKey)].filter((source): source is RequirementsSource => !!source)
 				: this.#storage.getRequirementsPendingSources();
@@ -726,12 +730,15 @@ export class SessionRequirements {
 				if (source.referenceOnly || source.state === "complete") continue;
 				if (!this.#sourceKeys.has(source.key) && !this.#consumptionSnapshot().sources.some(current => current.key === source.key)) continue;
 				const resolved = await this.inspectSource(source.key);
+				this.#assertAvailable(signal);
 				this.#storage.setRequirementsSourceDisposition(source.key, resolved.source.integrity, "pending", "Operator requested original-position retry/backfill");
 				await this.processPending(source.key);
+				this.#assertAvailable(signal);
 			}
 			return this.status();
 		}
 		await this.observeCommittedSources(true);
+		signal.throwIfAborted();
 		if (action.kind === "gap") {
 			const source = this.#storage.getRequirementsSource(action.sourceKey);
 			if (!source) throw new Error(`Unknown requirements source: ${action.sourceKey}`);
@@ -741,9 +748,13 @@ export class SessionRequirements {
 		}
 		if (action.kind === "evidence") {
 			await this.observeCommittedSources(true);
+			this.#assertAvailable(signal);
 			if (!this.#sourceKeys.has(action.sourceKey) && !this.#consumptionSnapshot().sources.some(source => source.key === action.sourceKey))
 				throw new Error("Foreign requirements source is not associated with the current scope");
-			for (const key of action.referentKeys) await this.inspectSource(key);
+			for (const key of action.referentKeys) {
+				await this.inspectSource(key);
+				this.#assertAvailable(signal);
+			}
 			this.#extraEvidence.set(action.sourceKey, [...action.referentKeys]);
 			const source = this.#storage.getRequirementsSource(action.sourceKey);
 			if (!source) throw new Error(`Unknown requirements source: ${action.sourceKey}`);
@@ -754,11 +765,13 @@ export class SessionRequirements {
 				"Operator supplied host-resolved evidence",
 			);
 			await this.processPending(action.sourceKey);
+			this.#assertAvailable(signal);
 			return this.status();
 		}
-		this.#assertAvailable();
+		this.#assertAvailable(signal);
 		if (action.kind === "literal-adopt") {
 			const selected = await this.inspectSource(action.sourceKey);
+			this.#assertAvailable(signal);
 			const selectedUnit = selected.units.find(unit => unit.id === action.unitId);
 			if (selectedUnit?.text === undefined || !selectedUnit.text.trim())
 				throw new Error("Literal adoption requires a complete original text unit");
@@ -766,6 +779,7 @@ export class SessionRequirements {
 			let sourceKey = action.sourceKey;
 			if (adopted) {
 				const entryId = await this.host.promptOperatorSource(selectedUnit.text, undefined, { literal: true });
+				this.#assertAvailable(signal);
 				const source = this.host.sessionManager.getRequirementsSource(entryId);
 				if (!source) throw new Error("Accepted operator adoption source is unavailable");
 				sourceKey = source.key;
@@ -775,6 +789,7 @@ export class SessionRequirements {
 				this.#extraEvidence.set(sourceKey, [action.sourceKey]);
 			}
 			const input = await this.#evidencePackage(sourceKey);
+			this.#assertAvailable(signal);
 			const unit = adopted ? input.source.units.find(unit => unit.text === selectedUnit.text) : selectedUnit;
 			if (!unit) throw new Error("Accepted operator adoption does not preserve the selected complete unit");
 			const candidate = admitRequirementsCandidates(
@@ -811,10 +826,10 @@ export class SessionRequirements {
 				integrity: input.source.source.integrity,
 				unitIds: [unit.id],
 			};
-			const signal = this.#controller.signal;
 			this.#storage.authorizeRequirementsOwner(input.authority);
 			this.#authorizedOwnerSessionId = input.authority.ownerSessionId;
 			const review = await reviewRequirementsCandidates(this.host, input, candidate, signal, literalAcceptance);
+			this.#assertAvailable(signal);
 			const batch: RequirementsBatch = {
 				id: randomUUID(),
 				sourceKey: input.source.source.key,
@@ -832,8 +847,7 @@ export class SessionRequirements {
 			};
 			batch.id = this.#storage.saveRequirementsBatch(batch);
 			const verified = await this.#reconcileReviewedEvidence(input, batch);
-			signal.throwIfAborted();
-			this.#assertAvailable();
+			this.#assertAvailable(signal);
 			const result = this.#storage.publishRequirementsBatch(batch.id, input.authority, verified);
 			if (this.#storage.getRequirementsSource(action.sourceKey)?.state === "complete" && this.#pendingLive.delete(action.sourceKey)) this.#pendingGeneration++;
 			return result;
@@ -845,6 +859,7 @@ export class SessionRequirements {
 				if (!revision || revision.lifecycle !== "quarantined")
 					throw new Error(`Revision is not quarantined: ${id}`);
 				const input = await this.#evidencePackage(revision.sourceKey, revision.id);
+				this.#assertAvailable(signal);
 				if (input.source.source.integrity !== revision.sourceIntegrity)
 					throw new Error("Restore evidence changed; original decision remains suspended");
 				for (const span of [...revision.evidence, ...(revision.referents ?? [])])
@@ -880,11 +895,10 @@ export class SessionRequirements {
 							unitIds: [action.literalUnitId],
 						}
 					: undefined;
-				const signal = this.#controller.signal;
 				const review = await reviewRequirementsCandidates(this.host, input, candidates, signal, literal);
+				this.#assertAvailable(signal);
 				const verified = await this.#reconcileReviewedEvidence(input);
-				signal.throwIfAborted();
-				this.#assertAvailable();
+				this.#assertAvailable(signal);
 				const receipt = {
 					id: randomUUID(),
 					actor,

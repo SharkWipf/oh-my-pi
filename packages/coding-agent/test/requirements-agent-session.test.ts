@@ -250,6 +250,87 @@ afterEach(async () => {
 	unregisterCustomApis(SOURCE);
 });
 
+for (const actionKind of ["literal-adopt", "restore", "extract"] as const) {
+	test("STOP during " + actionKind + " evidence preparation cannot dispatch or authorize a later stage", async () => {
+		const harness = createHarness();
+		const owner = harness.session.requirements;
+		const text = "Preserve the bounded operator decision after a stopped review.";
+		const captured = actionKind === "restore" ? await adopt(harness, text) : await capture(harness, text);
+		const revisionId = owner.snapshotApplicable().active[0]?.id;
+		if (revisionId) await owner.applyOperatorAction({ kind: "quarantine", revisionIds: [revisionId], reason: "Review before restoring" });
+		const reviewer = harness.modelRegistry.getAll().find(candidate => candidate.id === "sanity")!;
+		harness.settings.setModelRole("requirementsExtraction", reviewer.provider + "/" + reviewer.id);
+		harness.settings.setModelRole("requirementsEvidence", reviewer.provider + "/" + reviewer.id);
+		let modelCalls = 0;
+		for (const candidate of harness.modelRegistry.getAll()) registerBoundary(candidate.api, () => {
+			modelCalls++;
+			throw new Error("A stopped requirements action dispatched a model");
+		});
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const inspect = owner.inspectSource.bind(owner);
+		owner.inspectSource = async (key, context) => {
+			const resolved = await inspect(key, context);
+			if (context) { entered.resolve(); await release.promise; }
+			return resolved;
+		};
+		const operation = actionKind === "extract" ? owner.processPending(captured.source.key) : owner.applyOperatorAction(
+			actionKind === "restore"
+				? { kind: "restore", revisionIds: [revisionId!], literalUnitId: captured.source.units[0]!.id }
+				: { kind: "literal-adopt", sourceKey: captured.source.key, unitId: captured.source.units[0]!.id,
+					scope: { kind: "session", sessionId: harness.manager.getSessionId(), epoch: captured.source.epoch } },
+		);
+		const settled = operation.catch(error => error);
+		try {
+			await entered.promise;
+			await harness.session.dispose();
+			const stopped = owner.status({ includeLedger: true }).snapshot;
+			release.resolve();
+			expect(await settled).toBeInstanceOf(Error);
+			expect(modelCalls).toBe(0);
+			const after = owner.status({ includeLedger: true }).snapshot;
+			expect(after.state.owners).toEqual(stopped.state.owners);
+			expect(after.batches).toEqual(stopped.batches);
+			expect(after.revisions).toEqual(stopped.revisions);
+		} finally { release.resolve(); await settled; }
+	});
+}
+
+test("STOP aborts the in-flight sanity stage and ignores its later successful response", async () => {
+	const harness = createHarness();
+	const owner = harness.session.requirements;
+	const captured = await capture(harness, "Keep this rule inactive when its review is stopped.");
+	const reviewer = harness.modelRegistry.getAll().find(candidate => candidate.id === "sanity")!;
+	const entered = Promise.withResolvers<void>();
+	const release = Promise.withResolvers<void>();
+	let stageSignal: AbortSignal | undefined;
+	let modelCalls = 0;
+	registerBoundary(reviewer.api, async (context, options) => {
+		modelCalls++;
+		stageSignal = options?.signal;
+		entered.resolve();
+		await release.promise;
+		const content = context.messages[0]!.content;
+		if (typeof content === "string" || content[0]?.type !== "text") throw new Error("Expected sanity input");
+		const payload = JSON.parse(content[0].text) as { candidates: { id: string }[] };
+		return createAssistantMessage(JSON.stringify({ candidates: payload.candidates.map(candidate => ({ id: candidate.id, decision: "pass", reason: "Accepted exact finite rule" })) }));
+	});
+	const settled = owner.applyOperatorAction({ kind: "literal-adopt", sourceKey: captured.source.key,
+		unitId: captured.source.units[0]!.id,
+		scope: { kind: "session", sessionId: harness.manager.getSessionId(), epoch: captured.source.epoch },
+	}).catch(error => error);
+	try {
+		await entered.promise;
+		expect(stageSignal?.aborted).toBe(false);
+		await harness.session.dispose();
+		expect(stageSignal?.aborted).toBe(true);
+		release.resolve();
+		expect(await settled).toBeInstanceOf(Error);
+		expect(modelCalls).toBe(1);
+		expect(owner.status({ includeLedger: true }).snapshot.revisions).toEqual([]);
+	} finally { release.resolve(); await settled; }
+});
+
 test("literal adoption of unknown provenance creates new operator authority without laundering the original", async () => {
 	const harness = createHarness();
 	const text = "Keep the exact operand TLS_AES_256_GCM_SHA384 in the final result.";
