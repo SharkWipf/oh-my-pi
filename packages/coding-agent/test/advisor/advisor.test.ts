@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
-import { type AgentMessage, type AgentTelemetryConfig, Tokenizer } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentMessage, type AgentTelemetryConfig, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import type { TUI } from "@oh-my-pi/pi-tui";
 import {
 	AdviseTool,
@@ -5281,59 +5283,148 @@ describe("advisor", () => {
 			expect(runtime.failureNotified).toBe(false);
 		});
 
-		it("drops the in-flight batch when a reset aborts the advisor prompt", async () => {
-			const promptInputs: Array<string | AgentMessage[]> = [];
-			const { promise: firstPromptStarted, resolve: startFirstPrompt } = Promise.withResolvers<void>();
-			let rejectInFlight: ((err: unknown) => void) | undefined;
-			let promptCalls = 0;
-			const agent: AdvisorAgent = {
-				prompt: input => {
-					promptInputs.push(input);
-					promptCalls++;
-					if (promptCalls === 1) {
-						const { promise, reject } = Promise.withResolvers<void>();
-						rejectInFlight = reject;
-						startFirstPrompt();
-						return promise;
-					}
-					return Promise.resolve();
-				},
-				// AdvisorRuntime.reset() calls agent.reset() then agent.abort(); the real
-				// Agent.abort rejects the awaited prompt, so model that rejection here.
-				abort: () => rejectInFlight?.(new Error("advisor reset")),
-				reset: () => {},
-				state: { messages: [] },
-			};
-			const messages: AgentMessage[] = [{ role: "user", content: "old-conversation", timestamp: 1 } as AgentMessage];
-			const host: AdvisorRuntimeHost = {
-				snapshotMessages: () => messages,
+		it.each(["resolved", "rejected"] as const)(
+			"clears invalidated appended state after a real Agent prompt %s",
+			async completion => {
+				const mock = createMockModel({ responses: [{ content: ["fresh review"] }] });
+				const started = Promise.withResolvers<void>();
+				const requests: string[] = [];
+				const onTurnError = vi.fn();
+				const agent = new Agent({
+					initialState: { model: mock.model },
+					streamFn: (model, context, options) => {
+						requests.push(JSON.stringify(context.messages));
+						if (requests.length > 1) return mock.stream(model, context, options);
+						const stream = new AssistantMessageEventStream();
+						options?.signal?.addEventListener("abort", () => stream.fail(new Error("provider aborted")), {
+							once: true,
+						});
+						started.resolve();
+						return stream;
+					},
+				});
+				const runtime = new AdvisorRuntime(
+					{
+						state: agent.state,
+						reset: () => agent.reset(),
+						abort: reason => agent.abort(reason),
+						prompt: async input => {
+							if (Array.isArray(input)) await agent.prompt(input);
+							else await agent.prompt(input);
+							if (completion === "rejected" && agent.state.error) throw new Error(agent.state.error);
+						},
+					},
+					{ snapshotMessages: () => [], enqueueAdvice: () => {}, onTurnError },
+					0,
+				);
+				try {
+					runtime.onTurnEnd([{ role: "user", content: "old-conversation", timestamp: 1 }]);
+					await started.promise;
+					runtime.reset();
+					await new Promise<void>(resolve => setImmediate(resolve));
+					expect(agent.state.messages).toEqual([]);
+					expect(agent.state.error).toBeUndefined();
+					expect(runtime.yielded).toBe(false);
+					expect(onTurnError).not.toHaveBeenCalled();
+					runtime.onTurnEnd([{ role: "user", content: "new-conversation", timestamp: 2 }]);
+					await settleUntil(() => requests.length === 2 && runtime.yielded);
+					expect(requests[1]).toContain("new-conversation");
+					expect(requests[1]).not.toContain("old-conversation");
+					expect(requests[1]).not.toContain("advisor reset");
+					expect(
+						agent.state.messages.some(message => message.role === "assistant" && message.stopReason === "aborted"),
+					).toBe(false);
+					expect(runtime.yielded).toBe(true);
+				} finally {
+					runtime.dispose();
+				}
+			},
+		);
+
+		it.each(["error", "abort"] as const)(
+			"keeps genuine provider %s recovery and prior advisor history without an epoch change",
+			async failure => {
+				const mock = createMockModel({ responses: [{ content: ["prior review"] }, { content: ["recovered review"] }] });
+				const failedRequestStarted = Promise.withResolvers<AssistantMessageEventStream>();
+				const requests: string[] = [];
+				const observedFailures: AgentMessage[][] = [];
+				const agent = new Agent({
+					initialState: { model: mock.model },
+					streamFn: (model, context, options) => {
+						requests.push(JSON.stringify(context.messages));
+						if (requests.length !== 2) return mock.stream(model, context, options);
+						const stream = new AssistantMessageEventStream();
+						options?.signal?.addEventListener("abort", () => stream.fail(new Error("provider aborted")), {
+							once: true,
+						});
+						failedRequestStarted.resolve(stream);
+						return stream;
+					},
+				});
+				const runtime = new AdvisorRuntime(agent, {
+					snapshotMessages: () => [],
+					enqueueAdvice: () => {},
+					onTurnError: (_error, messages) => {
+						observedFailures.push([...messages]);
+						return true;
+					},
+				});
+				const messages: AgentMessage[] = [{ role: "user", content: "prior conversation", timestamp: 1 }];
+				try {
+					runtime.onTurnEnd(messages);
+					await settleUntil(() => runtime.yielded);
+					messages.push({ role: "user", content: "retry this update", timestamp: 2 });
+					runtime.onTurnEnd(messages);
+					const stream = await failedRequestStarted.promise;
+					if (failure === "abort") agent.abort("genuine advisor interruption");
+					else stream.fail(new Error("connection reset"));
+					await settleUntil(() => requests.length === 3 && runtime.yielded);
+					expect(observedFailures).toHaveLength(1);
+					const terminal = observedFailures[0].at(-1);
+					expect(terminal?.role).toBe("assistant");
+					if (terminal?.role !== "assistant") throw new Error("Missing provider failure");
+					expect(terminal.stopReason).toBe(failure === "abort" ? "aborted" : "error");
+					expect(terminal.errorMessage).toBe(failure === "abort" ? "genuine advisor interruption" : "connection reset");
+					expect(requests[2]).toContain("prior review");
+					expect(requests[2]).toContain("prior conversation");
+					expect(requests[2].split("retry this update")).toHaveLength(2);
+					expect(requests[2]).not.toContain(terminal.errorMessage!);
+					expect(agent.state.error).toBeUndefined();
+				} finally {
+					runtime.dispose();
+				}
+			},
+		);
+
+		it("does not publish a successful review invalidated before prompt settlement", async () => {
+			const mock = createMockModel({ responses: [{ content: ["old review"] }, { content: ["current review"] }] });
+			const agent = new Agent({ initialState: { model: mock.model }, streamFn: mock.stream });
+			const onTurnSuccess = vi.fn();
+			const runtime = new AdvisorRuntime(agent, {
+				snapshotMessages: () => [],
 				enqueueAdvice: () => {},
-			};
-			const runtime = new AdvisorRuntime(agent, host, 0);
-
-			runtime.onTurnEnd(messages);
-			await firstPromptStarted;
-			expect(promptInputs).toHaveLength(1);
-			expect(promptText(promptInputs[0])).toContain("old-conversation");
-
-			// Conversation boundary (/new): transcript replaced and the runtime reset
-			// while the advisor prompt is still in flight. The abort that rejects the
-			// prompt is the reset itself — it must NOT be treated as a transient
-			// failure that requeues and re-sends the stale pre-reset batch.
-			messages.length = 0;
-			messages.push({ role: "user", content: "new-conversation", timestamp: 2 } as AgentMessage);
-			runtime.reset();
-
-			expect(promptInputs).toHaveLength(1);
-			expect(runtime.backlog).toBe(0);
-
-			// The runtime still works afterward: the next turn replays the new
-			// transcript only, never the dropped pre-reset content.
-			runtime.onTurnEnd(messages);
-			await settleUntil(() => promptInputs.length === 2 && runtime.backlog === 0);
-			expect(promptInputs).toHaveLength(2);
-			expect(promptText(promptInputs[1])).toContain("new-conversation");
-			expect(promptText(promptInputs[1])).not.toContain("old-conversation");
+				onTurnSuccess,
+			});
+			const unsubscribe = agent.subscribe(event => {
+				if (event.type !== "agent_end") return;
+				unsubscribe();
+				runtime.reset();
+			});
+			try {
+				runtime.onTurnEnd([{ role: "user", content: "old conversation", timestamp: 1 }]);
+				await settleUntil(() => mock.calls.length === 1);
+				await new Promise<void>(resolve => setImmediate(resolve));
+				expect(onTurnSuccess).not.toHaveBeenCalled();
+				expect(runtime.yielded).toBe(false);
+				runtime.onTurnEnd([{ role: "user", content: "current conversation", timestamp: 2 }]);
+				await settleUntil(() => runtime.yielded);
+				expect(onTurnSuccess).toHaveBeenCalledTimes(1);
+				expect(JSON.stringify(mock.calls[1].context.messages)).not.toContain("old review");
+				expect(JSON.stringify(mock.calls[1].context.messages)).toContain("current conversation");
+			} finally {
+				unsubscribe();
+				runtime.dispose();
+			}
 		});
 
 		it("retries the interrupted batch after a session transition rolls back", async () => {

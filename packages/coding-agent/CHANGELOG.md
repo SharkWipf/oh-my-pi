@@ -86,6 +86,7 @@
 - Manual source-state updates now publish complete metadata batches without serializing cold history; file-backed publication preserves the original journal bytes and stages the copy asynchronously.
 - Atomic session replacement now surfaces failed EPERM rollback instead of reporting success and preserves a newer target when the original operation loses its commit guard.
 - Fixed cumulative usage remaining stale after supported in-place session-entry rewrites; derived controls and credential pins are refreshed without moving the selected branch.
+- Fixed advisor resets retaining late-aborted prompt state and replaying stale guidance into the next review. Invalidated reviews no longer count as completed; ordinary provider error and abort recovery is unchanged.
 - The startup update notice counts every change in a release: bullets written above a `###` heading now count under `Other`, and `+`/`*` markers and lightly indented bullets count like `-`.
 - Fixed Codex Astra retaining its larger window after disabling Extended Context, including cached models; explicit model overrides still take precedence.
 - Fixed explicit Codex context-window overrides widening past the server-honored maximum; they now clamp to the documented ceiling like upstream Codex ([#11157](https://github.com/can1357/oh-my-pi/pull/11157) by [@H4vC](https://github.com/H4vC)).
