@@ -225,7 +225,6 @@ export class SessionRequirements {
 			projectId: this.host.sessionManager.getCwd(),
 			sessionId,
 			epoch: this.#epoch,
-			isSourceApplicable: source => this.host.sessionManager.isRequirementsSourceApplicable(source),
 			branchId: `${sessionId}:${this.#epoch}:${this.#lifecycle}`,
 		});
 	}
