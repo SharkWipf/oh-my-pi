@@ -269,3 +269,100 @@ describe("recoverOrphanedBackups", () => {
 		expect(await storage.readText(primary)).toBe("newer");
 	});
 });
+
+describe("FileSessionStorage.appendTextAtomic EPERM recovery", () => {
+	let sessionDir: string;
+	beforeEach(async () => {
+		sessionDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-append-eperm-"));
+	});
+	afterEach(async () => {
+		await fsp.rm(sessionDir, { recursive: true, force: true });
+	});
+
+	it("publishes the complete suffix through the move-aside fallback", async () => {
+		const storage = new RenameEpermOnceStorage();
+		const target = path.join(sessionDir, "session.jsonl");
+		await fsp.writeFile(target, "seed\n");
+		storage.failNextSessionReplace = true;
+		await storage.appendTextAtomic(target, "one\ntwo\n");
+		expect(await storage.readText(target)).toBe("seed\none\ntwo\n");
+		expect(await fsp.readdir(sessionDir)).toEqual(["session.jsonl"]);
+	});
+
+	it("restores the prefix if the fallback guard rejects", async () => {
+		const storage = new RenameEpermOnceStorage();
+		const target = path.join(sessionDir, "session.jsonl");
+		await fsp.writeFile(target, "seed\n");
+		storage.failNextSessionReplace = true;
+		let checks = 0;
+		await storage.appendTextAtomic(target, "one\ntwo\n", { commitGuard: () => ++checks === 1 });
+		expect(await storage.readText(target)).toBe("seed\n");
+		expect(await fsp.readdir(sessionDir)).toEqual(["session.jsonl"]);
+	});
+
+	it("restores the prefix and surfaces a failed replacement without a partial batch", async () => {
+		const failure = new FsCodeError("EPERM", "atomic suffix replacement denied");
+		class FailedReplaceStorage extends FileSessionStorage {
+			override renameSync(source: string, target: string): void {
+				if (source.endsWith(".tmp")) throw failure;
+				super.renameSync(source, target);
+			}
+		}
+		const storage = new FailedReplaceStorage();
+		const target = path.join(sessionDir, "session.jsonl");
+		await fsp.writeFile(target, "seed\n");
+		await expect(storage.appendTextAtomic(target, "one\ntwo\n")).rejects.toBe(failure);
+		expect(await storage.readText(target)).toBe("seed\n");
+		expect(await fsp.readdir(sessionDir)).toEqual(["session.jsonl"]);
+	});
+
+	it("surfaces a failed guard-rejection restore and retains the recoverable prefix", async () => {
+		const original = new FsCodeError("EPERM", "original replacement denied");
+		const rollback = new FsCodeError("EIO", "backup restore failed");
+		class FailedGuardRestoreStorage extends FileSessionStorage {
+			backupPath: string | undefined;
+			override renameSync(source: string, target: string): void {
+				if (source.endsWith(".tmp")) throw original;
+				if (source.endsWith(".bak")) throw rollback;
+				if (target.endsWith(".bak")) this.backupPath = target;
+				super.renameSync(source, target);
+			}
+		}
+		const storage = new FailedGuardRestoreStorage();
+		const target = path.join(sessionDir, "session.jsonl");
+		await fsp.writeFile(target, "seed\n");
+		let checks = 0;
+		const error = await storage
+			.appendTextAtomic(target, "one\ntwo\n", {
+				commitGuard: () => ++checks === 1,
+			})
+			.then(
+				() => undefined,
+				error => error,
+			);
+		expect(error).toBeInstanceOf(Error);
+		expect(error.cause).toBe(original);
+		expect(error.message).toContain(rollback.message);
+		if (!storage.backupPath) throw new Error("Expected recoverable backup");
+		expect(await storage.readText(storage.backupPath)).toBe("seed\n");
+		expect(storage.existsSync(target)).toBe(false);
+		expect((await fsp.readdir(sessionDir)).filter(name => name.endsWith(".tmp"))).toEqual([]);
+	});
+
+	it("does not restore stale prefix over a fresh target when the fallback guard rejects", async () => {
+		const storage = new RenameEpermOnceStorage();
+		const target = path.join(sessionDir, "session.jsonl");
+		await fsp.writeFile(target, "seed\n");
+		storage.failNextSessionReplace = true;
+		let checks = 0;
+		await storage.appendTextAtomic(target, "one\ntwo\n", {
+			commitGuard: () => {
+				if (++checks === 1) return true;
+				storage.writeTextSync(target, "fresh\n");
+				return false;
+			},
+		});
+		expect(await storage.readText(target)).toBe("fresh\n");
+		expect(await fsp.readdir(sessionDir)).toEqual(["session.jsonl"]);
+	});
+});

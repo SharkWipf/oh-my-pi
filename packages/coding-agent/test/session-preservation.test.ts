@@ -40,6 +40,13 @@ class FaultStorage extends FileSessionStorage {
 		}
 		await super.writeTextAtomic(file, content, options);
 	}
+	override async appendTextAtomic(file: string, content: string, options?: WriteTextAtomicOptions): Promise<void> {
+		if (this.failAtomic) {
+			this.failAtomic = false;
+			throw new Error("manual atomic publication failed");
+		}
+		await super.appendTextAtomic(file, content, options);
+	}
 	override async drain(): Promise<void> {
 		if (this.failDrain) {
 			this.failDrain = false;

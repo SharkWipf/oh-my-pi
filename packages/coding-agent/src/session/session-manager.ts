@@ -701,7 +701,7 @@ export class SessionManager {
 	 * `null` outside an active relocation.
 	 */
 	#sessionFileRelocating: { source: string; dest: string } | null = null;
-	/** Atomic entry batch currently staged for a full-file commit. */
+	/** Atomic entry batch currently staged for publication. */
 	#atomicEntryBatch: AtomicEntryBatch | undefined;
 
 	#artifactManager: ArtifactManager | null = null;
@@ -1049,23 +1049,24 @@ export class SessionManager {
 	}
 
 	/**
-	 * Rewrite the whole file atomically (temp-write + rename, EPERM-safe) on the
-	 * disk chain. The body is serialized after the writer is closed. The fence
-	 * is enabled BEFORE `#closeWriterHandle()` and stays active until the last
+	 * Publish atomically (temp-write + rename, EPERM-safe) on the disk chain.
+	 * An append-only batch supplies its durable prefix length; other callers
+	 * rewrite the whole file. Serialization happens after the writer is closed.
+	 * The fence is enabled BEFORE `#closeWriterHandle()` and stays active until the last
 	 * atomic publish returns, so a sync append landing in the close-yield window
 	 * cannot open a fresh writer that the pending replacement would then detach
 	 * from the current JSONL path. A `commitGuard` also prevents a superseding
 	 * synchronous rewrite from being overwritten by the stale body serialized
 	 * before it ran.
 	 */
-	async #rewriteAtomically(): Promise<void> {
+	async #rewriteAtomically(appendFrom?: number): Promise<void> {
 		if (!this.#persist || !this.#sessionFile) return;
 		if (this.#released) return;
 
 		const startEpoch = this.#diskEpoch;
 		await this.#scheduleDiskWork(
 			async () => {
-				if (await this.#runFencedAtomicRewrite(startEpoch)) {
+				if (await this.#runFencedAtomicRewrite(startEpoch, appendFrom)) {
 					this.#fileIsCurrent = true;
 					this.#materializeBreadcrumb();
 					this.#rewriteRequired = false;
@@ -1078,14 +1079,14 @@ export class SessionManager {
 
 	/**
 	 * Shared fenced atomic-rewrite loop used by `#rewriteAtomically` and the
-	 * `#persistTitleChangeEntry` fallback. Holds `#atomicRewriteActive` across
-	 * the writer close and the full-file replace, and loops on
-	 * `#atomicRewriteDirty` so any fenced append that lands during the rewrite
-	 * is captured before the task resolves. Returns `false` when the disk epoch
+	 * `#persistTitleChangeEntry` fallback. Holds the epoch fence across writer
+	 * close and publication, and loops on `#atomicRewriteDirty` so a fenced
+	 * append landing during publication is captured before the task resolves.
+	 * Returns `false` when the disk epoch
 	 * moved (a superseding synchronous rewrite has taken over) so callers skip
 	 * their post-publish state updates.
 	 */
-	async #runFencedAtomicRewrite(epoch: number): Promise<boolean> {
+	async #runFencedAtomicRewrite(epoch: number, appendFrom?: number): Promise<boolean> {
 		if (this.#released) return false;
 		this.#atomicRewriteFenceEpoch = epoch;
 		try {
@@ -1095,9 +1096,20 @@ export class SessionManager {
 				const sessionFile = this.#sessionFile;
 				if (!sessionFile) return false;
 				if (this.#diskEpoch !== epoch) return false;
-				await this.#storage.writeTextAtomic(sessionFile, this.#fileBody(), {
-					commitGuard: () => !this.#released && this.#diskEpoch === epoch,
-				});
+				const options = { commitGuard: () => !this.#released && this.#diskEpoch === epoch };
+				if (appendFrom === undefined) {
+					await this.#storage.writeTextAtomic(sessionFile, this.#fileBody(), options);
+				} else {
+					// Snapshot only the unpublished tail. Entries arriving during storage
+					// publication dirty the fence and belong to the next suffix, not this one.
+					const end = this.#entries.length;
+					if (appendFrom < end) {
+						let suffix = "";
+						for (let i = appendFrom; i < end; i++) suffix += this.#lineFor(this.#entries[i]);
+						await this.#storage.appendTextAtomic(sessionFile, suffix, options);
+						appendFrom = end;
+					}
+				}
 				if (this.#diskEpoch !== epoch) return false;
 			} while (this.#atomicRewriteDirty);
 			return true;
@@ -1867,11 +1879,11 @@ export class SessionManager {
 	}
 
 	/**
-	 * Stage a synchronous group of entry appends and publish the resulting full
-	 * journal with one atomic replace. A failed publish removes only the staged
-	 * entries, preserves/reparents entries appended concurrently, restores the
-	 * prior durable file view, and clears the failed writer latch for retry.
-	 *
+	 * Stage a synchronous group of entry appends and publish the whole batch as
+	 * one atomic suffix without reserializing durable history. A failed publish
+	 * removes only the staged entries, preserves/reparents concurrent appends,
+	 * restores the prior durable file view, and clears the failed writer latch
+	 * for retry.
 	 * The callback MUST be synchronous.
 	 */
 	appendEntriesAtomically<T>(append: () => T): Promise<T> {
@@ -1891,6 +1903,8 @@ export class SessionManager {
 			throw error;
 		}
 
+		// All entries through this cursor are durable, including appends during flush.
+		const appendFrom = this.#entries.length;
 		const batch: AtomicEntryBatch = {
 			collecting: true,
 			entryIds: new Set(),
@@ -1907,7 +1921,7 @@ export class SessionManager {
 			} finally {
 				batch.collecting = false;
 			}
-			await this.#rewriteAtomically();
+			await this.#rewriteAtomically(appendFrom);
 			if (!this.#fileIsCurrent || this.#rewriteRequired) {
 				throw new Error("Atomic session batch was superseded before commit.");
 			}

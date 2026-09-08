@@ -287,6 +287,41 @@ export class IndexedSessionStorage implements SessionStorage {
 		}
 	}
 
+	async appendTextAtomic(path: string, suffix: string, options?: WriteTextAtomicOptions): Promise<void> {
+		const commitGuard = options?.commitGuard;
+		if (commitGuard && !commitGuard()) return;
+		await this.#awaitPath(path);
+		if (commitGuard && !commitGuard()) return;
+		const previous = this.#index.get(path);
+		if (!previous) throw enoent(path);
+		const size = previous.size + byteLength(suffix);
+		const mtimeMs = this.#allocMtimeMs();
+		this.#setIndex(path, size, mtimeMs);
+		await this.#enqueuePath(
+			path,
+			async () => {
+				if (commitGuard && !commitGuard()) {
+					if (this.#index.get(path)?.mtimeMs === mtimeMs) this.#restoreIndex(path, previous);
+					return;
+				}
+				try {
+					await this.#backend.append(path, suffix, mtimeMs);
+				} catch (err) {
+					const error = toError(err);
+					try {
+						const actual = await this.#backend.readFull(path);
+						if (actual !== null && byteLength(actual) === size && actual.endsWith(suffix)) return;
+					} catch {
+						// Preserve the original append failure; verification was unavailable.
+					}
+					if (this.#index.get(path)?.mtimeMs === mtimeMs) this.#restoreIndex(path, previous);
+					throw error;
+				}
+			},
+			{ trackDrain: false },
+		);
+	}
+
 	async rename(src: string, dst: string): Promise<void> {
 		await this.#awaitPath(src);
 		await this.#awaitPath(dst);

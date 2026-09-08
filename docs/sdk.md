@@ -301,6 +301,8 @@ Maintenance compaction and handoff freeze applicable requirements with their ope
 - `await session.resetPreservedMessageOverrides(snapshot)` returns `{ reset, skipped }`. Same-branch suffixes are allowed but excluded from the captured targets; newer manual edits are skipped instead of overwritten. Branch/reset/session changes reject stale confirmation. Reusing a completed snapshot is idempotent, and durable-write recovery reuses its committed journal transition.
 - `await session.recoverCompactionPersistence()` retries durable publication of the same frozen compaction event. It never appends a duplicate or installs an old result onto a different active branch.
 
+Append-only metadata batches preserve the existing journal bytes and serialize only their new entries. `SessionStorage` implementations must provide `appendTextAtomic(path, suffix, options?)`: publish the complete suffix as one operation against an existing file and honor the same commit guard as `writeTextAtomic`. File storage stages an asynchronous copy of the opaque prefix plus the suffix before guarded replacement; memory and indexed backends append the complete suffix without materializing the old journal in the session manager. Actual source rewrites and authoritative failure recovery still use full atomic replacement.
+
 ## `AgentSession` lifecycle and disposal
 
 Call `await session.dispose()` when the embedder is completely done with a session. `dispose()` starts disposal itself and is idempotent: repeated or concurrent calls receive the same teardown promise, so shutdown events and owned resources are not drained twice.
