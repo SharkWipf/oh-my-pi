@@ -15,6 +15,10 @@
 - Kept differing original-submission and delivered-message source coordinates distinct through native history deduplication, persistence, and controlled rewrites. Ordinary messages still need no source metadata.
 - Escaped reserved Harmony markers in typed native replay text at Responses, Azure Responses, and Codex request boundaries without changing identifiers, schemas, encrypted replay state, or image bytes and original-image provenance.
 - Native Responses source capture now records actual normalized text/tool/image correspondence and preserves it through controlled rewrites and JSON replay. Shared logical readers expose typed visible fields and images without counting native mirrors twice or traversing opaque provider state.
+### Fixed
+
+- Fixed OpenAI, Azure Responses, and Codex thinking summaries arriving only in final snapshots: late text and unseen suffixes now reach streaming clients before completion, while divergent display text remains append-only and replay signatures retain the authoritative provider item.
+- Buffered raw Responses reasoning until completion so readable summaries take precedence, retaining raw-only fallback and completing reasoning when a terminal snapshot omits per-item completion.
 ## [18.1.15] - 2026-09-08
 
 ### Fixed

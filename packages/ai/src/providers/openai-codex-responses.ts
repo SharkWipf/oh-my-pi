@@ -110,6 +110,7 @@ import {
 	appendResponsesToolResultMessages,
 	applyOpenAIServiceTier,
 	applyReasoningSummaryDone,
+	applyReasoningSummaryTextDone,
 	buildResponsesDeltaInput,
 	computerCallMetadata,
 	convertResponsesAssistantMessage,
@@ -812,6 +813,7 @@ interface CodexOpenItem {
 	contentIndex: number;
 	itemId?: string;
 	outputIndex?: number;
+	rawThinking?: string;
 }
 
 class CodexStreamRuntime {
@@ -2235,8 +2237,7 @@ class CodexStreamProcessor {
 		}
 
 		if (eventType === "response.reasoning_summary_text.done") {
-			// Outside the cutoff contract the text already streamed via `.delta`.
-			if (!this.#sequentialCutoffSummaries) return firstTokenTime;
+			// Completed text can carry a late summary even outside cutoff delivery.
 			const entry = this.runtime.openItemForEvent(rawEvent);
 			if (entry?.item.type === "reasoning" && entry.block?.type === "thinking") {
 				this.runtime.takeSummaryDeltas(entry);
@@ -2245,15 +2246,19 @@ class CodexStreamProcessor {
 					typeof rawEvent.summary_index === "number" && Number.isFinite(rawEvent.summary_index)
 						? Math.trunc(rawEvent.summary_index)
 						: 0;
-				applyReasoningSummaryDone(
-					this.runtime.cutoffSummaries,
-					entry.block,
-					typeof rawEvent.text === "string" ? rawEvent.text : "",
-					summaryIndex,
-					stream,
-					output,
-					entry.contentIndex,
-				);
+				if (this.#sequentialCutoffSummaries) {
+					applyReasoningSummaryDone(
+						this.runtime.cutoffSummaries, entry.block,
+						typeof rawEvent.text === "string" ? rawEvent.text : "", summaryIndex,
+						stream, output, entry.contentIndex,
+					);
+				} else {
+					applyReasoningSummaryTextDone(
+						entry.item, entry.block,
+						typeof rawEvent.text === "string" ? rawEvent.text : "", summaryIndex,
+						stream, output, entry.contentIndex,
+					);
+				}
 			}
 			return firstTokenTime;
 		}
@@ -2262,13 +2267,7 @@ class CodexStreamProcessor {
 			const entry = this.runtime.openItemForEvent(rawEvent);
 			const delta = typeof rawEvent.delta === "string" ? rawEvent.delta : "";
 			if (entry?.item.type === "reasoning" && entry.block?.type === "thinking") {
-				entry.block.thinking += delta;
-				stream.push({
-					type: "thinking_delta",
-					contentIndex: entry.contentIndex,
-					delta,
-					partial: output,
-				});
+				entry.rawThinking = (entry.rawThinking ?? "") + delta;
 			}
 			return firstTokenTime;
 		}
@@ -2419,19 +2418,17 @@ class CodexStreamProcessor {
 		}
 
 		if (item.type === "reasoning" && block?.type === "thinking") {
-			this.#flushSummaryDeltas(entry);
-			block.thinking = finalizeReasoningThinking(
+			if (item.summary?.some(part => part.text)) this.runtime.takeSummaryDeltas(entry);
+			else this.#flushSummaryDeltas(entry);
+			finalizeReasoningThinking(
 				item,
-				block.thinking,
-				this.#sequentialCutoffSummaries ? this.runtime.cutoffSummaries : undefined,
-			);
-			block.thinkingSignature = JSON.stringify(item);
-			stream.push({
-				type: "thinking_end",
+				block,
+				stream,
+				output,
 				contentIndex,
-				content: block.thinking,
-				partial: output,
-			});
+				this.#sequentialCutoffSummaries ? this.runtime.cutoffSummaries : undefined,
+				entry?.rawThinking,
+			);
 			runtime.contentBlocks.push({ itemIndex: runtime.nativeOutputItems.length - 1, contentIndex });
 			runtime.closeOpenItem(entry);
 			return;
@@ -2525,6 +2522,19 @@ class CodexStreamProcessor {
 		runtime.sawTerminalEvent = true;
 		const rawResponse = rawEvent.response;
 		const response = rawResponse && typeof rawResponse === "object" ? rawResponse : undefined;
+		const responseOutput = response && "output" in response && Array.isArray(response.output) ? response.output : [];
+		const finishReasoning = (entry: CodexOpenItem | null): void => {
+			if (entry?.item.type !== "reasoning") return;
+			const finalItem = entry.itemId
+				? responseOutput.find(item => item?.type === "reasoning" && item.id === entry.itemId)
+				: responseOutput[entry.outputIndex ?? -1];
+			const item = finalItem?.type === "reasoning" ? finalItem : entry.item;
+			this.#handleOutputItemDone({ item, output_index: entry.outputIndex });
+		};
+		// Closing an item removes it from both maps, so each is finalized once.
+		for (const entry of runtime.openItems.values()) finishReasoning(entry);
+		for (const entry of runtime.openItemsByOutputIndex.values()) finishReasoning(entry);
+		finishReasoning(runtime.currentEntry);
 		const responseId = response && "id" in response && typeof response.id === "string" ? response.id : undefined;
 		const usage = response && "usage" in response ? parseCodexResponseUsage(response.usage) : undefined;
 		const serviceTier =

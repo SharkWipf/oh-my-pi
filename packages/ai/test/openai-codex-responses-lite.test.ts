@@ -1075,10 +1075,10 @@ describe("openai-codex concurrent reasoning summaries", () => {
 		const result = await stream.result();
 
 		expect(captured?.body.stream_options).toEqual({ reasoning_summary_delivery: "sequential_cutoff" });
-		expect(thinkingDeltas).toEqual(["Plan", "\n\nPlanning details", "\n\nInspect", " details"]);
+		expect(thinkingDeltas).toEqual(["Plan", "\n\nPlanning details", "\n\nInspect", " details", "\n\nUnseen final"]);
 		expect(result.stopReason).toBe("stop");
 		const thinking = result.content.find(block => block.type === "thinking");
-		expect(thinking?.thinking).toBe("Plan\n\nPlanning details\n\nInspect details");
+		expect(thinking?.thinking).toBe("Plan\n\nPlanning details\n\nInspect details\n\nUnseen final");
 		expect(thinking?.thinking).toBe(thinkingDeltas.join(""));
 		const text = result.content.find(block => block.type === "text");
 		expect(text?.text).toBe("Hello");
@@ -1239,11 +1239,11 @@ describe("openai-codex concurrent reasoning summaries", () => {
 			"",
 			"Enhancing caching",
 		]);
-		// Streamed deltas match each block that streamed; the payload-only block
-		// surfaces its unseen suffix at finalization without a delta.
+		// Payload-only suffixes reach delta consumers as well as the final snapshot.
 		expect([...deltasByBlock.entries()]).toEqual([
 			[0, "Planning refactor"],
 			[1, "Designing resolution"],
+			[3, "Enhancing caching"],
 		]);
 		// The replay-only block keeps its signed reasoning item so history replay
 		// still round-trips encrypted reasoning.
