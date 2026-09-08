@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { remapCompactionSourceRepresentation } from "@oh-my-pi/pi-agent-core/compaction/source";
 import type { SourceLayoutPart, SourceRepresentation } from "@oh-my-pi/pi-ai/compaction-source";
+import { getSourceOrigin } from "@oh-my-pi/pi-ai/utils/source-origin";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
@@ -75,7 +76,8 @@ describe("chronological committed source context", () => {
 		const session = SessionManager.inMemory();
 		try {
 			const image = { type: "image" as const, data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=", mimeType: "image/png" };
-			const selected = session.appendMessage({ role: "user", content: "EXPANDED_WITHOUT_IMAGE", timestamp: 1,
+			const delivered = [{ type: "text" as const, text: "EXPANDED_WITH_IMAGE" }, image];
+			const selected = session.appendMessage({ role: "user", content: delivered, timestamp: 1,
 				originalSubmission: { text: "raw input", images: [image] } });
 			session.appendCompaction("recap", undefined, selected, 1000, { method: "soft", preserveData: {
 				sourceRepresentation: representation([
@@ -83,10 +85,14 @@ describe("chronological committed source context", () => {
 					{ kind: "original-image", entryId: selected, order: 0, projection: "original", blockIndex: 1, currentBlockIndex: 1 },
 				]),
 			} });
-			expect(userContents(session.buildSessionContext().messages)).toEqual([
-				[{ type: "text", text: "raw input" }, image], "EXPANDED_WITHOUT_IMAGE",
-			]);
-			expect(userContents(session.buildSessionContext({ transcript: true }).messages)).toEqual(["EXPANDED_WITHOUT_IMAGE"]);
+			const context = session.buildSessionContext();
+			expect(userContents(context.messages)).toEqual([[{ type: "text", text: "raw input" }, image], delivered]);
+			const imageOrigins = context.messages.filter(message => message.role === "user")
+				.flatMap(message => Array.isArray(message.content) ? message.content.filter(block => block.type === "image") : [])
+				.map(block => getSourceOrigin(block));
+			expect(imageOrigins.map(origin => origin?.kind === "source" ? origin.parts.map(part => part.projection) : undefined))
+				.toEqual([["original"], [undefined]]);
+			expect(userContents(session.buildSessionContext({ transcript: true }).messages)).toEqual([delivered]);
 		} finally { await session.close(); }
 	});
 

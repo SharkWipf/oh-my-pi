@@ -56,7 +56,8 @@ export function getOriginalSourceMessage(message: UserMessage): UserMessage {
 			const delivered = content[index + 1];
 			return delivered?.type === "image" && delivered.data === image.data && delivered.mimeType === image.mimeType;
 		}))) return message;
-	return { ...message, providerPayload: undefined, content: images?.length ? [{ type: "text", text }, ...images] : text };
+	// The two projections bind independent transient origins; their image blocks cannot alias.
+	return { ...message, providerPayload: undefined, content: images?.length ? [{ type: "text", text }, ...images.map(image => ({ ...image }))] : text };
 }
 declare module "@oh-my-pi/pi-ai" {
 	interface UserMessage {
