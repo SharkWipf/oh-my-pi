@@ -246,15 +246,14 @@ test("mechanics reject invented evidence, producer authority flags and incomplet
 	const f = await fixture();
 	const candidate = f.operation();
 	expect(() => admitRequirementsCandidates({ ...f.envelope(), manifest: [] }, f.input)).toThrow("Not every original");
+	const malformedEvidence = {
+		...f.envelope(),
+		operations: [{ ...candidate, evidence: [{ ...candidate.evidence[0], end: 999999 }] }],
+	};
+	expect(() => admitRequirementsCandidates(malformedEvidence, f.input)).toThrow("unsupported fields");
 	expect(() =>
 		admitRequirementsCandidates(
-			f.envelope([{ ...candidate, evidence: [{ ...candidate.evidence[0], end: 999999 }] }]),
-			f.input,
-		),
-	).toThrow("unsupported fields");
-	expect(() =>
-		admitRequirementsCandidates(
-			f.envelope([{ ...candidate, independentlyValidated: true } as typeof candidate]),
+			{ ...f.envelope(), operations: [{ ...candidate, independentlyValidated: true }] },
 			f.input,
 		),
 	).toThrow("unsupported fields");
