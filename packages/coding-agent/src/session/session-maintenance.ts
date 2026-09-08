@@ -2177,7 +2177,7 @@ export class SessionMaintenance {
 			type: "compaction", id: Snowflake.next(), parentId: branch.at(-1)?.id ?? null,
 			timestamp: new Date().toISOString(), summary: args.summary, shortSummary: args.shortSummary,
 			firstKeptEntryId: args.firstKeptEntryId, tokensBefore: args.tokensBefore, preserveData: args.preserveData,
-			method: args.method, providerReplayThroughEntryId: args.providerReplayThroughEntryId,
+			method: args.method, details: args.details, providerReplayThroughEntryId: args.providerReplayThroughEntryId,
 		};
 		const context = buildSessionContext([...branch, prospective], prospective.id, undefined, { diagnostics: true });
 		const target = operation.retentionTarget;
@@ -2207,7 +2207,9 @@ export class SessionMaintenance {
 		frozen.diagnostics = this.#recordCompactionDiagnostics(frozen);
 		const tokensAfter = frozen.diagnostics
 			? frozen.diagnostics.rows.some(row => row.quantity.tokens === null) ? undefined : frozen.diagnostics.total.tokens ?? undefined
-			: this.#projectCompactedContextTokens(frozen);
+			: isRecord(frozen.details) && frozen.details.kind === "experimental-context-rollover"
+				? this.#projectExperimentalContextRolloverTokens(frozen)
+				: this.#projectCompactedContextTokens(frozen);
 		// No await (including hook work) may separate this validation from append.
 		if (this.#pendingCompaction || !this.#compactionInputValid(operation)) throw new CompactionCancelledError();
 		const entryId = operation.manager.appendCompaction(

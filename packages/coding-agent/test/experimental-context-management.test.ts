@@ -569,11 +569,11 @@ describe("experimental context management", () => {
 			.getEntries()
 			.find((candidate): candidate is CompactionEntry => candidate.type === "compaction");
 		if (!entry) throw new Error("Expected a rollover boundary");
-		const expected =
-			computeNonMessageTokens(session, agent.tokenizer) +
-			agent.tokenizer.countMessages(manager.buildSessionContext().messages);
+		const emitted = convertToLlm(manager.buildSessionContext().messages);
+		const expected = computeNonMessageTokens(session, agent.tokenizer) + agent.tokenizer.countMessages(emitted);
 		expect(entry.tokensAfter).toBe(expected);
-		expect(entry.tokensAfter).toBeGreaterThan(agent.tokenizer.countMessages(manager.buildSessionContext().messages));
+		expect(entry.diagnostics?.total.tokens).toBe(expected);
+		expect(session.getCompactionDiagnostics("current")?.total.tokens).toBe(expected);
 	});
 
 	it("skips built-in remote memory recall during local rollover while preserving the boundary", async () => {
