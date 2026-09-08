@@ -11,16 +11,17 @@ import type {
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
 import { decodeDataUri } from "@oh-my-pi/pi-ai/providers/openai-data-uri";
+import { combineContentSourceOrigins, exportItemOrigins, importItemOrigins, setSourceOrigin, transferMessageSourceOrigin } from "@oh-my-pi/pi-ai/utils/source-origin";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { providerImageBudget } from "@oh-my-pi/snapcompact";
 import { supportsRemoteImageUrls } from "../blob-broker/context-images";
 import { imageDecodeFailureReason } from "../utils/image-loading";
 
-const TOOL_RESULT_IMAGE_OMISSION: TextContent = {
+const TOOL_RESULT_IMAGE_OMISSION: TextContent = setSourceOrigin({
 	type: "text",
 	text: "[image omitted: provider image limit]",
-};
+}, { kind: "synthetic", reason: "image-omission" });
 
 function countImages(context: Context): number {
 	let count = 0;
@@ -33,9 +34,13 @@ function countImages(context: Context): number {
 	return count;
 }
 
+interface ImageClampState {
+	remainingDrops: number;
+}
+
 function clampContent(
 	content: readonly (TextContent | ImageContent)[],
-	state: { remainingDrops: number },
+	state: ImageClampState,
 ): (TextContent | ImageContent)[] | undefined {
 	let changed = false;
 	const clamped: (TextContent | ImageContent)[] = [];
@@ -50,33 +55,36 @@ function clampContent(
 	return changed ? clamped : undefined;
 }
 
-function clampUserMessage(message: UserMessage, state: { remainingDrops: number }): UserMessage {
+function clampUserMessage(message: UserMessage, state: ImageClampState): UserMessage {
 	if (!Array.isArray(message.content) || state.remainingDrops <= 0) return message;
 	const content = clampContent(message.content, state);
-	return content ? { ...message, content, providerPayload: undefined } : message;
+	return content ? transferMessageSourceOrigin(message, { ...message, content, providerPayload: undefined }) : message;
 }
 
-function clampDeveloperMessage(message: DeveloperMessage, state: { remainingDrops: number }): DeveloperMessage {
+function clampDeveloperMessage(message: DeveloperMessage, state: ImageClampState): DeveloperMessage {
 	if (!Array.isArray(message.content) || state.remainingDrops <= 0) return message;
 	const content = clampContent(message.content, state);
-	return content ? { ...message, content, providerPayload: undefined } : message;
+	return content ? transferMessageSourceOrigin(message, { ...message, content, providerPayload: undefined }) : message;
 }
 
-function clampToolResultMessage(message: ToolResultMessage, state: { remainingDrops: number }): ToolResultMessage {
+function clampToolResultMessage(message: ToolResultMessage, state: ImageClampState): ToolResultMessage {
 	if (state.remainingDrops <= 0) return message;
 	const content = clampContent(message.content, state);
 	if (!content) return message;
-	return { ...message, content: content.length > 0 ? content : [TOOL_RESULT_IMAGE_OMISSION] };
+	return transferMessageSourceOrigin(message, { ...message, content: content.length > 0 ? content : [TOOL_RESULT_IMAGE_OMISSION] });
 }
 
-/** Drops oldest transient image blocks so outgoing vision requests fit the active provider's image cap. */
-export function clampProviderContextImages(context: Context, model: Model): Context {
+/** Drops oldest transient images to stay within the provider image cap. */
+export function clampProviderContextImages(
+	context: Context,
+	model: Model,
+): Context {
 	if (!model.input.includes("image")) return context;
 	const limit = providerImageBudget(model.provider);
 	const totalImages = countImages(context);
 	if (totalImages <= limit) return context;
 
-	const state = { remainingDrops: totalImages - limit };
+	const state: ImageClampState = { remainingDrops: totalImages - limit };
 	const messages = context.messages.map(message => {
 		switch (message.role) {
 			case "user":
@@ -194,10 +202,10 @@ async function replaceUnreadableContent(
 		const reason = await unreadableImageReason(part);
 		if (reason === null) continue;
 		replaced ??= [...content];
-		replaced[index] = {
+		replaced[index] = setSourceOrigin({
 			type: "text",
 			text: `[image omitted: undecodable ${part.mimeType ?? "image"} data (${reason})]`,
-		};
+		}, { kind: "synthetic", reason: "image-omission" });
 	}
 	return replaced;
 }
@@ -214,7 +222,7 @@ async function replaceUnreadableNativePart(part: unknown): Promise<Record<string
 	if (!image) return undefined;
 	const reason = await unreadableImageReason(image);
 	if (reason === null) return undefined;
-	return { type: "input_text", text: `[image omitted: undecodable ${image.mimeType} data (${reason})]` };
+	return setSourceOrigin({ type: "input_text", text: `[image omitted: undecodable ${image.mimeType} data (${reason})]` }, { kind: "synthetic", reason: "image-omission" });
 }
 
 /** `undefined` when the item needs no rewrite. */
@@ -232,7 +240,7 @@ async function replaceUnreadableNativeItem(
 		content ??= [...item.content];
 		content[index] = rewritten;
 	}
-	return content ? { ...item, content } : undefined;
+	return content ? setSourceOrigin({ ...item, content }, combineContentSourceOrigins(content)) : undefined;
 }
 
 /**
@@ -255,6 +263,7 @@ async function replaceUnreadableNativePayload(
 	payload: ProviderPayload | undefined,
 ): Promise<ProviderPayload | undefined> {
 	if (payload?.type !== "openaiResponsesHistory" || !Array.isArray(payload.items)) return undefined;
+	importItemOrigins(payload.items, payload.origins);
 	let items: Array<Record<string, unknown>> | undefined;
 	for (let index = 0; index < payload.items.length; index++) {
 		const rewritten = await replaceUnreadableNativeItem(payload.items[index]!);
@@ -262,7 +271,7 @@ async function replaceUnreadableNativePayload(
 		items ??= [...payload.items];
 		items[index] = rewritten;
 	}
-	return items ? { ...payload, items } : undefined;
+	return items ? { ...payload, items, origins: exportItemOrigins(items) } : undefined;
 }
 
 /**
@@ -294,7 +303,7 @@ async function dropUnreadableFromMessage(message: Message, model: Model): Promis
 				: undefined;
 			const providerPayload = await replaceUnreadableNativePayload(message.providerPayload);
 			if (!content && !providerPayload) return undefined;
-			return { ...message, ...(content ? { content } : {}), ...(providerPayload ? { providerPayload } : {}) };
+			return transferMessageSourceOrigin(message, { ...message, ...(content ? { content } : {}), ...(providerPayload ? { providerPayload } : {}) });
 		}
 		case "toolResult": {
 			const content = await replaceUnreadableContent(message.content, model);
@@ -305,11 +314,11 @@ async function dropUnreadableFromMessage(message: Message, model: Model): Promis
 			// assistant note built from this result's generic `content`, so the model
 			// still learns the call ran and what it reported — the screenshot bytes
 			// were the only thing lost, and they were unreadable anyway.
-			return {
+			return transferMessageSourceOrigin(message, {
 				...message,
 				...(content ? { content } : {}),
 				...(screenshotReason === null ? {} : { providerMetadata: undefined }),
-			};
+			});
 		}
 		case "assistant":
 			// Assistant payloads replay model OUTPUT items (reasoning, tool calls,

@@ -1,13 +1,18 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import type { Context, ImageContent, Message, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import { cloneWithSourceOrigins, exportItemOrigins, importItemOrigins, invalidateSourceOrigins, transferSourceOrigin } from "@oh-my-pi/pi-ai/utils/source-origin";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	estimateInlineSavings,
+	getInlineFrameAccounting,
+	getInlineTextAccounting,
 	planInlineSwaps,
 	type SnapcompactInlineOptions,
 	SnapcompactInlineTransformer,
 } from "@oh-my-pi/pi-coding-agent/session/snapcompact-inline";
 import * as snapcompact from "@oh-my-pi/snapcompact";
+import { decorateContextImages, inlineContextImages } from "../src/blob-broker/context-images";
+import { convertImageToPng } from "../src/utils/image-loading";
 
 /**
  * Token-dense deterministic word salad: each word is `w` + ≤5 digits, ~7
@@ -484,31 +489,61 @@ describe("SnapcompactInlineTransformer", () => {
 		}
 	});
 
-	it("caches renders across turns: identical input does not re-rasterize", async () => {
-		const spy = spyOn(snapcompact, "renderMany");
-		try {
-			const transformer = new SnapcompactInlineTransformer(
-				withTestShape({ renderSystemPrompt: "all", renderToolResults: true }),
-			);
-			const context = makeContext();
-			const model = makeModel();
+	it("isolates outgoing mutations from cached frames and keeps prior model estimates stable", async () => {
+		const transformer = new SnapcompactInlineTransformer(
+			withTestShape({ renderSystemPrompt: "all", renderToolResults: false }),
+		);
+		const context: Context = { systemPrompt: [denseText(3000)], messages: [userMessage("do the thing")] };
+		const model = makeModel();
+		const first = await transformer.transform(context, model);
+		const frame = (first.messages[0]!.content as (TextContent | ImageContent)[]).find(block => block.type === "image")! as ImageContent;
+		const data = frame.data;
+		const fact = getInlineFrameAccounting(frame)!;
+		expect(fact.estimatedTokens).toBe(snapcompact.resolveShape(model, TEST_SHAPE).frameTokenEstimate);
+		frame.data = "mutated by provider hook";
+		expect(getInlineFrameAccounting(frame)).toBeUndefined();
+		const second = await transformer.transform(context, model);
+		const restored = (second.messages[0]!.content as (TextContent | ImageContent)[]).find(block => block.type === "image")! as ImageContent;
+		expect(restored.data === data).toBe(true);
+		expect(getInlineFrameAccounting(restored)).toEqual(fact);
+		const google = makeModel({ api: "google-generative-ai", provider: "google" });
+		const third = await transformer.transform(context, google);
+		const repriced = (third.messages[0]!.content as (TextContent | ImageContent)[]).find(block => block.type === "image")! as ImageContent;
+		expect(getInlineFrameAccounting(repriced)?.estimatedTokens).toBe(snapcompact.resolveShape(google, TEST_SHAPE).frameTokenEstimate);
+		expect(getInlineFrameAccounting(restored)).toEqual(fact);
+	});
 
-			const first = await transformer.transform(context, model);
-			const callsAfterFirst = spy.mock.calls.length;
-			expect(callsAfterFirst).toBeGreaterThan(0);
-
-			const second = await transformer.transform(context, model);
-			expect(spy.mock.calls.length).toBe(callsAfterFirst);
-
-			const firstFrames = (first.messages[1] as ToolResultMessage).content.slice(1);
-			const secondFrames = (second.messages[1] as ToolResultMessage).content.slice(1);
-			expect(secondFrames.length).toBe(firstFrames.length);
-			for (let i = 0; i < firstFrames.length; i++) {
-				expect(secondFrames[i]).toBe(firstFrames[i]);
-			}
-		} finally {
-			spy.mockRestore();
-		}
+	it("retains identity-bound frame and note facts through real image normalization and rejects stale facts", async () => {
+		const model = makeModel();
+		const transformer = new SnapcompactInlineTransformer(
+			withTestShape({ renderSystemPrompt: "all", renderToolResults: false }),
+		);
+		const original: ImageContent = { type: "image", data: "authored", mimeType: "image/png" };
+		const context: Context = { systemPrompt: [denseText(3000)], messages: [{ role: "user", content: [original], timestamp: 0 }] };
+		const rendered = await transformer.transform(context, model);
+		const content = rendered.messages[0]!.content as (TextContent | ImageContent)[];
+		const frame = content.find(block => block.type === "image" && block !== original)! as ImageContent;
+		const note = content[0]! as TextContent;
+		expect(getInlineTextAccounting(note)).toEqual({ kind: "note", owner: "system" });
+		expect(getInlineTextAccounting({ ...note })).toBeUndefined();
+		expect(getInlineFrameAccounting(original)).toBeUndefined();
+		const converted = await convertImageToPng(frame);
+		const decorated = decorateContextImages({ messages: [{ role: "user", content: [converted], timestamp: 0 }] }, () => "https://example.invalid/frame");
+		const inlined = await inlineContextImages(decorated, async () => null);
+		const finalFrame = (inlined.messages[0]!.content as ImageContent[])[0]!;
+		expect(getInlineFrameAccounting(finalFrame)).toEqual(getInlineFrameAccounting(frame));
+		expect(getInlineFrameAccounting(cloneWithSourceOrigins(finalFrame))).toEqual(getInlineFrameAccounting(frame));
+		const imported = { ...finalFrame };
+		importItemOrigins([imported], exportItemOrigins([finalFrame]));
+		expect(getInlineFrameAccounting(imported)).toBeUndefined();
+		const changedDetail = cloneWithSourceOrigins(finalFrame);
+		changedDetail.detail = "low";
+		expect(getInlineFrameAccounting(changedDetail)).toBeUndefined();
+		expect(getInlineFrameAccounting(transferSourceOrigin(changedDetail, { ...changedDetail }))).toBeUndefined();
+		note.text = "rewritten note";
+		expect(getInlineTextAccounting(note)).toBeUndefined();
+		invalidateSourceOrigins(inlined);
+		expect(getInlineFrameAccounting(finalFrame)).toBeUndefined();
 	});
 });
 
