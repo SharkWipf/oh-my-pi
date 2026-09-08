@@ -627,7 +627,6 @@ export class AgentSession {
 	readonly #preservation: SessionPreservation;
 	#preservationSettingsIdentity: object = {};
 	#preservationPolicyIdentity: object = {};
-	#compactionPendingLive: ReturnType<SessionRequirements["pendingLiveSnapshot"]> | undefined;
 	#preservationSettings: ReturnType<typeof readPreservationPolicySettings> | undefined;
 	#preservedQuery: { query: PreservedMessageQuery; ownership: object; settings: object; sessionId: string; leaf: string | null; tokenizer: Agent["tokenizer"] } | undefined;
 	#preservedQueryBuild: Promise<PreservedMessageQuery> | undefined;
@@ -1822,14 +1821,7 @@ export class AgentSession {
 			isStreaming: () => this.isStreaming,
 			isGeneratingHandoff: () => this.isGeneratingHandoff,
 			compactionOwnership: () => this.#compactionOwnership,
-			compactionPolicyIdentity: () => {
-				const pending = this.requirements.pendingLiveSnapshot();
-				if (pending !== this.#compactionPendingLive) {
-					this.#compactionPendingLive = pending;
-					this.#preservationPolicyIdentity = {};
-				}
-				return this.#preservationPolicyIdentity;
-			},
+			compactionPolicyIdentity: () => this.#preservationPolicyIdentity,
 			compactionSourceSelection: () => this.#compactionSourceSelection(),
 			protectedSourceEntryIds: () => this.#protectedSourceEntryIds(),
 			preservedSourcesChanged: (changedIds, affectedIds) => this.#preservedSourcesChanged(changedIds, affectedIds),
@@ -5668,15 +5660,13 @@ export class AgentSession {
 	async #protectedSourceEntryIds(): Promise<Pick<ReadonlySet<string>, "has">> {
 		const query = await this.preparePreservedMessages();
 		const { P, N } = this.#preservationSelection(query);
-		const pending = new Set(this.requirements.pendingLiveSnapshot().entryIds);
-		return { has: id => P.has(id) || N.has(id) || pending.has(id) };
+		return { has: id => P.has(id) || N.has(id) };
 	}
 
 	async #compactionSourceSelection(): Promise<CompactionSourceSelection> {
 		const query = await this.preparePreservedMessages();
 		const selected = this.#preservationSelection(query);
 		const selectedSources: NonNullable<CompactionSourceSelection["selectedSources"]>[number][] = [];
-		const pendingSourceEntryIds = new Set(this.requirements.pendingLiveSnapshot().entryIds);
 		for (const id of selected.P) {
 			const candidate = selected.candidate(id);
 			const entry = this.sessionManager.getEntry(id);
@@ -5686,14 +5676,6 @@ export class AgentSession {
 			selectedSources.push({ entryId: id, order, message, projection: message !== entry.message ? "original" : undefined,
 				spans: candidate.spans.map(span => ({ blockIndex: span.blockIndex, start: span.text?.start ?? 0, end: span.text?.end ?? 1 })) });
 		}
-		for (const id of pendingSourceEntryIds) {
-			if (selected.P.has(id)) continue;
-			const entry = this.sessionManager.getEntry(id);
-			const order = query.positionOf(id);
-			if (entry?.type !== "message" || order === undefined || entry.message.role !== "user") continue;
-			const message = getOriginalSourceMessage(entry.message);
-			selectedSources.push({ entryId: id, order, message, projection: message !== entry.message ? "original" : undefined });
-		}
 		const admittedNonUserSources: NonNullable<CompactionSourceSelection["admittedNonUserSources"]>[number][] = [];
 		for (const atom of selected.nonUserAtoms()) for (const entry of atom.entries) {
 			const order = query.positionOf(entry.id);
@@ -5701,7 +5683,7 @@ export class AgentSession {
 			admittedNonUserSources.push({ entryId: entry.id, order, message: entry.message,
 				atomicGroup: { id: atom.id, entryIds: [...atom.memberIds] } });
 		}
-		return { selectedSources, admittedNonUserSources, pendingSourceEntryIds, originalSourceMessage: getOriginalSourceMessage };
+		return { selectedSources, admittedNonUserSources, originalSourceMessage: getOriginalSourceMessage };
 	}
 
 	buildDisplaySessionContext(): SessionContext {
