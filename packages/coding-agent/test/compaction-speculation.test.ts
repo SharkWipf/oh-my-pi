@@ -9,7 +9,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { CompactionMethod } from "@oh-my-pi/pi-coding-agent/session/compaction-methods";
 import { SessionMaintenance, type SessionMaintenanceHost } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { SessionRequirements, type RequirementsCallReceipt } from "../src/session/session-requirements";
+
 import * as snapcompactModule from "@oh-my-pi/snapcompact";
 
 const CONTEXT_WINDOW = 100_000;
@@ -76,12 +76,7 @@ describe("async speculative compaction", () => {
 			"requirements.enabled": false,
 		});
 		maintenanceSettings = settings;
-		const requirements = new SessionRequirements({
-			sessionManager, agentStorage: null, settings, modelRegistry, isDisposed: () => false,
-			getContext: () => ({ systemPrompt: agent.state.systemPrompt, messages: agent.state.messages as never }),
-			getModel: () => model,
-			promptOperatorSource: async () => { throw new Error("Publication fixture does not accept operator ingress"); },
-		});
+
 		const host = {
 			agent,
 			sessionManager,
@@ -103,11 +98,7 @@ describe("async speculative compaction", () => {
 			compactionOwnership: () => sessionManager.getSessionId(),
 			compactionPolicyIdentity: () => JSON.stringify(settings.getGroup("compaction")),
 			compactionSourceSelection: async () => ({}),
-			captureCompactionRequirements: async () => {
-				await requirements.observeCommittedSources();
-				return requirements.snapshotApplicable();
-			},
-			recordCompactionRequirementsReceipt: (receipt: RequirementsCallReceipt) => requirements.recordCallReceipt(receipt),
+
 			messages: () => agent.state.messages,
 			baseSystemPrompt: () => ["Test"],
 			goalModeState: () => undefined,

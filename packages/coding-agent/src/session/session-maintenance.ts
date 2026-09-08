@@ -91,11 +91,7 @@ import type { SessionContext } from "./session-context";
 import { getLatestCompactionEntry, getOpenAiRemoteCompactionPayload } from "./session-context";
 import type { CompactionEntry, SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
-import {
-	composeProviderRequirements,
-	type RequirementsApplicableSnapshot,
-	type RequirementsCallReceipt,
-} from "./session-requirements";
+
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { resolveSpeculationLeadTokens, SPECULATION_LEAD_MIN_TOKENS } from "./speculation-lead";
 
@@ -252,8 +248,7 @@ interface CompactionOperation {
 	policyIdentity: unknown;
 	selection: CompactionSourceSelection;
 	selectionCaptured?: true;
-	requirementsSnapshot?: RequirementsApplicableSnapshot;
-	requirementsContext?: string[];
+
 	snapshotLeafId: string | null;
 	signal?: AbortSignal;
 	sources: Map<string, string>;
@@ -322,9 +317,7 @@ export interface SessionMaintenanceHost {
 	/** Rotates on branch/reset/session transitions, not policy edits or ordinary appends. */
 	compactionOwnership(): unknown;
 	compactionPolicyIdentity(): unknown;
-	compactionSourceSelection(requirementsSnapshot: RequirementsApplicableSnapshot): Promise<CompactionSourceSelection>;
-	captureCompactionRequirements(): Promise<RequirementsApplicableSnapshot>;
-	recordCompactionRequirementsReceipt(receipt: RequirementsCallReceipt): void;
+	compactionSourceSelection(): Promise<CompactionSourceSelection>;
 	protectedSourceEntryIds(): Promise<Pick<ReadonlySet<string>, "has">>;
 	preservedSourcesChanged(changedIds: readonly string[], affectedClassifierIds: readonly string[]): void;
 	messages(): AgentMessage[];
@@ -1348,10 +1341,7 @@ export class SessionMaintenance {
 		);
 		if (!preparation) throw new Error("Nothing to hand off (already compacted)");
 		this.#captureCompactionSources(operation, entries, preparation);
-		const result = await this.#host.generateHandoffDocument(customInstructions, {
-			...options,
-			requirementsSnapshot: await this.#captureRequirementsSnapshot(operation),
-		});
+		const result = await this.#host.generateHandoffDocument(customInstructions, options);
 		if (!result) return undefined;
 		const { summary, details } = handoffSummaryFromDocument(result.document, preparation);
 		const installed = await this.#commitCompactionEntry({
@@ -1492,7 +1482,7 @@ export class SessionMaintenance {
 		let armed: ArmedSpeculation;
 		if (method === "handoff") {
 			const generated = await this.#host.generateHandoffDocument(AUTO_HANDOFF_THRESHOLD_FOCUS, {
-				requirementsSnapshot: await this.#captureRequirementsSnapshot(operation),
+
 				autoTriggered: true,
 				signal,
 			});
@@ -1654,41 +1644,13 @@ export class SessionMaintenance {
 		await operation.manager.flush();
 		if (!this.#compactionOwnerValid(operation)) throw new CompactionCancelledError();
 		if (!operation.selectionCaptured) {
-			const requirementsSnapshot = await this.#captureRequirementsSnapshot(operation);
-			operation.selection = structuredClone(await this.#host.compactionSourceSelection(requirementsSnapshot));
+			operation.selection = structuredClone(await this.#host.compactionSourceSelection());
 			operation.selectionCaptured = true;
 		}
 		if (!this.#compactionInputValid(operation)) throw new CompactionCancelledError();
 	}
 
-	/** Share one immutable snapshot between pending-source admission and provider rendering. */
-	async #captureRequirementsSnapshot(operation: CompactionOperation): Promise<RequirementsApplicableSnapshot> {
-		if (!operation.requirementsSnapshot) {
-			operation.requirementsSnapshot = await this.#host.captureCompactionRequirements();
-		}
-		if (!this.#compactionInputValid(operation)) throw new CompactionCancelledError();
-		return operation.requirementsSnapshot;
-	}
 
-	async #withCompactionRequirements(operation: CompactionOperation, options: SummaryOptions = {}): Promise<SummaryOptions> {
-		const snapshot = await this.#captureRequirementsSnapshot(operation);
-		if (!operation.requirementsContext) {
-			const { context, receipt } = composeProviderRequirements(
-				{ systemPrompt: [], messages: [] }, snapshot, text => this.#tokenizer.countTokens(text),
-			);
-			operation.requirementsContext = (context.systemPrompt ?? []).map(text => this.#host.obfuscateTextForProvider(text)!);
-			this.#host.recordCompactionRequirementsReceipt(receipt);
-		}
-		const requirements = operation.requirementsContext;
-		if (requirements.length === 0) return options;
-		// Native transports consume the system segments; textual summary transports
-		// consume extraContext. Neither conversion of selected P/N nor raster input sees it.
-		return {
-			...options,
-			extraContext: [...(options.extraContext ?? []), ...requirements],
-			remoteSystemPrompt: [...(options.remoteSystemPrompt ?? this.#host.baseSystemPrompt()), ...requirements],
-		};
-	}
 
 	/** Capture source content before hooks/generators can await or mutate their input. */
 	#captureCompactionSources(operation: CompactionOperation, entries: SessionEntry[], preparation?: CompactionPreparation): void {
@@ -2533,7 +2495,7 @@ export class SessionMaintenance {
 		options?: SummaryOptions,
 		precomputedCandidates?: Model[],
 	): Promise<CompactionResult> {
-		options = await this.#withCompactionRequirements(operation, options);
+		if (!this.#compactionInputValid(operation)) throw new CompactionCancelledError();
 		const candidates =
 			precomputedCandidates ?? this.#getCompactionModelCandidates(this.#host.modelRegistry.getAvailable());
 		const telemetry = resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId());
@@ -3590,7 +3552,7 @@ export class SessionMaintenance {
 			let handoffDocument: HandoffResult | undefined;
 			if (action === "handoff" && compactionPrep.kind !== "fromHook") {
 				handoffDocument = await this.#host.generateHandoffDocument(AUTO_HANDOFF_THRESHOLD_FOCUS, {
-					requirementsSnapshot: await this.#captureRequirementsSnapshot(operation),
+
 					autoTriggered: true,
 					signal: autoCompactionSignal,
 				});
@@ -3797,11 +3759,11 @@ export class SessionMaintenance {
 								shouldUseProviderNativeCompaction(candidate, effectiveSettings)
 						: undefined,
 				);
-				const requirementsOptions = await this.#withCompactionRequirements(operation, {
+				const summaryOptions: SummaryOptions = {
 					promptOverride: this.#host.obfuscateTextForProvider(compactionPrep.hookPrompt),
 					extraContext: compactionPrep.hookContext,
 					remoteSystemPrompt: this.#host.baseSystemPrompt(),
-				});
+				};
 				const retrySettings = this.#host.settings.getGroup("retry");
 				const telemetry = resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId());
 				let compactResult: CompactionResult | undefined;
@@ -3838,7 +3800,7 @@ export class SessionMaintenance {
 								undefined,
 								autoCompactionSignal,
 								{
-									...requirementsOptions,
+									...summaryOptions,
 									metadata: this.#host.agent.metadataForProvider(candidate.provider),
 									initiatorOverride: "agent",
 									convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),

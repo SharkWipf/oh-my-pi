@@ -1,11 +1,9 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ModelRegistry } from "../src/config/model-registry";
-import { AuthStorage } from "../src/session/auth-storage";
-import { SessionRequirements, type RequirementsCallReceipt } from "../src/session/session-requirements";
+
 import { SessionMaintenance, type SessionMaintenanceHost } from "../src/session/session-maintenance";
 import { SessionManager } from "../src/session/session-manager";
 import { MemorySessionStorage, type SessionStorageWriter } from "../src/session/session-storage";
@@ -52,13 +50,7 @@ class PublicationStorage extends MemorySessionStorage {
 	}
 }
 
-let publicationAuth: AuthStorage;
-let publicationRegistry: ModelRegistry;
-beforeAll(async () => {
-	publicationAuth = await AuthStorage.create(":memory:");
-	publicationRegistry = new ModelRegistry(publicationAuth);
-});
-afterAll(() => publicationAuth.close());
+
 
 const managers: SessionManager[] = [];
 afterEach(async () => {
@@ -74,12 +66,7 @@ function fixture() {
 	manager.appendMessage({ role: "user", content: "retained source", timestamp: 2 });
 	const agent = new Agent({ initialState: { model, messages: manager.buildSessionContext().messages, tools: [] } });
 	const settings = Settings.isolated({ "compaction.keepRecentTokens": 1, "compaction.methodOrder": ["soft"], "requirements.enabled": false });
-	const requirements = new SessionRequirements({
-		sessionManager: manager, agentStorage: null, settings, modelRegistry: publicationRegistry, isDisposed: () => false,
-		getContext: () => ({ systemPrompt: agent.state.systemPrompt, messages: agent.state.messages as never }),
-		getModel: () => model,
-		promptOperatorSource: async () => { throw new Error("Publication fixture does not accept operator ingress"); },
-	});
+
 	let ownership: unknown = {};
 	let policy: unknown = {};
 	let generate = async () => ({ document: "frozen handoff summary" });
@@ -91,11 +78,7 @@ function fixture() {
 		compactionOwnership: () => ownership,
 		compactionPolicyIdentity: () => policy,
 		compactionSourceSelection: async () => ({}),
-		captureCompactionRequirements: async () => {
-			await requirements.observeCommittedSources();
-			return requirements.snapshotApplicable();
-		},
-		recordCompactionRequirementsReceipt: (receipt: RequirementsCallReceipt) => requirements.recordCallReceipt(receipt),
+
 		isDisposed: () => false,
 		isGeneratingHandoff: () => false,
 		generateHandoffDocument: () => generate(),

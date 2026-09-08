@@ -85,6 +85,27 @@ export function rewriteSessionSources(
 
 	applySourceRewrites();
 
+	// Representation changes must not replace the accepted original with pruned
+	// bytes. Reuse the already-frozen changed entries; ordinary unchanged sources
+	// remain sparse and do not acquire a second body. Authored invalidation keeps
+	// the old source unavailable and is not a representation update.
+	for (const [id, originalEntry] of originals) {
+		const entry = getEntry(id);
+		if (entry?.type !== "message" || originalEntry.type !== "message" ||
+			("requirementsInvalidated" in entry && entry.requirementsInvalidated)) continue;
+		const message = entry.message;
+		const original = originalEntry.message;
+		if ((message.role !== "user" && message.role !== "custom") ||
+			(original.role !== "user" && original.role !== "custom") || message.originalSubmission) continue;
+		const content = original.content;
+		message.originalSubmission = original.originalSubmission ?? {
+			text: typeof content === "string" ? content : content.filter(block => block.type === "text").map(block => block.text).join(""),
+			images: typeof content === "string" ? undefined : content.filter(block => block.type === "image"),
+			imageLinks: original.imageLinks,
+			compactionOverride: original.compactionOverride,
+		};
+	}
+
 	for (const rewrite of rewrites) collectTargets(rewrite.entryId, getEntry, childrenOf, targets);
 	const affected = new Set<string>();
 	for (const id of targets) {

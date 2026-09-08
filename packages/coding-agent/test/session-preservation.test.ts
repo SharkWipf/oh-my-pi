@@ -15,6 +15,7 @@ import type { SessionEntry } from "../src/session/session-entries";
 import { SessionManager } from "../src/session/session-manager";
 import { ensurePreservedMessageStateOnDisk, SessionPreservation } from "../src/session/session-preservation";
 import { FileSessionStorage, type WriteTextAtomicOptions } from "../src/session/session-storage";
+import { toRestoredQueuedMessage } from "../src/session/queued-messages";
 
 const policy: PreservationPolicySettings = {
 	enabled: false,
@@ -337,5 +338,27 @@ describe("durable manual preservation actions", () => {
 		const before = fs.readFileSync(f.manager.getSessionFile()!, "utf8");
 		await ensurePreservedMessageStateOnDisk(f.manager);
 		expect(fs.readFileSync(f.manager.getSessionFile()!, "utf8")).toBe(before);
+	});
+	it("keeps original images and links across the first representation rewrite and reload", async () => {
+		const image = { type: "image" as const, mimeType: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC" };
+		const imageLinks = ["https://example.test/original.png"];
+		let id = "";
+		const f = await fixture(manager => {
+			id = manager.appendMessage({ role: "user", content: [{ type: "text", text: "look" }, image], imageLinks, timestamp: 1 });
+		});
+		const entry = f.manager.getEntry(id)!;
+		if (entry.type !== "message" || entry.message.role !== "user") throw new Error("Missing source");
+		await f.manager.rewriteEntries([{ entryId: id, blocks: [{ oldBlockIndex: 0, newBlockIndex: 0 }, { oldBlockIndex: 1, newBlockIndex: null }] }], () => {
+			entry.message = { ...entry.message, content: [{ type: "text", text: "look" }] };
+		});
+		const reopened = await SessionManager.open(f.manager.getSessionFile()!);
+		try {
+			const restored = reopened.getEntry(id)!;
+			if (restored.type !== "message" || restored.message.role !== "user") throw new Error("Missing restored source");
+			expect(restored.message.content).toEqual([{ type: "text", text: "look" }]);
+			const query = await PreservedMessageQuery.build(reopened.getBranch(), policy, new Tokenizer(), { isCurrent: () => true });
+			expect(query!.inspectCandidate(id, true)!.message).toMatchObject({ content: [{ type: "text", text: "look" }, image] });
+			expect(toRestoredQueuedMessage(restored.message)).toMatchObject({ text: "look", images: [image], imageLinks });
+		} finally { await reopened.close(); }
 	});
 });

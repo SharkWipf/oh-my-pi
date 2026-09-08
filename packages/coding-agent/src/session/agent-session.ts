@@ -1829,12 +1829,7 @@ export class AgentSession {
 				}
 				return this.#preservationPolicyIdentity;
 			},
-			compactionSourceSelection: snapshot => this.#compactionSourceSelection(snapshot),
-			captureCompactionRequirements: async () => {
-				await this.requirements.observeCommittedSources();
-				return this.requirements.snapshotApplicable();
-			},
-			recordCompactionRequirementsReceipt: receipt => this.requirements.recordCallReceipt(receipt),
+			compactionSourceSelection: () => this.#compactionSourceSelection(),
 			protectedSourceEntryIds: () => this.#protectedSourceEntryIds(),
 			preservedSourcesChanged: (changedIds, affectedIds) => this.#preservedSourcesChanged(changedIds, affectedIds),
 			promptGeneration: () => this.#promptGeneration,
@@ -5676,7 +5671,7 @@ export class AgentSession {
 		return { has: id => P.has(id) || N.has(id) || pending.has(id) };
 	}
 
-	async #compactionSourceSelection(_requirementsSnapshot?: RequirementsApplicableSnapshot): Promise<CompactionSourceSelection> {
+	async #compactionSourceSelection(): Promise<CompactionSourceSelection> {
 		const query = await this.preparePreservedMessages();
 		const selected = this.#preservationSelection(query);
 		const selectedSources: NonNullable<CompactionSourceSelection["selectedSources"]>[number][] = [];

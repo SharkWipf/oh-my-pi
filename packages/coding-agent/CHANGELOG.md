@@ -16,9 +16,9 @@
 ### Fixed
 
 - Compaction now appends its frozen result once and awaits durable publication before installing live context or resetting provider state. Persistence recovery reuses the same journal entry; stale branch results cannot install, while valid same-branch suffixes survive.
-- Handoff composes its operation-frozen requirements once; concurrent live requirements changes cannot replace the captured provider input.
+- Ordinary compaction and handoff no longer capture or render a separate requirements snapshot; pending live source IDs join the existing selection synchronously and invalidate the normal publication fence when their generation changes.
 - Human `/keep` and `/once` inputs retain exact typed text, original PNG/image bytes and links through queue dequeue, durable journal reload, branch/edit and tree-navigation restoration. Original metadata is accepted-delivery journal data, independent of V2 capture IDs and readiness.
-- Controlled source rewrites atomically update current content, prior/sibling positional coverage, and affected successful classifier records without moving physical archive offsets or erasing unrelated manual state.
+- Controlled representation rewrites retain accepted original text/images on the first mutation and atomically update current content, positional coverage and affected classifier records without moving physical archive offsets or erasing unrelated manual state.
 - Automatic pruning and shaking retain original deliveries still pending in requirements memory, independently of user-preservation eligibility, while continuing ordinary pruning of unrelated content.
 - Fixed ACP cancellation during initial durable source capture: cancelled input no longer resumes into a provider request or delivered user message when capture completes.
 - Fixed long-session startup stalls from requirements history intake. Disabled requirements no longer build a cold backlog; enabled cataloging yields after the first terminal paint and uses indexed, batched source storage. Status distinguishes unobserved history from known coverage holes, while explicit backfill, original capture, branch cancellation, and request-time evidence checks remain intact.
