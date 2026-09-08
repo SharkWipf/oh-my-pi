@@ -4,6 +4,10 @@
 
 ### Fixed
 
+- Preserved selected original-submission payloads during compaction preparation instead of replacing them with expanded delivery text; pending protection now retains those original bytes too.
+- Kept ordinarily retained expanded delivery and selected original submissions as adjacent, separately addressed source projections. Repeated compaction resolves the committed original projection through the normal host reader, and delivery rewrites no longer invalidate original-coordinate coverage.
+- Joined pending delivered users into ordinary source selection without moving the normal retained-history cut or resurrecting an intervening history tail. Ordinary unselected preparations no longer manufacture a full source map.
+- Fixed normalized custom messages counting as zero tokens. Custom text and original images now consume their ordinary local baseline regardless of attribution or display settings.
 - Fixed ordinary source token estimates omitting assistant images and known current native text, code, logs, search context, and computer metadata. Normalized native mirrors are charged once, including after controlled source rewrites and JSON reload.
 - Fixed metadata-only computer screenshots counting as zero before source allocation. Their single image baseline replaces content-image mirrors, matching computer-result serialization.
 - Fixed normalized custom messages counting as zero tokens. Custom text and original images now consume their ordinary local baseline regardless of attribution or display settings.
