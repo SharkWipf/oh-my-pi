@@ -71,12 +71,11 @@ export interface SessionEntryBase {
 	timestamp: string;
 	/** Initial user override, recorded with the source before asynchronous work starts. */
 	compactionOverride?: "keep" | "exclude";
-	/** Original namespace identity; not a human-authorship attestation. */
-	sourceOrigin?: { journalId: string; entryId: string };
 }
 
 export interface SessionMessageEntry extends SessionEntryBase {
-	type: "message";
+	/** Original namespace identity; not a human-authorship attestation. */
+	sourceOrigin?: { journalId: string; entryId: string };
 	message: AgentMessage;
 }
 
@@ -287,7 +286,8 @@ export interface ModeChangeEntry extends SessionEntryBase {
  * - true: rendered with distinct styling (different from user messages)
  */
 export interface CustomMessageEntry<T = unknown> extends SessionEntryBase {
-	type: "custom_message";
+	/** Original namespace identity; not a human-authorship attestation. */
+	sourceOrigin?: { journalId: string; entryId: string };
 	customType: string;
 	content: string | (TextContent | ImageContent)[];
 	details?: T;
