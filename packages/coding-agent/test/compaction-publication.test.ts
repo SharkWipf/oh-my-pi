@@ -57,7 +57,7 @@ afterEach(async () => {
 	await Promise.all(managers.splice(0).map(manager => manager.close().catch(() => undefined)));
 });
 
-function fixture() {
+function fixture(experimental = false) {
 	const storage = new PublicationStorage();
 	const manager = SessionManager.create("/compaction-publication", "/compaction-publication/sessions", storage);
 	managers.push(manager);
@@ -65,11 +65,12 @@ function fixture() {
 	const first = manager.appendMessage({ role: "user", content: "old source ".repeat(2_000), timestamp: 1 });
 	manager.appendMessage({ role: "user", content: "retained source", timestamp: 2 });
 	const agent = new Agent({ initialState: { model, messages: manager.buildSessionContext().messages, tools: [] } });
-	const settings = Settings.isolated({ "compaction.keepRecentTokens": 1, "compaction.methodOrder": ["soft"], "requirements.enabled": false });
+	const settings = Settings.isolated({ "compaction.keepRecentTokens": 1, "compaction.methodOrder": ["soft"], "requirements.enabled": false, "compaction.experimentalContextManagement": experimental });
 
 	let ownership: unknown = {};
 	let policy: unknown = {};
 	let generate = async () => ({ document: "frozen handoff summary" });
+	let beforeCompact: (() => Promise<void>) | undefined;
 	const effects: string[] = [];
 	const host = {
 		agent, sessionManager: manager, settings,
@@ -79,6 +80,15 @@ function fixture() {
 		compactionPolicyIdentity: () => policy,
 		compactionSourceSelection: async () => ({ originalSourceMessage: getOriginalSourceMessage }),
 
+		hasExperimentalContextRolloverTools: () => true,
+		promptGeneration: () => 0,
+		findLastAssistantMessage: () => undefined,
+		scheduleCompactionContinuation: () => false,
+		emitSessionEvent: async () => {},
+		disconnectFromAgent: () => {},
+		reconnectToAgent: () => {},
+		abort: async () => {},
+		drainStrandedQueuedMessages: () => {},
 		isDisposed: () => false,
 		isGeneratingHandoff: () => false,
 		generateHandoffDocument: () => generate(),
@@ -89,12 +99,19 @@ function fixture() {
 		resetAdvisorRuntimes: () => effects.push("advisor"),
 		syncTodoPhasesFromBranch: () => effects.push("todo"),
 		closeCodexProviderSessionsForHistoryRewrite: () => effects.push("provider"),
-		extensionRunner: { emit: async () => effects.push("session_compact") },
+		extensionRunner: {
+			hasHandlers: (name: string) => name === "session_before_compact" && beforeCompact !== undefined,
+			emit: async (event: { type: string }) => {
+				if (event.type === "session_before_compact") return beforeCompact?.();
+				effects.push("session_compact");
+			},
+		},
 	} as unknown as SessionMaintenanceHost;
 	const maintenance = new SessionMaintenance(host);
 	return {
-		storage, manager, agent, maintenance, effects, first,
+		storage, manager, agent, maintenance, effects, first, host,
 		setGenerate: (fn: typeof generate) => { generate = fn; },
+		setBeforeCompact: (fn: () => Promise<void>) => { beforeCompact = fn; },
 		changePolicy: () => { policy = {}; },
 		switchBranch: () => {
 			ownership = {};
@@ -116,6 +133,43 @@ function compactions(manager: SessionManager) {
 }
 
 describe("compaction durable publication", () => {
+	for (const mode of ["manual", "automatic"] as const) {
+		it(`retains selected source through ${mode} local rollover without a generated summary`, async () => {
+			const f = fixture(true);
+			const source = f.manager.getEntry(f.first);
+			if (source?.type !== "message") throw new Error("Expected original source");
+			f.host.compactionSourceSelection = async () => ({
+				originalSourceMessage: getOriginalSourceMessage,
+				selectedSources: [{ entryId: source.id, order: 0, message: source.message }],
+			});
+			if (mode === "manual") await f.maintenance.compact();
+			else await f.maintenance.runAutoCompaction("idle", false, true, false, { autoContinue: false });
+			expect(f.agent.state.messages.filter(message => message.role === "user")).toEqual([
+				source.message,
+				{ role: "user", content: "retained source", timestamp: 2 },
+			]);
+			const reopened = await SessionManager.open(f.manager.getSessionFile()!, undefined, f.storage);
+			managers.push(reopened);
+			expect(reopened.buildSessionContext().messages).toEqual(f.agent.state.messages);
+		});
+		it(`rejects changed source bytes while a ${mode} rollover hook is suspended`, async () => {
+			const f = fixture(true);
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			f.setBeforeCompact(async () => { entered.resolve(); await release.promise; });
+			const run = mode === "manual" ? f.maintenance.compact()
+				: f.maintenance.runAutoCompaction("idle", false, true, false, { autoContinue: false });
+			await entered.promise;
+			const source = f.manager.getEntry(f.first);
+			if (source?.type !== "message" || source.message.role !== "user") throw new Error("Expected original user");
+			source.message.content = "changed while hook awaited";
+			release.resolve();
+			if (mode === "manual") await expect(run).rejects.toBeInstanceOf(CompactionCancelledError);
+			else await run;
+			expect(compactions(f.manager)).toEqual([]);
+			expect(f.effects).toEqual([]);
+		});
+	}
 	it("persists source IDs before generation, waits for publication, and keeps policy-only changes plus a valid suffix", async () => {
 		const f = fixture();
 		const original = f.agent.state.messages;
