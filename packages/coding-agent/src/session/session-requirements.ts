@@ -527,8 +527,8 @@ export class SessionRequirements {
 	recordCallReceipt(receipt: RequirementsCallReceipt): void {
 		this.#receipt = structuredClone(receipt);
 	}
-	async #evidencePackage(sourceKey: string, restoringRevisionId?: string): Promise<RequirementsEvidencePackage> {
-		const source = await this.inspectSource(sourceKey, true);
+	async #evidencePackage(source: ResolvedRequirementsSource, restoringRevisionId?: string): Promise<RequirementsEvidencePackage> {
+		const sourceKey = source.source.key;
 		if (source.source.referenceOnly)
 			throw new Error("Referents are evidence only; process the human source that adopted them");
 		const snapshot = this.#consumptionSnapshot();
@@ -632,7 +632,7 @@ export class SessionRequirements {
 				this.#assertAvailable();
 				let processingIntegrity = source.integrity;
 				try {
-					const input = await this.#evidencePackage(source.key);
+					const input = await this.#evidencePackage(await this.inspectSource(source.key, true));
 					this.#assertAvailable(signal);
 					processingIntegrity = input.source.source.integrity;
 					this.#storage.authorizeRequirementsOwner(input.authority);
@@ -793,7 +793,7 @@ export class SessionRequirements {
 				this.#sourceKeys.add(sourceKey);
 				this.#extraEvidence.set(sourceKey, [action.sourceKey]);
 			}
-			const input = await this.#evidencePackage(sourceKey);
+			const input = await this.#evidencePackage(adopted ? await this.inspectSource(sourceKey) : selected);
 			this.#assertAvailable(signal);
 			const unit = adopted ? input.source.units.find(unit => unit.text === selectedUnit.text) : selectedUnit;
 			if (!unit) throw new Error("Accepted operator adoption does not preserve the selected complete unit");
@@ -863,7 +863,10 @@ export class SessionRequirements {
 				const revision = this.#storage.getRequirementsRevision(id);
 				if (!revision || revision.lifecycle !== "quarantined")
 					throw new Error(`Revision is not quarantined: ${id}`);
-				const input = await this.#evidencePackage(revision.sourceKey, revision.id);
+				const input = await this.#evidencePackage(
+					await this.inspectSource(revision.sourceKey, !action.literalUnitId),
+					revision.id,
+				);
 				this.#assertAvailable(signal);
 				if (input.source.source.integrity !== revision.sourceIntegrity)
 					throw new Error("Restore evidence changed; original decision remains suspended");

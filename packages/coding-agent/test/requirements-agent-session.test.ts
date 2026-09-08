@@ -271,7 +271,8 @@ for (const actionKind of ["literal-adopt", "restore", "extract"] as const) {
 		const inspect = owner.inspectSource.bind(owner);
 		owner.inspectSource = async (key, context) => {
 			const resolved = await inspect(key, context);
-			if (context) { entered.resolve(); await release.promise; }
+			entered.resolve();
+			await release.promise;
 			return resolved;
 		};
 		const operation = actionKind === "extract" ? owner.processPending(captured.source.key) : owner.applyOperatorAction(
