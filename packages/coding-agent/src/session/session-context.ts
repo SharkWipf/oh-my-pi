@@ -1,6 +1,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { getCompactionSourceRepresentation, materializeCompactionSourceMessage, type SourceBlockRange } from "@oh-my-pi/pi-agent-core/compaction/source";
 import { bindMessageSource, setSourceOrigin, transferMessageSourceOrigin, transferSourceOrigin, validateNativeItemOrigins } from "@oh-my-pi/pi-ai/utils/source-origin";
+import { compactionSourceKey } from "@oh-my-pi/pi-ai/compaction-source";
 import {
 	coerceServiceTierByFamily,
 	type OpenAIResponsesHistoryPayload,
@@ -12,6 +13,7 @@ import {
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
+	getOriginalSourceMessage,
 	INTERRUPTED_THINKING_MESSAGE_TYPE,
 	isCustomMessageContent,
 	isEmptyErrorTurn,
@@ -382,7 +384,7 @@ export function buildSessionContextFromPath(
 		}
 	};
 
-	const appendMessage = (entry: SessionEntry, spans?: readonly SourceBlockRange[]) => {
+	const appendMessage = (entry: SessionEntry, spans?: readonly SourceBlockRange[], projection?: "original") => {
 		handleEntryResetTracking(entry);
 		if (entry.type === "message") {
 			if (
@@ -392,10 +394,12 @@ export function buildSessionContextFromPath(
 			) {
 				return;
 			}
-			if (entry.message.role === "user" || entry.message.role === "assistant" || entry.message.role === "toolResult") {
-				bindMessageSource(entry.message, entry.id, journalOrder(entry.id));
+			const sourceMessage = projection === "original" && entry.message.role === "user"
+				? getOriginalSourceMessage(entry.message) : entry.message;
+			if (sourceMessage.role === "user" || sourceMessage.role === "assistant" || sourceMessage.role === "toolResult") {
+				bindMessageSource(sourceMessage, entry.id, journalOrder(entry.id), projection);
 			}
-			const message = materializeCompactionSourceMessage(entry.message, spans);
+			const message = materializeCompactionSourceMessage(sourceMessage, spans);
 			if (message) pushMessage(message, entry.id);
 		} else if (entry.type === "custom_message") {
 			if (
@@ -485,7 +489,7 @@ export function buildSessionContextFromPath(
 			if (firstKeptIdx >= 0 && firstKeptIdx < compactionIdx) {
 				for (let i = Math.max(firstKeptIdx, resetBoundaryIdx + 1); i < compactionIdx; i++) ordinary.add(path[i].id);
 			}
-			type ReplayPart = { order: number; entry?: SessionEntry; spans?: SourceBlockRange[]; layoutIndices: number[]; blocks?: ReturnType<typeof snapcompact.historyBlocks>; coveredIds?: string[] };
+			type ReplayPart = { order: number; entry?: SessionEntry; spans?: SourceBlockRange[]; projection?: "original"; layoutIndices: number[]; blocks?: ReturnType<typeof snapcompact.historyBlocks>; coveredIds?: string[] };
 			const parts: ReplayPart[] = [];
 			const selected = new Map<string, ReplayPart>();
 			const activeEntry = (id: string) => {
@@ -502,10 +506,12 @@ export function buildSessionContextFromPath(
 				resolveSourceImage: part => {
 					const entry = activeEntry(part.entryId);
 					if (!entry || part.currentBlockIndex === undefined) return undefined;
-					const message = entry.type === "message" ? entry.message : entry.type === "custom_message" && isCustomMessageContent(entry.content)
-						? { role: "custom" as const, content: normalizeCustomMessagePayload(entry).content } : undefined;
+					const message = entry.type === "message"
+						? part.projection === "original" && entry.message.role === "user" ? getOriginalSourceMessage(entry.message) : entry.message
+						: entry.type === "custom_message" && isCustomMessageContent(entry.content)
+							? { role: "custom" as const, content: normalizeCustomMessagePayload(entry).content } : undefined;
 					if (!message || (message.role !== "user" && message.role !== "assistant" && message.role !== "toolResult" && message.role !== "custom") || typeof message.content === "string") return undefined;
-					bindMessageSource(message, entry.id, journalOrder(entry.id));
+					bindMessageSource(message, entry.id, journalOrder(entry.id), part.projection);
 					const block = message.content[part.currentBlockIndex];
 					return block?.type === "image" ? block : undefined;
 				},
@@ -527,14 +533,15 @@ export function buildSessionContextFromPath(
 					if (part.kind === "original-image" && part.currentBlockIndex === undefined) continue;
 					const spans = part.kind === "source" ? part.spans : [{ blockIndex: part.currentBlockIndex!, start: 0, end: 0 }];
 					const entry = activeEntry(part.entryId);
-					if (!entry || ordinary.has(entry.id)) continue;
-					const previous = selected.get(entry.id);
+					if (!entry || (!part.projection && ordinary.has(entry.id))) continue;
+					const key = compactionSourceKey(part);
+					const previous = selected.get(key);
 					if (previous) {
 						previous.spans = previous.spans && spans ? [...previous.spans, ...spans] : undefined;
 						previous.layoutIndices.push(layoutIndex);
 					} else {
-						const source = { order: sourceOrder.get(entry.id)!, entry, spans, layoutIndices: [layoutIndex] };
-						selected.set(entry.id, source);
+						const source = { order: sourceOrder.get(entry.id)!, entry, spans, projection: part.projection, layoutIndices: [layoutIndex] };
+						selected.set(key, source);
 						parts.push(source);
 					}
 					continue;
@@ -588,7 +595,7 @@ export function buildSessionContextFromPath(
 				if (part.order >= 0) emitGapThrough(part.order);
 				const messageIndex = messages.length;
 				if (part.entry) {
-					appendMessage(part.entry, part.spans);
+					appendMessage(part.entry, part.spans, part.projection);
 					if (messages.length > messageIndex) for (const layoutIndex of part.layoutIndices) sourceLocations?.push({ messageIndex, layoutIndex });
 				} else if (part.blocks?.length) {
 					const previous = messages[messages.length - 1];

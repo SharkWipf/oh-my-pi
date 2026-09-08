@@ -50,6 +50,46 @@ describe("chronological committed source context", () => {
 		}
 	});
 
+	it("replays accepted original coordinates rather than expanded delivery after durable reload", async () => {
+		using dir = TempDir.createSync("@pi-original-source-reload-");
+		const session = SessionManager.create(dir.path(), dir.path());
+		try {
+			const text = "SELECTED_LAST_ORIGINAL";
+			const selected = session.appendMessage({ role: "user", content: "EXPANDED_LAST_BODY", timestamp: 1,
+				compactionOverride: "keep", originalSubmission: { text: `/keep ${text}`, compactionOverride: "keep" } });
+			const ordinary = user(session, "ordinary");
+			session.appendCompaction("recap", undefined, ordinary, 1000, { method: "soft", preserveData: {
+				sourceRepresentation: representation([{ kind: "source", entryId: selected, order: 0, projection: "original",
+					spans: [{ blockIndex: 0, start: 0, end: text.length }] }]),
+			} });
+			expect(userContents(session.buildSessionContext().messages)).toEqual([text, "ordinary"]);
+			await session.ensureOnDisk();
+			await session.flush();
+			const reopened = await SessionManager.open(session.getSessionFile()!);
+			try { expect(userContents(reopened.buildSessionContext().messages)).toEqual([text, "ordinary"]); }
+			finally { await reopened.close(); }
+		} finally { await session.close(); }
+	});
+
+	it("keeps original text and images beside the untouched ordinary expanded projection", async () => {
+		const session = SessionManager.inMemory();
+		try {
+			const image = { type: "image" as const, data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=", mimeType: "image/png" };
+			const selected = session.appendMessage({ role: "user", content: "EXPANDED_WITHOUT_IMAGE", timestamp: 1,
+				originalSubmission: { text: "raw input", images: [image] } });
+			session.appendCompaction("recap", undefined, selected, 1000, { method: "soft", preserveData: {
+				sourceRepresentation: representation([
+					{ kind: "source", entryId: selected, order: 0, projection: "original", spans: [{ blockIndex: 0, start: 0, end: 9 }] },
+					{ kind: "original-image", entryId: selected, order: 0, projection: "original", blockIndex: 1, currentBlockIndex: 1 },
+				]),
+			} });
+			expect(userContents(session.buildSessionContext().messages)).toEqual([
+				[{ type: "text", text: "raw input" }, image], "EXPANDED_WITHOUT_IMAGE",
+			]);
+			expect(userContents(session.buildSessionContext({ transcript: true }).messages)).toEqual(["EXPANDED_WITHOUT_IMAGE"]);
+		} finally { await session.close(); }
+	});
+
 	it("unions overlapping selected ranges without duplicating source bytes or dropping ordinary source", async () => {
 		using dir = TempDir.createSync("@pi-chronological-spans-");
 		const session = SessionManager.create(dir.path(), dir.path());

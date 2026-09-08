@@ -326,6 +326,7 @@ import {
 	isUserInterruptAbort,
 	isUserInvokedSkillPrompt,
 	logProviderTurnError,
+	getOriginalSourceMessage,
 	normalizeCustomMessagePayload,
 	type PythonExecutionMessage,
 	SILENT_ABORT_MARKER,
@@ -5675,13 +5676,23 @@ export class AgentSession {
 		const query = await this.preparePreservedMessages();
 		const selected = this.#preservationSelection(query);
 		const selectedSources: NonNullable<CompactionSourceSelection["selectedSources"]>[number][] = [];
+		const pendingSourceEntryIds = new Set(this.requirements.pendingLiveSnapshot().entryIds);
 		for (const id of selected.P) {
 			const candidate = selected.candidate(id);
 			const entry = this.sessionManager.getEntry(id);
 			const order = query.positionOf(id);
 			if (!candidate || entry?.type !== "message" || order === undefined) throw new Error("Selected source is no longer available.");
-			selectedSources.push({ entryId: id, order, message: query.inspectCandidate(id, true)!.message,
+			const message = query.inspectCandidate(id, true)!.message;
+			selectedSources.push({ entryId: id, order, message, projection: message !== entry.message ? "original" : undefined,
 				spans: candidate.spans.map(span => ({ blockIndex: span.blockIndex, start: span.text?.start ?? 0, end: span.text?.end ?? 1 })) });
+		}
+		for (const id of pendingSourceEntryIds) {
+			if (selected.P.has(id)) continue;
+			const entry = this.sessionManager.getEntry(id);
+			const order = query.positionOf(id);
+			if (entry?.type !== "message" || order === undefined || entry.message.role !== "user") continue;
+			const message = getOriginalSourceMessage(entry.message);
+			selectedSources.push({ entryId: id, order, message, projection: message !== entry.message ? "original" : undefined });
 		}
 		const admittedNonUserSources: NonNullable<CompactionSourceSelection["admittedNonUserSources"]>[number][] = [];
 		for (const atom of selected.nonUserAtoms()) for (const entry of atom.entries) {
@@ -5690,7 +5701,7 @@ export class AgentSession {
 			admittedNonUserSources.push({ entryId: entry.id, order, message: entry.message,
 				atomicGroup: { id: atom.id, entryIds: [...atom.memberIds] } });
 		}
-		return { selectedSources, admittedNonUserSources, pendingSourceEntryIds: new Set(this.requirements.pendingLiveSnapshot().entryIds) };
+		return { selectedSources, admittedNonUserSources, pendingSourceEntryIds, originalSourceMessage: getOriginalSourceMessage };
 	}
 
 	buildDisplaySessionContext(): SessionContext {

@@ -39,7 +39,25 @@ export {
 import type { OutputMeta } from "../tools/output-meta";
 import { formatOutputNotice } from "../tools/output-meta";
 import { titleTextFromSkillPrompt } from "./skill-title-input";
+import { parseCompactionOverridePrompt } from "./preserved-message-settings";
 
+/** Read accepted authored bytes without replacing the ordinary delivered message. */
+export function getOriginalSourceMessage(message: UserMessage): UserMessage {
+	const original = message.originalSubmission;
+	if (!original) return message;
+	const text = message.compactionOverride !== undefined
+		? parseCompactionOverridePrompt(original.text)?.text ?? original.text : original.text;
+	const content = message.content;
+	const images = original.images;
+	if (typeof content === "string") {
+		if (!images?.length && content === text) return message;
+	} else if (content.length === 1 + (images?.length ?? 0) && content[0]?.type === "text" && content[0].text === text &&
+		(!images || images.every((image, index) => {
+			const delivered = content[index + 1];
+			return delivered?.type === "image" && delivered.data === image.data && delivered.mimeType === image.mimeType;
+		}))) return message;
+	return { ...message, providerPayload: undefined, content: images?.length ? [{ type: "text", text }, ...images] : text };
+}
 declare module "@oh-my-pi/pi-ai" {
 	interface UserMessage {
 		imageLinks?: (string | undefined)[];

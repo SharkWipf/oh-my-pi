@@ -1,7 +1,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { Tokenizer } from "@oh-my-pi/pi-agent-core/tokenizer";
 import type { UserMessage } from "@oh-my-pi/pi-ai";
-import { createCustomMessage, isCustomMessageContent, normalizeCustomMessagePayload } from "./messages";
+import { createCustomMessage, getOriginalSourceMessage, isCustomMessageContent, normalizeCustomMessagePayload } from "./messages";
 import { PreservedMessageIndex, type PolicyKind, type PolicyLimit, type PolicyRange } from "./preserved-message-index";
 import {
 	PRESERVED_USER_MESSAGE_CATEGORIES,
@@ -9,7 +9,6 @@ import {
 	USER_MESSAGE_CLASSIFICATION_CUSTOM_TYPE,
 	INVALIDATED_USER_MESSAGE_CLASSIFICATION_CUSTOM_TYPE,
 	decodeCompactionMessageOverride,
-	parseCompactionOverridePrompt,
 	unpackPreservedUserMessageClassifications,
 	decodePreservedUserMessageClassifications,
 	type PreservationLimit,
@@ -421,13 +420,8 @@ export class PreservedMessageQuery {
 		const index = position + this.#offset;
 		const entry = index < this.#baseLength ? this.#entries[index] : this.#appended[index - this.#baseLength];
 		if (entry?.type === "message") {
-			const message = entry.message;
-			if (message.role !== "user" || !message.originalSubmission) return entry;
-			const original = message.originalSubmission;
-			const text = message.compactionOverride !== undefined
-				? parseCompactionOverridePrompt(original.text)?.text ?? original.text : original.text;
-			return { ...entry, message: { ...message, providerPayload: undefined, content:
-				original.images?.length ? [{ type: "text", text }, ...original.images] : text } };
+			const message = entry.message.role === "user" ? getOriginalSourceMessage(entry.message) : entry.message;
+			return message === entry.message ? entry : { ...entry, message };
 		}
 		if (entry?.type !== "custom_message" || !isCustomMessageContent(entry.content)) return undefined;
 		const normalized = normalizeCustomMessagePayload(entry);

@@ -80,7 +80,7 @@ import {
 	resolveMethodSettings,
 	resolveSpeculationMethod,
 } from "./compaction-methods";
-import { assistantTurnProducedOutput, convertToLlm, stripImagesFromMessage } from "./messages";
+import { assistantTurnProducedOutput, convertToLlm, getOriginalSourceMessage, stripImagesFromMessage } from "./messages";
 import { isTerminalTextAssistantAnswer } from "./queued-messages";
 import {
 	resolveCompactionConfiguredTarget,
@@ -1644,7 +1644,8 @@ export class SessionMaintenance {
 		await operation.manager.flush();
 		if (!this.#compactionOwnerValid(operation)) throw new CompactionCancelledError();
 		if (!operation.selectionCaptured) {
-			operation.selection = structuredClone(await this.#host.compactionSourceSelection());
+			const { originalSourceMessage, ...selection } = await this.#host.compactionSourceSelection();
+			operation.selection = { ...structuredClone(selection), originalSourceMessage };
 			operation.selectionCaptured = true;
 		}
 		if (!this.#compactionInputValid(operation)) throw new CompactionCancelledError();
@@ -1835,7 +1836,7 @@ export class SessionMaintenance {
 		}
 		if (
 			pendingMidTurnDeadEnd &&
-			prepareCompaction(this.#host.sessionManager.getBranch(), compactionSettings, model, this.#tokenizer) ===
+			prepareCompaction(this.#host.sessionManager.getBranch(), compactionSettings, model, this.#tokenizer, { originalSourceMessage: getOriginalSourceMessage }) ===
 				undefined
 		) {
 			// The prior tool loop already attempted the rescue and warned for this
@@ -1958,7 +1959,7 @@ export class SessionMaintenance {
 			// soon as one appears.
 			if (
 				!model ||
-				prepareCompaction(this.#host.sessionManager.getBranch(), compactionSettings, model, this.#tokenizer) ===
+				prepareCompaction(this.#host.sessionManager.getBranch(), compactionSettings, model, this.#tokenizer, { originalSourceMessage: getOriginalSourceMessage }) ===
 					undefined
 			) {
 				return;
