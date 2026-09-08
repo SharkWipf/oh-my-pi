@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Streaming updates no longer cross queued message boundaries, which could lose assistant text and leave an orphaned running tool card that squeezed subsequent transcript entries into collapsed rows.
+- TODO changes made inside Eval now persist and refresh the TODO pane; subagent completion reconciliation no longer restores an older displayed plan over the current session plan.
+
 ## [18.1.15] - 2026-09-08
 
 ### Added

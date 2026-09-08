@@ -887,7 +887,12 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 		const failed = errors.length > 0;
 		const effective = failed ? previousPhases : updated;
 		const completedTasks = readOnly || failed ? [] : getCompletionTransitions(previousPhases, updated);
-		if (!readOnly && !failed) this.session.setTodoPhases?.(updated);
+		if (!readOnly && !failed) {
+			// Eval invokes tools without a top-level todo result. Commit the same
+			// branch snapshot used by slash edits and native provider todo updates.
+			this.session.sessionManager?.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: updated });
+			this.session.setTodoPhases?.(updated);
+		}
 		const details: TodoToolDetails = { op, phases: effective, storage };
 		if (completedTasks.length > 0) details.completedTasks = completedTasks;
 

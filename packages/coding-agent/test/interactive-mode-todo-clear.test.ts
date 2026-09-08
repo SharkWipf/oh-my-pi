@@ -1,8 +1,9 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { callSessionTool } from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
@@ -10,7 +11,8 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task";
-import type { TodoItem, TodoPhase } from "@oh-my-pi/pi-coding-agent/tools/todo";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { type TodoItem, type TodoPhase, TodoTool } from "@oh-my-pi/pi-coding-agent/tools/todo";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -78,6 +80,49 @@ describe("InteractiveMode todo HUD persistence", () => {
 	function setTodoClearDelay(todoClearDelay: number): void {
 		session.settings.override("tasks.todoClearDelay", todoClearDelay);
 	}
+
+	it("refreshes nested todo updates and never reconciles an obsolete HUD over them", async () => {
+		await replaceMode();
+		setTodoClearDelay(-1);
+		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
+		const oldPhases: TodoPhase[] = [
+			{ name: "Old plan", tasks: [{ content: "obsolete delegated task", status: "in_progress" }] },
+		];
+		session.setTodoPhases(oldPhases);
+		mode.setTodos(oldPhases);
+		await mode.init();
+		const toolSession: ToolSession = {
+			cwd: tempDir.path(),
+			hasUI: true,
+			settings: session.settings,
+			getSessionFile: () => session.sessionManager.getSessionFile() ?? null,
+			getSessionSpawns: () => null,
+			sessionManager: session.sessionManager,
+			getTodoPhases: () => session.getTodoPhases(),
+			setTodoPhases: phases => session.setTodoPhases(phases),
+			getToolByName: name => (name === "todo" ? (todo as unknown as AgentTool) : undefined),
+		};
+		const todo = new TodoTool(toolSession);
+		await callSessionTool("todo", { op: "init", items: ["current nested work"] }, { session: toolSession });
+		await new Promise<void>(resolve => setImmediate(resolve));
+		expect(renderTodos(mode)).toContain("current nested work");
+		expect(renderTodos(mode)).not.toContain("obsolete delegated task");
+
+		// Reproduce a delayed HUD snapshot while canonical state is already new.
+		mode.setTodos(oldPhases);
+		vi.useFakeTimers();
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "ObsoleteWorker",
+			index: 0,
+			agent: "task",
+			description: "obsolete delegated task",
+			status: "completed",
+			detached: true,
+		});
+		vi.advanceTimersByTime(100);
+		expect(session.getTodoPhases()[0]?.tasks[0]?.content).toBe("current nested work");
+		expect(session.getTodoPhases()[0]?.tasks[0]?.status).toBe("in_progress");
+	});
 
 	it("clears closed todos from the panel instantly without mutating session history", () => {
 		setTodoClearDelay(0);

@@ -7433,6 +7433,7 @@ export class AgentSession {
 
 	setTodoPhases(phases: TodoPhase[]): void {
 		this.#todo.setPhases(phases);
+		this.#emit({ type: "todo_changed" });
 	}
 
 	/** Active item labels accepted by this pooled turn's incremental yield tool. */

@@ -2,6 +2,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
+import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -120,6 +121,97 @@ describe("EventController message_update coalescing", () => {
 		expect((ctx.streamingMessage as AssistantMessage | undefined)?.content).toEqual([
 			{ type: "text", text: "tok1 tok2" },
 		]);
+	});
+
+	it("keeps a new message visible when its update arrives behind the preceding message end", async () => {
+		const { controller, ctx, emit } = createStreamingFixture();
+		try {
+			// A queued boundary must not consume a later message's snapshot.
+			emit({ type: "turn_start" });
+			emit({ type: "message_end", message: assistantMessage("finished previous message") });
+			emit({ type: "message_start", message: assistantMessage("") });
+			emit(messageUpdate("new message stays visible"));
+			vi.advanceTimersByTime(33);
+			for (let i = 0; i < 4; i++) await flushMicrotasks();
+			const rendered = ctx.streamingComponent?.render(80).join("\n") ?? "";
+			expect(Bun.stripANSI(rendered)).toContain("new message stays visible");
+		} finally {
+			controller.dispose();
+			ctx.chatContainer.dispose();
+		}
+	});
+
+	it("settles a rewritten Eval id without leaving an orphan running card", async () => {
+		const { controller, ctx, emit } = createStreamingFixture();
+		const args = { language: "js", code: "1", title: "controlled Eval" };
+		const toolUpdate = (id: string): Extract<AgentSessionEvent, { type: "message_update" }> => {
+			const message = assistantMessage("");
+			message.content = [{ type: "toolCall", id, name: "eval", arguments: args }];
+			return {
+				type: "message_update",
+				message,
+				assistantMessageEvent: { type: "toolcall_delta", contentIndex: 0, delta: "", partial: message },
+			};
+		};
+		try {
+			emit({ type: "turn_start" });
+			emit({ type: "message_end", message: assistantMessage("finished previous message") });
+			emit({ type: "message_start", message: assistantMessage("") });
+			emit(toolUpdate("temporary-id"));
+			vi.advanceTimersByTime(33);
+			for (let i = 0; i < 4; i++) await flushMicrotasks();
+			emit(toolUpdate("final-id"));
+			vi.advanceTimersByTime(33);
+			for (let i = 0; i < 4; i++) await flushMicrotasks();
+			emit({ type: "tool_execution_start", toolName: "eval", toolCallId: "final-id", args });
+			emit({
+				type: "tool_execution_end",
+				toolName: "eval",
+				toolCallId: "final-id",
+				isError: false,
+				result: { content: [{ type: "text", text: "Eval result ready" }] },
+			});
+			for (let i = 0; i < 4; i++) await flushMicrotasks();
+			const rendered = ctx.chatContainer.children
+				.filter((component): component is ToolExecutionComponent => component instanceof ToolExecutionComponent)
+				.flatMap(component => {
+					component.setTranscriptAllocation(1, { tick: 0, now: 0 });
+					return component.render(80).map(Bun.stripANSI);
+				})
+				.join("\n");
+			expect(rendered).toContain("Eval result ready");
+			expect(rendered).not.toContain("running");
+		} finally {
+			controller.dispose();
+			ctx.chatContainer.dispose();
+		}
+	});
+
+	it("keeps queued timer snapshots on their side of a message boundary", async () => {
+		const { controller, ctx, emit } = createStreamingFixture();
+		const initGate = Promise.withResolvers<void>();
+		ctx.isInitialized = false;
+		ctx.init = async () => {
+			await initGate.promise;
+			ctx.isInitialized = true;
+		};
+		try {
+			emit({ type: "turn_start" });
+			emit(messageUpdate("previous message"));
+			vi.advanceTimersByTime(33);
+			emit({ type: "message_end", message: assistantMessage("previous message") });
+			emit({ type: "message_start", message: assistantMessage("") });
+			emit(messageUpdate("message after queued timer"));
+			vi.advanceTimersByTime(33);
+			initGate.resolve();
+			for (let i = 0; i < 6; i++) await flushMicrotasks();
+			const rendered = ctx.streamingComponent?.render(80).join("\n") ?? "";
+			expect(Bun.stripANSI(rendered)).toContain("message after queued timer");
+		} finally {
+			initGate.resolve();
+			controller.dispose();
+			ctx.chatContainer.dispose();
+		}
 	});
 
 	it("speaks every delta exactly once even when intermediate snapshots are coalesced away", async () => {
