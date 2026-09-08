@@ -1,6 +1,14 @@
 import { describe, expect, it } from "bun:test";
-import type { Context, Message } from "@oh-my-pi/pi-ai";
-import { bindMessageSource, cloneWithSourceOrigins, getSourceOrigin } from "@oh-my-pi/pi-ai/utils/source-origin";
+import { clearCustomApis, registerCustomApi, type Context, type Message } from "@oh-my-pi/pi-ai";
+import { bindMessageSource, cloneWithSourceOrigins, getSourceOrigin, setSourceOrigin } from "@oh-my-pi/pi-ai/utils/source-origin";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import { ModelRegistry } from "../src/config/model-registry";
+import { Settings } from "../src/config/settings";
+import { createAgentSession } from "../src/sdk";
+import { AuthStorage } from "../src/session/auth-storage";
+import { SessionManager } from "../src/session/session-manager";
+import { createAssistantMessage } from "./helpers/agent-session-setup";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { decorateContextImages, inlineContextImages } from "../src/blob-broker/context-images";
 import { obfuscateMessages } from "../src/secrets/message-transform";
@@ -146,4 +154,106 @@ describe("native SDK transform origins", () => {
 		const changed = injector.transform(context, "2026-09-08", "/controlled");
 		expect(getSourceOrigin(changed.messages.at(-1)!)?.kind).toBe("synthetic");
 	});
+});
+
+it("honors actual SDK context and provider hooks once, without retaining unsupported attribution", async () => {
+	using directory = TempDir.createSync("@native-sdk-origins-");
+	const auth = await AuthStorage.create(":memory:");
+	const api = "native-origin-hook-proof";
+	const requestModel = buildModel({ ...model, api, provider: "native-origin-hook-proof" });
+	auth.setRuntimeApiKey(requestModel.provider, "local-only");
+	let contextCalls = 0;
+	let payloadCalls = 0;
+	const observed: Array<{ context: Context; payload: unknown }> = [];
+	registerCustomApi(api, (_model, context, options) => {
+		const stream = new AssistantMessageEventStream();
+		void (async () => {
+			const payload = { input: [{ role: "user", content: "original" }] };
+			setSourceOrigin(payload.input[0]!, {
+				kind: "source",
+				parts: [{ entryId: "wire", order: 0, blockIndex: 0, coverage: "full", representation: "native" }],
+			});
+			const result = await options?.onPayload?.(payload, requestModel);
+			observed.push({ context, payload: result ?? payload });
+			const message = createAssistantMessage("ok");
+			stream.push({ type: "done", reason: "stop", message });
+		})();
+		return stream;
+	});
+	const { session } = await createAgentSession({
+		cwd: directory.path(), agentDir: directory.path(),
+		sessionManager: SessionManager.inMemory(directory.path()),
+		authStorage: auth,
+		modelRegistry: new ModelRegistry(auth, directory.join("models.yml"), { cacheDbPath: ":memory:" }),
+		settings: Settings.isolated({ "compaction.enabled": false }),
+		model: requestModel, disableExtensionDiscovery: true,
+		extensions: [pi => {
+			pi.on("context", event => {
+				contextCalls++;
+				const target = event.messages.find(message => message.role === "user")!;
+				bindMessageSource(target as Message, "hook-input", 0);
+				if (target.role === "user") target.content = "context-authority";
+			});
+			pi.on("before_provider_request", event => {
+				payloadCalls++;
+				const payload = event.payload as { input: Array<{ content: string }> };
+				if (payloadCalls === 1) payload.input[0]!.content = "in-place-authority";
+				else return { input: [{ content: "replacement-authority" }] };
+			});
+		}],
+		skills: [], contextFiles: [], promptTemplates: [], slashCommands: [],
+		enableMCP: false, enableLsp: false, skipPythonPreflight: true, taskDepth: 1, agentId: "SubAgent",
+	});
+	try {
+		await session.sendUserMessage("first");
+		await session.sendUserMessage("second");
+		expect([contextCalls, payloadCalls]).toEqual([2, 2]);
+		for (const [index, result] of observed.entries()) {
+			const userMessage = result.context.messages.find(message => message.role === "user")!;
+			expect(JSON.stringify(userMessage.content)).toContain("context-authority");
+			expect(getSourceOrigin(userMessage)?.kind).toBe("unknown");
+			const item = (result.payload as { input: Array<{ content: string }> }).input[0]!;
+			expect(item.content).toBe(index === 0 ? "in-place-authority" : "replacement-authority");
+			expect(getSourceOrigin(item)?.kind).toBe("unknown");
+		}
+	} finally {
+		await session.dispose();
+		auth.close();
+		clearCustomApis();
+	}
+});
+
+it("retains selected originals beyond the ordinary cap, never synthetic raster or former selections", () => {
+	const selected = user(Array.from({ length: 101 }, () => ({ type: "image" as const, data: PNG, mimeType: "image/png" })));
+	bindMessageSource(selected, "selected", 0);
+	const unselected = user([{ type: "image", data: PNG, mimeType: "image/png" }]);
+	bindMessageSource(unselected, "ordinary", 1);
+	const raster = user([setSourceOrigin(
+		{ type: "image" as const, data: PNG, mimeType: "image/png" },
+		{ kind: "synthetic", reason: "tool-result-raster" },
+	)]);
+	const context = { messages: [selected, unselected, raster] };
+	const selectedIds = new Set(["selected"]);
+	const output = clampProviderContextImages(context, { ...model, provider: "anthropic" }, id => selectedIds.has(id));
+	expect(output.messages[0]).toBe(selected);
+	expect(output.messages[1]!.content).toEqual([]);
+	expect(output.messages[2]!.content).toEqual([]);
+	selectedIds.clear();
+	const next = clampProviderContextImages(context, { ...model, provider: "anthropic" }, id => selectedIds.has(id));
+	expect(parts(next.messages[0]!)[0]!.blockIndex).toBeGreaterThan(0);
+	expect(next.messages[1]).toBe(unselected);
+});
+
+it("does not grant current-selection immunity to historical or unknown image snapshots", () => {
+	const selected = user(Array.from({ length: 102 }, () => ({ type: "image" as const, data: PNG, mimeType: "image/png" })));
+	bindMessageSource(selected, "selected", 0);
+	if (!Array.isArray(selected.content)) throw new Error("expected image blocks");
+	for (const [index, status] of (["historical-not-current", "unknown"] as const).entries()) {
+		const image = selected.content[index]!;
+		const origin = getSourceOrigin(image);
+		if (origin?.kind !== "source") throw new Error("expected original source binding");
+		setSourceOrigin(image, { ...origin, parts: origin.parts.map(part => ({ ...part, status })) });
+	}
+	const output = clampProviderContextImages({ messages: [selected] }, { ...model, provider: "anthropic" }, id => id === "selected");
+	expect(output.messages[0]!.content).toEqual(selected.content.slice(2));
 });

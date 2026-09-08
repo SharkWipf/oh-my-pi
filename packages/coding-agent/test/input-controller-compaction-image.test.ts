@@ -118,7 +118,7 @@ describe("compaction queue image forwarding", () => {
 	test("native queue accepts and restores a rich original without a requirements capture service", async () => {
 		const image = img("aGVsbG8=");
 		const { ctx } = makeCtx();
-		ctx.sessionManager.captureRequirementsInput = async () => { throw new Error("V2 is disabled"); };
+
 		const originalSubmission = { text: "/once /skill:inspect [Image #1]", images: [image], imageLinks: ["clipboard"], compactionOverride: "exclude" as const };
 		ctx.editor.pendingImages = [image];
 		ctx.editor.pendingImageLinks = ["clipboard"];

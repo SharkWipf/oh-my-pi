@@ -19,6 +19,15 @@ import type {
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import {
+	combineContentSourceOrigins,
+	combineSourceOrigins,
+	getSourceOrigin,
+	getSourceOriginBindingGeneration,
+	setSourceOrigin,
+	transferSourceOrigin,
+	transferTransformedSourceOrigin,
+} from "@oh-my-pi/pi-ai/utils/source-origin";
 import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import userInterjectionTemplate from "../prompts/steering/user-interjection.md" with { type: "text" };
@@ -467,7 +476,7 @@ function followedByInterruptedThinking(messages: AgentMessage[], index: number):
 /** Drop an incomplete trailing thinking run from an interrupted assistant in the LLM view. */
 function stripDemotedThinkingForLlm(message: AssistantMessage): AssistantMessage {
 	const demoted = demoteInterruptedThinking(message);
-	return demoted ? { ...message, content: demoted.strippedContent } : message;
+	return demoted ? withContentSourceOrigin({ ...message, content: demoted.strippedContent }) : message;
 }
 
 /** Details persisted on a `/tan` background-dispatch breadcrumb. */
@@ -757,7 +766,7 @@ function isSteeringUserMessage(message: AgentMessage | undefined): message is St
 function userMessageWithoutSteering(message: UserMessage): UserMessage {
 	const { steering, ...rest } = message;
 	void steering;
-	return rest;
+	return transferSourceOrigin(message, rest);
 }
 
 function renderSteeringEnvelope(message: string): string {
@@ -795,22 +804,28 @@ function wrapSteeringUserMessage(message: SteeringUserMessage): UserMessage {
 	const userMessage: UserMessage =
 		message.role === "user"
 			? userMessageWithoutSteering(message)
-			: {
+			: transferSourceOrigin(message, {
 					role: "user",
 					content: message.content,
 					attribution: "user",
 					timestamp: message.timestamp,
-				};
+				});
 	if (typeof message.content === "string") {
 		if (message.content.length === 0) return message.role === "user" ? message : userMessage;
-		return { ...userMessage, content: renderSteeringEnvelope(message.content) };
+		return transferTransformedSourceOrigin(message, {
+			...userMessage,
+			content: renderSteeringEnvelope(message.content),
+		});
 	}
 
 	const text = getArrayContentText(message.content);
 	if (text.length === 0) return message.role === "user" ? message : userMessage;
-	const content: (TextContent | ImageContent)[] = [{ type: "text", text: renderSteeringEnvelope(text) }];
+	const wrappedText: TextContent = { type: "text", text: renderSteeringEnvelope(text) };
+	setSourceOrigin(wrappedText, combineSourceOrigins(message.content.filter(part => part.type === "text")));
+	transferTransformedSourceOrigin(wrappedText, wrappedText);
+	const content: (TextContent | ImageContent)[] = [wrappedText];
 	content.push(...getArrayContentImages(message.content));
-	return { ...userMessage, content };
+	return withContentSourceOrigin({ ...userMessage, content });
 }
 
 export function wrapSteeringForModel(messages: AgentMessage[]): AgentMessage[] {
@@ -968,10 +983,12 @@ export function replaceLlmImagesWithText(messages: Message[], placeholder: strin
 			}
 			const prev = replaced[replaced.length - 1];
 			if (prev?.type === "text" && prev.text === placeholder) continue;
-			replaced.push({ type: "text", text: placeholder });
+			replaced.push(
+				setSourceOrigin({ type: "text", text: placeholder }, { kind: "synthetic", reason: "image-removed" }),
+			);
 		}
 		if (out === undefined) out = messages.slice();
-		out[i] = { ...msg, content: replaced } as Message;
+		out[i] = withContentSourceOrigin({ ...msg, content: replaced } as Message);
 	}
 	return out ?? messages;
 }
@@ -1115,8 +1132,15 @@ export function sanitizeRehydratedOpenAIResponsesAssistantMessage(message: Assis
 	};
 }
 
-function customMessageContentToLlmContent(content: CustomMessage["content"]): (TextContent | ImageContent)[] {
-	return typeof content === "string" ? [{ type: "text", text: content }] : content;
+function withContentSourceOrigin<T extends Message>(message: T): T {
+	if (Array.isArray(message.content)) setSourceOrigin(message, combineContentSourceOrigins(message.content));
+	return message;
+}
+
+function customMessageContentToLlmContent(message: CustomMessage): (TextContent | ImageContent)[] {
+	return typeof message.content === "string"
+		? [transferSourceOrigin(message, { type: "text", text: message.content })]
+		: message.content;
 }
 
 /** True for a `/skill:<name>` prompt the user invoked directly (attribution `user`), as opposed to an agent/autoload injection. */
@@ -1145,19 +1169,29 @@ function convertImageBearingCustomMessage(message: CustomMessage | HookMessage):
 
 	const converted: Message[] = [];
 	if (textBlocks.length > 0) {
-		converted.push({
-			role: "developer",
-			content: textBlocks,
+		converted.push(
+			withContentSourceOrigin({
+				role: "developer",
+				content: textBlocks,
+				attribution: message.attribution,
+				timestamp: message.timestamp,
+			}),
+		);
+	}
+	converted.push(
+		withContentSourceOrigin({
+			role: "user",
+			content: [
+				setSourceOrigin(
+					{ type: "text" as const, text: `Images attached to ${message.customType}.` },
+					{ kind: "synthetic", reason: "historical-role-label" },
+				),
+				...imageBlocks,
+			],
 			attribution: message.attribution,
 			timestamp: message.timestamp,
-		});
-	}
-	converted.push({
-		role: "user",
-		content: [{ type: "text", text: `Images attached to ${message.customType}.` }, ...imageBlocks],
-		attribution: message.attribution,
-		timestamp: message.timestamp,
-	});
+		}),
+	);
 	return converted;
 }
 
@@ -1175,6 +1209,7 @@ function convertImageBearingCustomMessage(message: CustomMessage | HookMessage):
  */
 interface ConvertMemoEntry {
 	interruptedNext: boolean;
+	sourceOrigin: ReturnType<typeof getSourceOrigin>;
 	fragment: Message[];
 }
 const convertCache = new WeakMap<AgentMessage, ConvertMemoEntry>();
@@ -1196,6 +1231,7 @@ const convertCache = new WeakMap<AgentMessage, ConvertMemoEntry>();
 // from a stale mid-stream fragment.
 interface ConvertArrayMemo {
 	generation: number;
+	sourceGeneration: number;
 	length: number;
 	output: Message[];
 	tail: AgentMessage | undefined;
@@ -1219,24 +1255,27 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
 				return [];
 			}
 			return [
-				{
+				withContentSourceOrigin({
 					role: "user",
-					content: [{ type: "text", text: bashExecutionToText(m) }, ...(m.images ?? [])],
+					content: [
+						transferTransformedSourceOrigin(m, { type: "text" as const, text: bashExecutionToText(m) }),
+						...(m.images ?? []),
+					],
 					attribution: "user",
 					timestamp: m.timestamp,
-				},
+				}),
 			];
 		case "pythonExecution":
 			if (m.excludeFromContext) {
 				return [];
 			}
 			return [
-				{
+				withContentSourceOrigin({
 					role: "user",
-					content: [{ type: "text", text: pythonExecutionToText(m) }],
+					content: [transferTransformedSourceOrigin(m, { type: "text" as const, text: pythonExecutionToText(m) })],
 					attribution: "user",
 					timestamp: m.timestamp,
-				},
+				}),
 			];
 		case "fileMention": {
 			// One `fileMention` can mix `@notes.md` (text) and `@screenshot.png` (image)
@@ -1250,30 +1289,37 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
 				const inner = file.content ? `\n${file.content}\n` : "\n";
 				return `<file path="${file.path}">${inner}</file>`;
 			};
+			const wrapFiles = (files: FileMentionMessage["files"]): TextContent => {
+				const block: TextContent = { type: "text", text: files.map(wrap).join("\n") };
+				setSourceOrigin(block, combineSourceOrigins(files));
+				return transferTransformedSourceOrigin(block, block);
+			};
 			const textFiles = m.files.filter(file => !file.image);
 			const imageFiles = m.files.filter(file => file.image);
 			const out: Message[] = [];
 			if (textFiles.length > 0) {
-				out.push({
-					role: "developer",
-					content: [{ type: "text" as const, text: textFiles.map(wrap).join("\n") }],
-					attribution: "user",
-					timestamp: m.timestamp,
-				});
+				out.push(
+					withContentSourceOrigin({
+						role: "developer",
+						content: [wrapFiles(textFiles)],
+						attribution: "user",
+						timestamp: m.timestamp,
+					}),
+				);
 			}
 			if (imageFiles.length > 0) {
-				const content: (TextContent | ImageContent)[] = [
-					{ type: "text" as const, text: imageFiles.map(wrap).join("\n") },
-				];
+				const content: (TextContent | ImageContent)[] = [wrapFiles(imageFiles)];
 				for (const file of imageFiles) {
 					if (file.image) content.push(file.image);
 				}
-				out.push({
-					role: "user",
-					content,
-					attribution: "user",
-					timestamp: m.timestamp,
-				});
+				out.push(
+					withContentSourceOrigin({
+						role: "user",
+						content,
+						attribution: "user",
+						timestamp: m.timestamp,
+					}),
+				);
 			}
 			return out;
 		}
@@ -1285,12 +1331,12 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
 			}
 			if (isUserInvokedSkillPrompt(m)) {
 				return [
-					{
+					withContentSourceOrigin({
 						role: "user",
-						content: customMessageContentToLlmContent(m.content),
+						content: customMessageContentToLlmContent(m),
 						attribution: "user",
 						timestamp: m.timestamp,
-					},
+					}),
 				];
 			}
 			const split = convertImageBearingCustomMessage(m);
@@ -1333,12 +1379,15 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
 }
 
 /** Cached per-message conversion. Reuses the stored fragment while identity and
- *  `interruptedNext` neighbor state hold; recomputes on a neighbor flip. */
+ *  neighbor state and source binding hold; recomputes on either change. */
 function convertOneCached(m: AgentMessage, interruptedNext: boolean): Message[] {
 	const cached = convertCache.get(m);
-	if (cached !== undefined && cached.interruptedNext === interruptedNext) return cached.fragment;
+	const sourceOrigin = getSourceOrigin(m);
+	if (cached !== undefined && cached.interruptedNext === interruptedNext && cached.sourceOrigin === sourceOrigin) {
+		return cached.fragment;
+	}
 	const fragment = convertOne(m, interruptedNext);
-	convertCache.set(m, { interruptedNext, fragment });
+	convertCache.set(m, { interruptedNext, sourceOrigin, fragment });
 	return fragment;
 }
 
@@ -1359,7 +1408,10 @@ function convertOneCached(m: AgentMessage, interruptedNext: boolean): Message[] 
 export function convertToLlm(messages: AgentMessage[]): Message[] {
 	const len = messages.length;
 	const memo = convertArrayCache.get(messages);
-	const sameGeneration = memo !== undefined && memo.generation === convertGeneration;
+	// Binding may occur after an ordinary request populated these identity caches.
+	const sourceGeneration = getSourceOriginBindingGeneration();
+	const sameGeneration =
+		memo !== undefined && memo.generation === convertGeneration && memo.sourceGeneration === sourceGeneration;
 	const tail = len > 0 ? messages[len - 1] : undefined;
 
 	// Exact-repeat: same array, same length, same trailing identity → reuse the
@@ -1409,6 +1461,7 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 	// so a prior caller holding the previous memo output never sees it grow.
 	convertArrayCache.set(messages, {
 		generation: convertGeneration,
+		sourceGeneration,
 		length: len,
 		output: out,
 		tail,
