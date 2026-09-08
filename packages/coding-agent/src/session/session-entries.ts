@@ -76,6 +76,7 @@ export interface SessionEntryBase {
 export interface SessionMessageEntry extends SessionEntryBase {
 	/** Original namespace identity; not a human-authorship attestation. */
 	sourceOrigin?: { journalId: string; entryId: string };
+	type: "message";
 	message: AgentMessage;
 }
 
@@ -288,6 +289,7 @@ export interface ModeChangeEntry extends SessionEntryBase {
 export interface CustomMessageEntry<T = unknown> extends SessionEntryBase {
 	/** Original namespace identity; not a human-authorship attestation. */
 	sourceOrigin?: { journalId: string; entryId: string };
+	type: "custom_message";
 	customType: string;
 	content: string | (TextContent | ImageContent)[];
 	details?: T;
