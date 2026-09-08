@@ -876,6 +876,66 @@ test("deleting a foreign original while physical preparation awaits refuses the 
 	}
 });
 
+test("catalog relocation preserves accepted requirements and quarantine without certifying intake", async () => {
+	using temp = TempDir.createSync("requirements-catalog-relocation-");
+	const storage = await AgentStorage.open(temp.join("agent.db"));
+	const opened: Harness[] = [];
+	const seed = SessionManager.inMemory(temp.path());
+	const texts = ["Preserve the active requirement across journal relocation.", "Keep the quarantined requirement suspended."];
+	const entryIds = texts.map((text, timestamp) => seed.appendMessage({ role: "user", content: text, timestamp, producer: { type: "human" } }));
+	const originalPath = temp.join("original.jsonl");
+	await writeFile(originalPath, [seed.getHeader(), ...seed.getEntries()].map(entry => JSON.stringify(entry)).join("\n") + "\n");
+	await seed.close();
+	try {
+		const original = createHarness({ manager: await SessionManager.open(originalPath, temp.path()), agentStorage: storage });
+		opened.push(original);
+		for (const entryId of entryIds) {
+			const descriptor = original.manager.getRequirementsSource(entryId)!;
+			const { source } = await original.session.requirements.inspectSource(descriptor.key);
+			await original.session.requirements.applyOperatorAction({
+				kind: "literal-adopt", sourceKey: source.key, unitId: source.units[0]!.id,
+				scope: { kind: "session", sessionId: original.manager.getSessionId(), epoch: source.epoch },
+			});
+		}
+		const beforeCatalog = original.session.requirements.prepareFragment().receipt;
+		expect(beforeCatalog.coverageComplete).toBe(false);
+		await original.session.requirements.observeCommittedSources(true);
+		const afterCatalog = original.session.requirements.prepareFragment().receipt;
+		expect(afterCatalog.coverageComplete).toBe(true);
+		expect(afterCatalog.revisionIds).toEqual(beforeCatalog.revisionIds);
+		expect(afterCatalog.signature).toBe(beforeCatalog.signature);
+		expect(afterCatalog.generation).toBe(beforeCatalog.generation);
+		expect(beforeCatalog.coverageComplete).toBe(false);
+		const heads = original.session.requirements.snapshotApplicable().active;
+		const quarantined = heads.find(revision => revision.statement === texts[1])!;
+		await original.session.requirements.applyOperatorAction({ kind: "quarantine", revisionIds: [quarantined.id], reason: "Preserve the operator suspension across relocation" });
+		await original.manager.flush();
+		const relocatedPath = temp.join("relocated.jsonl");
+		await writeFile(relocatedPath, await readFile(originalPath, "utf8"));
+		const relocated = createHarness({ manager: await SessionManager.open(relocatedPath, temp.path()), agentStorage: storage });
+		opened.push(relocated);
+		await relocated.session.requirements.refreshCurrentEvidence();
+		await relocated.session.requirements.observeCommittedSources(true);
+		const after = relocated.session.requirements.status({ includeLedger: true });
+		expect(after.applicable.active.map(revision => revision.statement)).toEqual([texts[0]!]);
+		expect(after.snapshot.revisions.map(revision => revision.id).sort()).toEqual(heads.map(revision => revision.id).sort());
+		expect(after.snapshot.revisions.find(revision => revision.id === quarantined.id)?.lifecycle).toBe("quarantined");
+		await unlink(originalPath);
+		await relocated.session.requirements.refreshCurrentEvidence();
+		const activeSource = await relocated.session.requirements.inspectSource(heads.find(revision => revision.statement === texts[0])!.sourceKey);
+		expect(activeSource.units.map(unit => unit.text)).toEqual([texts[0]!]);
+		await relocated.session.prompt("Execute only the active requirement.", { synthetic: true });
+		await relocated.session.agent.waitForIdle();
+		expect(relocated.calls.map(call => requirementStatements(call))).toEqual([[texts[0]!]]);
+	} finally {
+		for (const harness of opened) {
+			await harness.session.dispose();
+			sessions.delete(harness.session);
+		}
+		AgentStorage.close();
+	}
+});
+
 test("warm branch reconciliation checks foreign requirements published while source enumeration awaits", async () => {
 	using temp = TempDir.createSync("requirements-warm-publication-race-");
 	const storage = await AgentStorage.open(temp.join("agent.db"));

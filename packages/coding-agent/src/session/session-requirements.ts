@@ -290,13 +290,9 @@ export class SessionRequirements {
 					const { source } = next.value;
 					keys.add(source.key);
 					const prior = this.#storage.getRequirementsSourceMetadata(source.key);
-					if (!prior) changed.push(source);
-					else if (source.locators.some(locator => !prior.locators.some(current =>
+					if (!prior || source.locators.some(locator => !prior.locators.some(current =>
 						current.sessionId === locator.sessionId && current.entryId === locator.entryId && current.journalPath === locator.journalPath
-					))) {
-						const retained = this.#storage.getRequirementsSource(source.key)!;
-						changed.push({ ...retained, locators: source.locators });
-					}
+					))) changed.push(source);
 					// A scheduling quantum, not a source count/retention limit: drain every descriptor.
 					if (performance.now() - sliceStarted >= 8) {
 						intake();
@@ -330,6 +326,9 @@ export class SessionRequirements {
 			if (!current()) return;
 			this.#hasObserved = true;
 			this.#observedVersion = version;
+			// Coverage can become current without changing accepted heads or their evidence generation.
+			this.#applicableCache = undefined;
+			this.#composition = undefined;
 		})();
 		this.#observing = work;
 		try {
