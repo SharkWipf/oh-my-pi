@@ -1822,7 +1822,6 @@ export class AgentSession {
 			compactionPolicyIdentity: () => this.#preservationPolicyIdentity,
 			compactionSourceSelection: snapshot => this.#compactionSourceSelection(snapshot),
 			captureCompactionRequirements: async () => {
-				await this.#requirementsReady;
 				await this.requirements.observeCommittedSources();
 				return this.requirements.snapshotApplicable();
 			},
@@ -5660,7 +5659,6 @@ export class AgentSession {
 	recoverCompactionPersistence(): Promise<boolean> { return this.#maintenance.recoverCompactionPersistence(); }
 
 	async #protectedSourceEntryIds(): Promise<Pick<ReadonlySet<string>, "has">> {
-		await this.#requirementsReady;
 		await this.requirements.observeCommittedSources();
 		const query = await this.preparePreservedMessages();
 		const { P, N } = this.#preservationSelection(query);
