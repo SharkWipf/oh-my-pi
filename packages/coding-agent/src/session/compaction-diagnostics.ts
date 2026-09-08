@@ -95,7 +95,7 @@ function sourceCoverage(part: SourceLayoutPart | undefined, representation: Sour
 	for (const run of representation.coverage) {
 		const intersects = part.kind === "text" || part.kind === "frame"
 			? run.normalized && run.normalized.start < part.range.end && run.normalized.end > part.range.start
-			: run.entryId === part.entryId && (part.kind === "original-image"
+			: run.entryId === part.entryId && run.projection === part.projection && (part.kind === "original-image"
 				? run.snapshot.blockIndex === part.blockIndex
 				: !part.spans || part.spans.some(span => run.current && span.blockIndex === run.current.blockIndex && span.start < run.current.end && span.end > run.current.start));
 		if (!intersects) continue;
@@ -125,13 +125,13 @@ function preparedOriginCoverage(origin: NativeItemOrigin | undefined, input: Com
 		historical ||= part.status === "historical-not-current";
 		unknown ||= part.status === "unknown";
 		if (part.coverage === "derived" || part.status === "unknown") { missingContribution = true; continue; }
-		if (input.postCompactionSourceIds?.has(part.entryId) || (input.method === "uncompacted" && !input.sourceRepresentation)) { contributions.add("ordinary"); continue; }
+		if ((!part.projection && input.postCompactionSourceIds?.has(part.entryId)) || (input.method === "uncompacted" && !input.sourceRepresentation)) { contributions.add("ordinary"); continue; }
 		const range = part.sourceSpan ?? (part.sourceLength !== undefined ? { start: 0, end: part.sourceLength } : part.representation === "original-image" ? { start: 0, end: 1 } : undefined);
 		const currentRange = part.currentSourceSpan ?? (part.status === undefined || part.status === "exact-current" ? range : undefined);
 		const currentBlock = part.currentBlockIndex ?? part.blockIndex;
 		let wholePart = false;
 		if (!rawPart && input.sourceRepresentation) for (const layout of input.sourceRepresentation.layout) {
-			if (layout.kind !== "source" || layout.entryId !== part.entryId || !layout.contribution || part.status === "historical-not-current") continue;
+			if (layout.kind !== "source" || layout.entryId !== part.entryId || layout.projection !== part.projection || !layout.contribution || part.status === "historical-not-current") continue;
 			if (layout.spans && (!currentRange || !layout.spans.some(span => span.blockIndex === currentBlock && span.start <= currentRange.start && span.end >= currentRange.end))) continue;
 			contributions.add(layout.contribution);
 			wholePart = true;
@@ -140,7 +140,7 @@ function preparedOriginCoverage(origin: NativeItemOrigin | undefined, input: Com
 		if (!range) { missingContribution = true; continue; }
 		const covered: { start: number; end: number }[] = [];
 		for (const run of input.sourceRepresentation?.coverage ?? []) {
-			if (run.entryId !== part.entryId || run.snapshot.blockIndex !== part.blockIndex || run.snapshot.start >= range.end || run.snapshot.end <= range.start) continue;
+			if (run.entryId !== part.entryId || run.projection !== part.projection || run.snapshot.blockIndex !== part.blockIndex || run.snapshot.start >= range.end || run.snapshot.end <= range.start) continue;
 			covered.push(run.snapshot);
 			if (run.contribution) contributions.add(run.contribution);
 			else missingContribution = true;

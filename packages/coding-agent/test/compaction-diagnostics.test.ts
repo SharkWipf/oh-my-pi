@@ -52,3 +52,34 @@ test("neutral original-image identity wins over summary-role fallback while a mi
 	expect(frames[0]!.contributions).toEqual(["selected-user", "ordinary"]);
 	expect(facts.rows.reduce((sum, row) => sum + (row.quantity.tokens ?? 0), 0)).toBe(facts.total.tokens!);
 });
+
+test("same-entry original and delivered projections keep separate physical ownership", () => {
+	const delivered = { role: "user" as const, content: [{ type: "text" as const, text: "expanded delivery" }], timestamp: 1 };
+	const original = { role: "user" as const, content: [{ type: "text" as const, text: "/original command" }], timestamp: 1 };
+	const originalProjection = { projection: "original" as const };
+	const sourceRepresentation: NonNullable<CompactionDiagnosticsInput["sourceRepresentation"]> = {
+		version: 1, coverage: [
+			{ entryId: "same", order: 0, snapshot: { blockIndex: 0, start: 0, end: delivered.content[0]!.text.length }, current: { blockIndex: 0, start: 0, end: delivered.content[0]!.text.length }, status: "exact-current", contribution: "ordinary" },
+			{ entryId: "same", order: 0, snapshot: { blockIndex: 0, start: 0, end: original.content[0]!.text.length }, current: { blockIndex: 0, start: 0, end: original.content[0]!.text.length }, status: "exact-current", contribution: "selected-user", ...originalProjection },
+		], layout: [
+			{ kind: "source", entryId: "same", order: 0, spans: [{ blockIndex: 0, start: 0, end: delivered.content[0]!.text.length }] },
+			{ kind: "source", entryId: "same", order: 0, spans: [{ blockIndex: 0, start: 0, end: original.content[0]!.text.length }], ...originalProjection },
+		],
+	};
+	for (const form of ["reconstructed", "prepared-ranges", "prepared-whole"] as const) {
+		const prepared = form !== "reconstructed";
+		if (prepared) for (const [message, projection] of [[delivered, {}], [original, originalProjection]] as const) {
+			setSourceOrigin(message.content[0]!, { kind: "source", parts: [{ entryId: "same", order: 0, blockIndex: 0, coverage: "full", representation: "native", sourceLength: message.content[0]!.text.length, ...projection }] });
+		}
+		if (form === "prepared-whole") for (const [index, layout] of sourceRepresentation.layout.entries()) {
+			if (layout.kind === "source") layout.contribution = index === 0 ? "ordinary" : "selected-user";
+		}
+		const facts = inventory({ method: "snapcompact", messages: [delivered, original], sourceRepresentation,
+			...(prepared ? { preparedContext: { messages: [delivered, original] } } : { sourceLocations: [{ messageIndex: 0, layoutIndex: 0 }, { messageIndex: 1, layoutIndex: 1 }] }),
+		});
+		expect(facts.rows.filter(row => row.kind === "text").map(row => row.contributions)).toEqual([["ordinary"], ["selected-user"]]);
+		expect(facts.distribution.ordinary.tokens).toBe(new Tokenizer().countMessage(delivered));
+		expect(facts.distribution.addedUser.tokens).toBe(new Tokenizer().countMessage(original));
+		expect(facts.distribution.shared.tokens).toBe(0);
+	}
+});
