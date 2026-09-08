@@ -2470,9 +2470,10 @@ export class SessionManager {
 						const delivered = content[index + 1];
 						return delivered?.type === "image" && delivered.data === image.data && delivered.mimeType === image.mimeType;
 					}));
-			const sameLinks = original.imageLinks === message.imageLinks ||
-				(original.imageLinks?.length === message.imageLinks?.length &&
-					original.imageLinks?.every((link, index) => link === message.imageLinks?.[index]));
+			const deliveredLinks = message.imageLinks;
+			const sameLinks = original.imageLinks === deliveredLinks ||
+				(original.imageLinks?.length === deliveredLinks?.length &&
+					original.imageLinks?.every((link, index) => link === deliveredLinks?.[index]));
 			if (sameContent && sameLinks && original.compactionOverride === message.compactionOverride) {
 				const { originalSubmission: _original, ...delivered } = message;
 				message = delivered;
