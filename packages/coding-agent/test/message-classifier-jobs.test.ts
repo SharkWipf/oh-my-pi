@@ -20,6 +20,19 @@ import { EventBus } from "../src/utils/event-bus";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 const model = getBundledModel("openai", "gpt-4o")!;
+const allFalseCategories = {
+	longTermRule: false,
+	longTermGoal: false,
+	lastingSolution: false,
+	shortTermTask: false,
+	shortTermContext: false,
+	venting: false,
+	restorationGuidance: false,
+	preventionGuidance: false,
+	contextFreeInstruction: false,
+	banter: false,
+	question: false,
+};
 function reply(text: string): AssistantMessage {
 	return {
 		role: "assistant", content: [{ type: "text", text }], api: model.api, provider: model.provider,
@@ -37,7 +50,7 @@ class ControlledProvider {
 		const stream = createAssistantMessageEventStream();
 		let finished = false;
 		this.requests.push({ context, signal: options?.signal,
-			finish(text = "<labels>00000000000</labels>") {
+			finish(text = JSON.stringify(allFalseCategories)) {
 				if (finished) return;
 				finished = true;
 				stream.push({ type: "done", reason: "stop", message: reply(text) });
@@ -159,14 +172,14 @@ describe("message classifier session jobs", () => {
 		await dir.remove();
 	});
 
-	it("persists valid eleven-bit zero as success, retaining prior facts through failed and pending reclassification", async () => {
+	it("persists complete all-false classifications as success, retaining prior facts through failed and pending reclassification", async () => {
 		const id = user("synthetic prior fact");
 		save(id, 1 << 10);
 		const failed = await session.startMessageClassification(id);
 		await until(() => provider.requests.length === 1);
 		expect((await facts()).get(id)).toBe(1 << 10);
 		expect(session.getMessageClassificationRowStatus(id)?.state).toBe("running");
-		provider.requests[0]!.finish("<labels>0000000000</labels>");
+		provider.requests[0]!.finish(JSON.stringify({ ...allFalseCategories, question: undefined }));
 		await settled(failed);
 		expect(job(failed).failed).toBe(1);
 		expect(session.getMessageClassificationRowStatus(id)?.state).toBe("failed");
@@ -194,7 +207,7 @@ describe("message classifier session jobs", () => {
 		});
 		const backfill = await session.startMessageClassificationBackfill(33);
 		await until(() => provider.requests.length === 2);
-		provider.forSource("synthetic future version").finish("<labels>00000000001</labels>");
+		provider.forSource("synthetic future version").finish(JSON.stringify({ ...allFalseCategories, question: true }));
 		await until(() => savedRows.includes(unknown));
 		expect(job(backfill).state).toBe("running");
 		expect((await facts(await reopen())).get(unknown)).toBe(1024);
@@ -472,7 +485,7 @@ describe("message classifier session jobs", () => {
 		provider.forSource("synthetic source after explicit invalidation").finish();
 		await settled(retry);
 		expect((await facts(await reopen())).get(id)).toBe(0);
-		provider.forSource("synthetic source before explicit invalidation").finish("<labels>00000000001</labels>");
+		provider.forSource("synthetic source before explicit invalidation").finish(JSON.stringify({ ...allFalseCategories, question: true }));
 		await until(() => job(original).running === 0);
 		expect((await facts(await reopen())).get(id)).toBe(0);
 	});

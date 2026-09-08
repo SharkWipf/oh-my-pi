@@ -3,6 +3,7 @@ import { Tokenizer } from "@oh-my-pi/pi-agent-core/tokenizer";
 import type { AssistantMessage, Context, ImageContent, Message, Model, TextContent } from "@oh-my-pi/pi-ai";
 import { providerImageBudget } from "@oh-my-pi/snapcompact";
 import classifierPrompt from "../prompts/system/preserve-user-messages-classifier.md" with { type: "text" };
+import { PRESERVED_USER_MESSAGE_CATEGORIES } from "./preserved-message-settings";
 import type { SessionEntry } from "./session-entries";
 
 type UserContent = (TextContent | ImageContent)[];
@@ -308,14 +309,25 @@ export async function classifyPreservedUserMessage(
 	}
 	const text = response.content.filter(part => part.type === "text").map(part => part.text).join("");
 	const mask = parsePreservedUserMessageCategoryMask(text);
-	if (mask === undefined) throw new Error("User-message classifier returned invalid labels; expected <labels> followed by exactly eleven binary digits and </labels>.");
+	if (mask === undefined) throw new Error("User-message classifier returned invalid categories; expected a JSON object containing all eleven named boolean fields.");
 	return mask;
 }
 
 export function parsePreservedUserMessageCategoryMask(text: string): number | undefined {
-	const match = /^<labels>([01]{11})<\/labels>$/.exec(text.trim());
-	if (!match) return undefined;
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(text);
+	} catch {
+		return undefined;
+	}
+	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
+	if (Object.keys(parsed).length !== PRESERVED_USER_MESSAGE_CATEGORIES.length) return undefined;
+	const categories = parsed as Record<string, unknown>;
 	let mask = 0;
-	for (let i = 0; i < 11; i++) if (match[1]![i] === "1") mask |= 1 << i;
+	for (let i = 0; i < PRESERVED_USER_MESSAGE_CATEGORIES.length; i++) {
+		const applies = categories[PRESERVED_USER_MESSAGE_CATEGORIES[i]!];
+		if (typeof applies !== "boolean") return undefined;
+		if (applies) mask |= 1 << i;
+	}
 	return mask;
 }

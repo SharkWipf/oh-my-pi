@@ -17,6 +17,19 @@ import type { SessionEntry } from "../src/session/session-entries";
 
 const image: ImageContent = { type: "image", mimeType: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aMwoAAAAASUVORK5CYII=" };
 const model: Model = getBundledModel("openai", "gpt-4o")!;
+const allFalseCategories = {
+	longTermRule: false,
+	longTermGoal: false,
+	lastingSolution: false,
+	shortTermTask: false,
+	shortTermContext: false,
+	venting: false,
+	restorationGuidance: false,
+	preventionGuidance: false,
+	contextFreeInstruction: false,
+	banter: false,
+	question: false,
+};
 function user(content: string | ImageContent[]): AgentMessage {
 	return { role: "user", content, timestamp: 1 };
 }
@@ -95,18 +108,44 @@ describe("classifier request boundary", () => {
 		expect(buildPreservedUserMessageClassifierRequest(input, model).messages[0]!.content).toContainEqual(image);
 	});
 
-	it("accepts exactly eleven ordered category bits, including valid all-false", () => {
-		expect(parsePreservedUserMessageCategoryMask("<labels>10000000001</labels>")).toBe(1025);
-		expect(parsePreservedUserMessageCategoryMask("<labels>00000000000</labels>")).toBe(0);
-		expect(parsePreservedUserMessageCategoryMask("reason <labels>00000000000</labels>")).toBeUndefined();
-		expect(parsePreservedUserMessageCategoryMask("<labels>0000000000</labels>")).toBeUndefined();
+	it("maps shuffled named categories to canonical mask bits", () => {
+		const response = {
+			question: true,
+			shortTermContext: false,
+			longTermGoal: false,
+			restorationGuidance: true,
+			banter: false,
+			shortTermTask: true,
+			preventionGuidance: false,
+			longTermRule: true,
+			venting: false,
+			contextFreeInstruction: true,
+			lastingSolution: false,
+		};
+		expect(parsePreservedUserMessageCategoryMask(JSON.stringify(response))).toBe(1353);
+	});
+
+	it("accepts complete all-false classifications as a zero mask", () => {
+		expect(parsePreservedUserMessageCategoryMask(JSON.stringify(allFalseCategories))).toBe(0);
+	});
+
+	it("requires every known category and rejects unknown or nonboolean fields", () => {
+		expect(parsePreservedUserMessageCategoryMask(JSON.stringify({ ...allFalseCategories, question: undefined }))).toBeUndefined();
+		expect(parsePreservedUserMessageCategoryMask(JSON.stringify({ ...allFalseCategories, unknown: false }))).toBeUndefined();
+		expect(parsePreservedUserMessageCategoryMask(JSON.stringify({ ...allFalseCategories, question: "false" }))).toBeUndefined();
+		expect(parsePreservedUserMessageCategoryMask(JSON.stringify({ ...allFalseCategories, question: 0 }))).toBeUndefined();
+	});
+
+	it("rejects ordinal responses and text outside the JSON object", () => {
+		expect(parsePreservedUserMessageCategoryMask("<labels>00000000000</labels>")).toBeUndefined();
+		expect(parsePreservedUserMessageCategoryMask("reason " + JSON.stringify(allFalseCategories))).toBeUndefined();
 	});
 
 	it("rejects interrupted output even when its text looks complete", async () => {
 		const input = buildPreservedUserMessageClassifierInput(branch([user("target")]), "0")!;
 		await expect(classifyPreservedUserMessage(input, {
 			model,
-			complete: async () => ({ ...assistant([{ type: "text", text: "<labels>00000000000</labels>" }]), stopReason: "length" }),
+			complete: async () => ({ ...assistant([{ type: "text", text: JSON.stringify(allFalseCategories) }]), stopReason: "length" }),
 		})).rejects.toThrow("length");
 	});
 });
