@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { AgentBusyError, type AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Model, OriginalSubmission } from "@oh-my-pi/pi-ai";
 import { getBlobsDir, isEnoent, logger, type postmortem, VERSION } from "@oh-my-pi/pi-utils";
 import {
 	type Agent,
@@ -964,7 +964,7 @@ export class AcpAgent implements Agent {
 		record: ManagedSessionRecord,
 		text: string,
 		images: AgentImageContent[],
-		originalSubmission: import("@oh-my-pi/pi-ai").OriginalSubmission,
+		originalSubmission: OriginalSubmission,
 		originalText: string,
 	): Promise<void> {
 		const skillResult = await this.#tryRunSkillCommand(record, originalText, originalSubmission);
@@ -1046,7 +1046,7 @@ export class AcpAgent implements Agent {
 		}
 	}
 
-	async #tryRunSkillCommand(record: ManagedSessionRecord, text: string, originalSubmission: import("@oh-my-pi/pi-ai").OriginalSubmission): Promise<boolean> {
+	async #tryRunSkillCommand(record: ManagedSessionRecord, text: string, originalSubmission: OriginalSubmission): Promise<boolean> {
 		if (!record.session.skillsSettings?.enableSkillCommands) {
 			return false;
 		}

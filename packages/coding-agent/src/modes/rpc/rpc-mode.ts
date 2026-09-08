@@ -11,6 +11,7 @@
  * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
  */
 import { once } from "node:events";
+import type { OriginalSubmission } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { $env, isRecord, Snowflake } from "@oh-my-pi/pi-utils";
@@ -151,7 +152,7 @@ export async function runRpcSkillCommand(
 	invocation: RpcSkillInvocation,
 	streamingBehavior: "steer" | "followUp" = "steer",
 	prebuilt?: BuiltSkillPromptMessage,
-	originalSubmission?: import("@oh-my-pi/pi-ai").OriginalSubmission,
+	originalSubmission?: OriginalSubmission,
 ): Promise<boolean> {
 	const built = prebuilt ?? (await buildSkillPromptMessage(invocation.skill, invocation.args, "user"));
 	return session.promptCustomMessage(
@@ -178,7 +179,7 @@ export async function dispatchRpcSkillPrompt(input: {
 	id: string | undefined;
 	session: RpcSkillCommandSession;
 	message: string;
-	originalSubmission?: import("@oh-my-pi/pi-ai").OriginalSubmission;
+	originalSubmission?: OriginalSubmission;
 	streamingBehavior: "steer" | "followUp" | undefined;
 	output: (obj: object) => void;
 	onError: (error: Error) => void;

@@ -59,6 +59,7 @@ import type {
 	Message,
 	Model,
 	OAuthAccountIdentity,
+	OriginalSubmission,
 	ProviderResponseMetadata,
 	ProviderSessionState,
 	ResetCreditAccountStatus,
@@ -7203,7 +7204,7 @@ export class AgentSession {
 		timestamp?: number,
 		preprocessed?: { images: ImageContent[] | undefined; descriptionNotice: CustomMessage | undefined },
 		producer: UserMessage["producer"] = { type: "human" },
-		originalSubmission?: import("@oh-my-pi/pi-ai").OriginalSubmission,
+		originalSubmission?: OriginalSubmission,
 		inputOptions?: Pick<PromptOptions, "imageLinks" | "compactionOverride">,
 	): Promise<void> {
 		// Captured before any await below so the aside branch can detect a
@@ -7483,7 +7484,7 @@ export class AgentSession {
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
 		deliverAs: "steer" | "followUp" | "aside",
 		queueChipText?: string,
-		originalSubmission?: import("@oh-my-pi/pi-ai").OriginalSubmission,
+		originalSubmission?: OriginalSubmission,
 		inputOptions?: Pick<PromptOptions, "imageLinks" | "compactionOverride" | "producer">,
 	): Promise<void> {
 		// Captured before the normalization await below — see #sessionGeneration's doc comment.
@@ -7686,7 +7687,7 @@ export class AgentSession {
 		options?: {
 			deliverAs?: "steer" | "followUp" | "aside";
 			producer?: UserMessage["producer"];
-			originalSubmission?: import("@oh-my-pi/pi-ai").OriginalSubmission;
+			originalSubmission?: OriginalSubmission;
 			imageLinks?: (string | undefined)[];
 			compactionOverride?: "keep" | "exclude";
 		},
