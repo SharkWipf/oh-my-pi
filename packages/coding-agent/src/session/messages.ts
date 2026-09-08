@@ -38,12 +38,6 @@ import type { OutputMeta } from "../tools/output-meta";
 import { formatOutputNotice } from "../tools/output-meta";
 import { titleTextFromSkillPrompt } from "./skill-title-input";
 
-declare module "@oh-my-pi/pi-ai" {
-	interface UserMessage {
-		imageLinks?: (string | undefined)[];
-		compactionOverride?: "keep" | "exclude";
-	}
-}
 
 export const SKILL_PROMPT_MESSAGE_TYPE = "skill-prompt";
 export const LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE = "lsp-late-diagnostic";
