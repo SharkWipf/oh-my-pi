@@ -2459,6 +2459,25 @@ export class SessionManager {
 			| FileMentionMessage,
 		options?: { compactionOverride?: "keep" | "exclude" },
 	): string {
+		if ((message.role === "user" || message.role === "custom") && message.originalSubmission) {
+			const original = message.originalSubmission;
+			const content = message.content;
+			const images = original.images;
+			const sameContent = typeof content === "string"
+				? content === original.text && !images?.length
+				: content.length === 1 + (images?.length ?? 0) && content[0]?.type === "text" && content[0].text === original.text &&
+					(!images || images.every((image, index) => {
+						const delivered = content[index + 1];
+						return delivered?.type === "image" && delivered.data === image.data && delivered.mimeType === image.mimeType;
+					}));
+			const sameLinks = original.imageLinks === message.imageLinks ||
+				(original.imageLinks?.length === message.imageLinks?.length &&
+					original.imageLinks?.every((link, index) => link === message.imageLinks?.[index]));
+			if (sameContent && sameLinks && original.compactionOverride === message.compactionOverride) {
+				const { originalSubmission: _original, ...delivered } = message;
+				message = delivered;
+			}
+		}
 		const entry: SessionMessageEntry = { type: "message", ...this.#freshEntryFields(), message };
 		if (message.role === "user") {
 			entry.sourceOrigin = { journalId: this.#sessionId, entryId: entry.id };

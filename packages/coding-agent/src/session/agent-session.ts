@@ -1880,7 +1880,7 @@ export class AgentSession {
 		this.#preservation = new SessionPreservation({
 			sessionManager: this.sessionManager,
 			getQuery: () => { const query = this.getPreservedMessageQuery(); if (!query) throw new Error("Preservation source view is rebuilding; reopen the action."); return query; },
-			preparePreservedMessages: () => this.preparePreservedMessages(),
+			preparePreservedMessages: async () => { await ensurePreservedMessageStateOnDisk(this.sessionManager); return this.preparePreservedMessages(); },
 			ownership: () => this.#compactionOwnership,
 			onChanged: ids => this.preservedMessagesChanged(ids),
 		});
@@ -2732,6 +2732,7 @@ export class AgentSession {
 	 * branch to verify content when a key hit could be a rare collision.
 	 */
 	#sessionMessageAlreadyPersisted(message: AgentMessage): boolean {
+
 		const key = sessionMessagePersistenceKey(message);
 		if (key === undefined) return false;
 		const keys = this.#ensurePersistedMessageKeys();
@@ -2843,7 +2844,7 @@ export class AgentSession {
 		// that boundary; never let its delayed persistence append the previous
 		// conversation to the replacement session.
 		if (this.#promptGeneration !== promptGeneration) return;
-		if (message.role === "custom" && (message.sourceCaptureId || message.compactionOverride !== undefined)) {
+		if (message.role === "custom" && (message.originalSubmission || message.compactionOverride !== undefined)) {
 			this.#appendSessionMessage(message);
 			return;
 		}
@@ -5599,7 +5600,7 @@ export class AgentSession {
 		const isCurrent = () => !this.#isDisposed && ownership === this.#compactionOwnership &&
 			settings === this.#preservationSettingsIdentity && sessionId === this.sessionManager.getSessionId() && tokenizer === this.agent.tokenizer;
 		const build = (async () => {
-			await ensurePreservedMessageStateOnDisk(this.sessionManager);
+
 			if (!isCurrent()) throw new CompactionCancelledError("Preservation source scope changed while preparing.");
 			const entries = this.sessionManager.getBranch();
 			const leaf = this.sessionManager.getLeafId();
@@ -5659,14 +5660,13 @@ export class AgentSession {
 	recoverCompactionPersistence(): Promise<boolean> { return this.#maintenance.recoverCompactionPersistence(); }
 
 	async #protectedSourceEntryIds(): Promise<Pick<ReadonlySet<string>, "has">> {
-		await this.requirements.observeCommittedSources();
 		const query = await this.preparePreservedMessages();
 		const { P, N } = this.#preservationSelection(query);
-		const pending = new Set(this.requirements.pendingSourceVisibility().entryIds);
+		const pending = new Set(this.requirements.pendingLiveSnapshot().entryIds);
 		return { has: id => P.has(id) || N.has(id) || pending.has(id) };
 	}
 
-	async #compactionSourceSelection(requirementsSnapshot: RequirementsApplicableSnapshot): Promise<CompactionSourceSelection> {
+	async #compactionSourceSelection(_requirementsSnapshot?: RequirementsApplicableSnapshot): Promise<CompactionSourceSelection> {
 		const query = await this.preparePreservedMessages();
 		const selected = this.#preservationSelection(query);
 		const selectedSources: NonNullable<CompactionSourceSelection["selectedSources"]>[number][] = [];
@@ -5685,7 +5685,7 @@ export class AgentSession {
 			admittedNonUserSources.push({ entryId: entry.id, order, message: entry.message,
 				atomicGroup: { id: atom.id, entryIds: [...atom.memberIds] } });
 		}
-		return { selectedSources, admittedNonUserSources, pendingSourceEntryIds: new Set(this.requirements.pendingSourceVisibility(requirementsSnapshot).entryIds) };
+		return { selectedSources, admittedNonUserSources, pendingSourceEntryIds: new Set(this.requirements.pendingLiveSnapshot().entryIds) };
 	}
 
 	buildDisplaySessionContext(): SessionContext {
@@ -6310,7 +6310,8 @@ export class AgentSession {
 	 * the ACP agent) use this to know whether to expect an `agent_end` event.
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<boolean> {
-		if (!options?.synthetic && options?.attribution !== "agent" && options?.producer?.type !== "generated" && options?.sourceCaptureId === undefined && options?.compactionOverride === undefined) {
+		const originalText = text;
+		if (!options?.synthetic && options?.attribution !== "agent" && options?.producer?.type !== "generated" && options?.compactionOverride === undefined) {
 			const directive = parseCompactionOverridePrompt(text);
 			if (directive) { text = directive.text; options = { ...options, compactionOverride: directive.compactionOverride }; }
 		}
@@ -6321,6 +6322,16 @@ export class AgentSession {
 		// command execution, image normalization, vision-model description — so the
 		// prompt→yield delta includes the whole wait, whatever path the prompt takes.
 		const submittedAt = Date.now();
+		const intakeGeneration = this.#sessionGeneration;
+		const producer =
+			options?.producer ??
+			(options?.synthetic || options?.attribution === "agent"
+				? { type: "generated" as const }
+				: { type: "human" as const });
+		const originalSubmission = options?.synthetic
+			? undefined
+			: (options?.originalSubmission ??
+				{ text: originalText, images: options?.images, imageLinks: options?.imageLinks, compactionOverride: options?.compactionOverride });
 		// A manual `/compact` runs with the agent subscription disconnected until its
 		// cleanup finally re-drains the preserved queues. Starting a turn before then
 		// would neither persist nor forward its events and could race the in-flight
@@ -6328,8 +6339,7 @@ export class AgentSession {
 		// here. No-op when no manual compaction is active.
 		await this.#maintenance.manualCompactionCleanup;
 		if (await this.#sessionGenerationChanged(intakeGeneration)) return false;
-		if (sourceCaptureId) this.sessionManager.requireRequirementsCapture(sourceCaptureId);
-		const expandPromptTemplates = options?.compactionOverride === undefined && options?.sourceCaptureId === undefined && (options?.expandPromptTemplates ?? true);
+		const expandPromptTemplates = options?.compactionOverride === undefined && (options?.expandPromptTemplates ?? true);
 		// Slash/custom-command handling below rewrites `text`; keep the original
 		// so a dropped prompt is handed back exactly as the user typed it.
 		const typedText = text;
@@ -6387,7 +6397,16 @@ export class AgentSession {
 			for (const notice of keywordNotices) {
 				await this.#queueCustomMessage(notice, streamingBehavior);
 			}
-			await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, submittedAt, undefined, options?.producer);
+			await this.#queueUserMessage(
+				expandedText,
+				options?.images,
+				streamingBehavior,
+				submittedAt,
+				undefined,
+				producer,
+				originalSubmission,
+				options,
+			);
 			return true;
 		}
 
@@ -6433,10 +6452,19 @@ export class AgentSession {
 			for (const notice of keywordNotices) {
 				await this.#queueCustomMessage(notice, streamingBehavior);
 			}
-			await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, submittedAt, {
-				images: normalizedImages,
-				descriptionNotice: imageDescriptionNotice,
-			}, options?.producer);
+			await this.#queueUserMessage(
+				expandedText,
+				options?.images,
+				streamingBehavior,
+				submittedAt,
+				{
+					images: normalizedImages,
+					descriptionNotice: imageDescriptionNotice,
+				},
+				producer,
+				originalSubmission,
+				options,
+			);
 			return true;
 		}
 
@@ -6456,7 +6484,16 @@ export class AgentSession {
 					synthetic: true,
 					userInitiated: options?.userInitiated === true ? true : undefined,
 				}
-			: { role: "user" as const, content: userContent, attribution: promptAttribution, timestamp: submittedAt, producer: options?.producer };
+			: {
+					role: "user" as const,
+					content: userContent,
+					attribution: promptAttribution,
+					timestamp: submittedAt,
+					producer,
+					originalSubmission,
+					imageLinks: options?.imageLinks,
+					compactionOverride: options?.compactionOverride,
+				};
 
 		const preludeMessages: AgentMessage[] = [];
 		if (eagerTodoPrelude) {
@@ -6500,7 +6537,13 @@ export class AgentSession {
 			// reached the agent or the session file. Hand it back to the host so the
 			// user can edit/resubmit instead of losing it (tree/branch can't offer
 			// a message that was never persisted).
-			this.#promptDropped?.({ text: typedText, images: options?.images });
+			this.#promptDropped?.({
+				text: typedText,
+				images: options?.images,
+				originalSubmission,
+				imageLinks: options?.imageLinks,
+				compactionOverride: options?.compactionOverride,
+			});
 		}
 		return true;
 	}
@@ -6514,7 +6557,10 @@ export class AgentSession {
 	 */
 	async promptCustomMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
-		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice"> & {
+		options?: Pick<
+			PromptOptions,
+			"streamingBehavior" | "toolChoice" | "originalSubmission" | "producer" | "imageLinks" | "compactionOverride"
+		> & {
 			queueChipText?: string;
 			queueOnly?: boolean;
 		},
@@ -6527,6 +6573,15 @@ export class AgentSession {
 						.map(content => content.text)
 						.join("");
 
+		const originalImages =
+			typeof message.content === "string"
+				? undefined
+				: message.content.filter((part): part is ImageContent => part.type === "image");
+		const originalSubmission =
+			options?.originalSubmission ??
+			(options?.producer?.type === "human"
+				? { text: textContent, images: originalImages, imageLinks: options.imageLinks, compactionOverride: options.compactionOverride }
+				: undefined);
 		let keywordNotices: CustomMessage[] = [];
 		if (message.customType === SKILL_PROMPT_MESSAGE_TYPE && message.attribution === "user") {
 			const details = message.details;
@@ -6553,7 +6608,7 @@ export class AgentSession {
 			for (const notice of keywordNotices) {
 				await this.#queueCustomMessage(notice, streamingBehavior);
 			}
-			await this.#queueCustomMessage(message, streamingBehavior, options.queueChipText);
+			await this.#queueCustomMessage(message, streamingBehavior, options.queueChipText, originalSubmission, options);
 			return true;
 		}
 		if (this.isStreaming) {
@@ -6563,11 +6618,15 @@ export class AgentSession {
 			for (const notice of keywordNotices) {
 				await this.#queueCustomMessage(notice, streamingBehavior);
 			}
-			await this.#queueCustomMessage(message, streamingBehavior, options?.queueChipText);
+			await this.#queueCustomMessage(message, streamingBehavior, options?.queueChipText, originalSubmission, options);
 			return true;
 		}
 
 		const customMessage: CustomMessage<T> = {
+			originalSubmission,
+			producer: options?.producer,
+			imageLinks: options?.imageLinks,
+			compactionOverride: options?.compactionOverride,
 			role: "custom",
 			customType: message.customType,
 			content: message.content,
@@ -6746,11 +6805,11 @@ export class AgentSession {
 					this.#tools.setTurnSystemPromptOverride(result.systemPrompt);
 				} else {
 					this.#tools.clearTurnSystemPromptOverride();
-					this.agent.setSystemPrompt(beforeAgentStartSystemPrompt);
+					this.#tools.setTurnSystemPromptOverride(beforeAgentStartSystemPrompt);
 				}
 			} else {
 				this.#tools.clearTurnSystemPromptOverride();
-				this.agent.setSystemPrompt(beforeAgentStartSystemPrompt);
+				this.#tools.setTurnSystemPromptOverride(beforeAgentStartSystemPrompt);
 			}
 
 			// Bail out if a newer abort/prompt cycle has started since we began setup
@@ -6993,36 +7052,40 @@ export class AgentSession {
 	async steer(
 		text: string,
 		images?: ImageContent[],
-		options?: Pick<PromptOptions, "sourceCaptureId" | "producer" | "imageLinks" | "compactionOverride">,
+		options?: Pick<PromptOptions, "originalSubmission" | "producer" | "imageLinks" | "compactionOverride">,
 	): Promise<void> {
-		if (options?.producer?.type !== "generated" && options?.sourceCaptureId === undefined && options?.compactionOverride === undefined) {
+		const originalText = text;
+		if (options?.producer?.type !== "generated" && options?.compactionOverride === undefined) {
 			const directive = parseCompactionOverridePrompt(text);
 			if (directive) { text = directive.text; options = { ...options, compactionOverride: directive.compactionOverride }; }
 		}
 		if (options?.compactionOverride !== undefined && !text.trim() && !images?.length) {
 			throw new Error("/keep and /once require a message.");
 		}
-		const expandTemplates = options?.compactionOverride === undefined && options?.sourceCaptureId === undefined;
+		const expandTemplates = options?.compactionOverride === undefined;
 		if (expandTemplates && text.startsWith("/")) {
 			this.#throwIfExtensionCommand(text);
 		}
 
 		const intakeGeneration = this.#sessionGeneration;
-		await this.#requirementsReady;
-		const sourceCaptureId =
-			options?.sourceCaptureId ??
-			(await this.sessionManager.captureRequirementsInput(
-				text,
-				images,
-				options?.producer,
-				options?.compactionOverride,
-			));
+		const originalSubmission =
+			options?.originalSubmission ??
+			{ text: originalText, images, imageLinks: options?.imageLinks, compactionOverride: options?.compactionOverride };
 		if (await this.#sessionGenerationChanged(intakeGeneration)) return;
 		const expandedText = expandTemplates ? expandPromptTemplate(text, [...this.#promptTemplates]) : text;
 		// Stamp before image preprocessing so a queued image steer measures from
 		// the operator's submission, not after the vision-model description.
 		const submittedAt = Date.now();
-		await this.#queueUserMessage(expandedText, images, "steer", submittedAt);
+		await this.#queueUserMessage(
+			expandedText,
+			images,
+			"steer",
+			submittedAt,
+			undefined,
+			options?.producer,
+			originalSubmission,
+			options,
+		);
 	}
 
 	/**
@@ -7033,25 +7096,41 @@ export class AgentSession {
 	 * flipping advisor auto-resume.
 	 */
 	async followUp(text: string, images?: ImageContent[], options?: FollowUpOptions): Promise<void> {
-		if (!options?.synthetic && options?.attribution !== "agent" && options?.producer?.type !== "generated" && options?.sourceCaptureId === undefined && options?.compactionOverride === undefined) {
+		const originalText = text;
+		if (!options?.synthetic && options?.attribution !== "agent" && options?.producer?.type !== "generated" && options?.compactionOverride === undefined) {
 			const directive = parseCompactionOverridePrompt(text);
 			if (directive) { text = directive.text; options = { ...options, compactionOverride: directive.compactionOverride }; }
 		}
 		if (options?.compactionOverride !== undefined && !text.trim() && !images?.length) {
 			throw new Error("/keep and /once require a message.");
 		}
-		const expandTemplates = options?.compactionOverride === undefined && options?.sourceCaptureId === undefined && options?.expandPromptTemplates !== false;
+		const expandTemplates = options?.compactionOverride === undefined && options?.expandPromptTemplates !== false;
 		if (expandTemplates && text.startsWith("/")) {
 			this.#throwIfExtensionCommand(text);
 		}
 
+		const intakeGeneration = this.#sessionGeneration;
+		const originalSubmission = options?.synthetic
+			? undefined
+			: (options?.originalSubmission ??
+				{ text: originalText, images, imageLinks: options?.imageLinks, compactionOverride: options?.compactionOverride });
+		if (await this.#sessionGenerationChanged(intakeGeneration)) return;
 		const expandedText =
 			expandTemplates ? expandPromptTemplate(text, [...this.#promptTemplates]) : text;
 		// Stamp before image preprocessing so a queued image follow-up measures
 		// from the operator's submission, not after the vision-model description.
 		const submittedAt = Date.now();
 		if (!options?.synthetic) {
-			await this.#queueUserMessage(expandedText, images, "followUp", submittedAt);
+			await this.#queueUserMessage(
+				expandedText,
+				images,
+				"followUp",
+				submittedAt,
+				undefined,
+				options?.producer,
+				originalSubmission,
+				options,
+			);
 			return;
 		}
 		// Synthetic branch: agent-initiated hidden developer message. Bypass
@@ -7114,13 +7193,17 @@ export class AgentSession {
 		mode: "steer" | "followUp" | "aside",
 		timestamp?: number,
 		preprocessed?: { images: ImageContent[] | undefined; descriptionNotice: CustomMessage | undefined },
-		producer?: UserMessage["producer"],
+		producer: UserMessage["producer"] = { type: "human" },
+		originalSubmission?: import("@oh-my-pi/pi-ai").OriginalSubmission,
+		inputOptions?: Pick<PromptOptions, "imageLinks" | "compactionOverride">,
 	): Promise<void> {
 		// Captured before any await below so the aside branch can detect a
 		// newSession()/switchSession() that completed while normalization/vision
 		// description was in flight and drop a record that would otherwise land in a
 		// different session's queue.
 		const sessionGeneration = this.#sessionGeneration;
+		originalSubmission ??= { text, images, imageLinks: inputOptions?.imageLinks, compactionOverride: inputOptions?.compactionOverride };
+		if (await this.#sessionGenerationChanged(sessionGeneration)) return;
 		// A queued user message (RPC/SDK/collab steer or follow-up, or a typed message
 		// while streaming) is a deliberate resume; re-enable advisor auto-resume that
 		// a user interrupt suppressed. An aside is non-interrupting by design — it must
@@ -7149,7 +7232,16 @@ export class AgentSession {
 			if (await this.#sessionGenerationChanged(sessionGeneration)) return;
 			const records: AgentMessage[] = [];
 			if (imageDescriptionNotice) records.push(imageDescriptionNotice);
-			records.push({ role: "user", content, attribution: "user", timestamp: timestamp ?? Date.now(), producer });
+			records.push({
+				role: "user",
+				content,
+				attribution: "user",
+				timestamp: timestamp ?? Date.now(),
+				producer,
+				originalSubmission,
+				imageLinks: inputOptions?.imageLinks,
+				compactionOverride: inputOptions?.compactionOverride,
+			});
 			this.#irc.queueAside(records);
 			// The awaits above (image normalization / vision description) can span the run's
 			// settle, so the run may already be idle by the time the record lands in the aside
@@ -7165,6 +7257,9 @@ export class AgentSession {
 			this.agent.followUp({
 				role: "user",
 				producer,
+				originalSubmission,
+				imageLinks: inputOptions?.imageLinks,
+				compactionOverride: inputOptions?.compactionOverride,
 				content,
 				attribution: "user",
 				timestamp: timestamp ?? Date.now(),
@@ -7175,6 +7270,9 @@ export class AgentSession {
 			this.agent.steer({
 				role: "user",
 				producer,
+				originalSubmission,
+				imageLinks: inputOptions?.imageLinks,
+				compactionOverride: inputOptions?.compactionOverride,
 				content,
 				steering: true,
 				attribution: "user",
@@ -7376,6 +7474,8 @@ export class AgentSession {
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
 		deliverAs: "steer" | "followUp" | "aside",
 		queueChipText?: string,
+		originalSubmission?: import("@oh-my-pi/pi-ai").OriginalSubmission,
+		inputOptions?: Pick<PromptOptions, "imageLinks" | "compactionOverride" | "producer">,
 	): Promise<void> {
 		// Captured before the normalization await below — see #sessionGeneration's doc comment.
 		const sessionGeneration = this.#sessionGeneration;
@@ -7390,6 +7490,10 @@ export class AgentSession {
 					} as T)
 				: message.details;
 		const appMessage: CustomMessage<T> = {
+			originalSubmission,
+			producer: inputOptions?.producer,
+			imageLinks: inputOptions?.imageLinks,
+			compactionOverride: inputOptions?.compactionOverride,
 			role: "custom",
 			customType: message.customType,
 			content: message.content,
@@ -7573,7 +7677,7 @@ export class AgentSession {
 		options?: {
 			deliverAs?: "steer" | "followUp" | "aside";
 			producer?: UserMessage["producer"];
-			sourceCaptureId?: string;
+			originalSubmission?: import("@oh-my-pi/pi-ai").OriginalSubmission;
 			imageLinks?: (string | undefined)[];
 			compactionOverride?: "keep" | "exclude";
 		},
@@ -7598,7 +7702,9 @@ export class AgentSession {
 			if (images.length === 0) images = undefined;
 		}
 
-		if (options?.producer?.type === "human" && options?.sourceCaptureId === undefined && options?.compactionOverride === undefined) {
+		const originalSubmission = options?.originalSubmission ?? { text, images, imageLinks: options?.imageLinks, compactionOverride: options?.compactionOverride };
+		options = { ...options, originalSubmission };
+		if (options?.producer?.type === "human" && options?.compactionOverride === undefined) {
 			const directive = parseCompactionOverridePrompt(text);
 			if (directive) { text = directive.text; options = { ...options, compactionOverride: directive.compactionOverride }; }
 		}
@@ -7615,7 +7721,7 @@ export class AgentSession {
 					undefined,
 					undefined,
 					options?.producer ?? { type: "generated" },
-					options?.sourceCaptureId,
+					options?.originalSubmission,
 					options,
 				);
 				return;
@@ -7631,7 +7737,7 @@ export class AgentSession {
 				undefined,
 				undefined,
 				options?.producer ?? { type: "generated" },
-				options?.sourceCaptureId,
+				options?.originalSubmission,
 				options,
 			);
 			return;
@@ -7643,7 +7749,7 @@ export class AgentSession {
 				undefined,
 				undefined,
 				options?.producer ?? { type: "generated" },
-				options?.sourceCaptureId,
+				options?.originalSubmission,
 				options,
 			);
 			return;
@@ -7658,7 +7764,7 @@ export class AgentSession {
 		// tool-batch-aborting steer.
 		await this.prompt(text, {
 			expandPromptTemplates: false,
-			sourceCaptureId: options?.sourceCaptureId,
+			originalSubmission: options?.originalSubmission,
 			producer: options?.producer ?? { type: "generated" },
 			imageLinks: options?.imageLinks,
 			compactionOverride: options?.compactionOverride,

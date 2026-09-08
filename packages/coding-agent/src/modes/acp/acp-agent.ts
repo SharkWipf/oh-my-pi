@@ -872,18 +872,20 @@ export class AcpAgent implements Agent {
 			// guard above cannot fire and a client prompt lands on AgentSession's busy
 			// guard. Type that failure for the wire instead of letting transport.ts wrap
 			// it as a generic -32603 internal error.
-			this.#runPromptOrCommand(record, converted.text, converted.images).catch((error: unknown) => {
-				this.#finishPrompt(
-					record,
-					undefined,
-					error instanceof AgentBusyError
-						? RequestError.sessionBusy(error.message, {
-								reason: "session_busy",
-								hint: "steer|followUp|wait",
-							})
-						: error,
-				);
-			});
+			this.#runPromptOrCommand(record, converted.text, converted.images, { text: originalText, images: originalImages }, originalText)
+				.catch((error: unknown) => {
+					if (record.promptTurn !== promptTurn || promptTurn.settled) return;
+					this.#finishPrompt(
+						record,
+						undefined,
+						error instanceof AgentBusyError
+							? RequestError.sessionBusy(error.message, {
+									reason: "session_busy",
+									hint: "steer|followUp|wait",
+								})
+							: error,
+					);
+				});
 
 			return await pendingPrompt.promise;
 		});
@@ -958,8 +960,14 @@ export class AcpAgent implements Agent {
 		}
 	}
 
-	async #runPromptOrCommand(record: ManagedSessionRecord, text: string, images: AgentImageContent[]): Promise<void> {
-		const skillResult = await this.#tryRunSkillCommand(record, text);
+	async #runPromptOrCommand(
+		record: ManagedSessionRecord,
+		text: string,
+		images: AgentImageContent[],
+		originalSubmission: import("@oh-my-pi/pi-ai").OriginalSubmission,
+		originalText: string,
+	): Promise<void> {
+		const skillResult = await this.#tryRunSkillCommand(record, originalText, originalSubmission);
 		if (skillResult) {
 			return;
 		}
@@ -999,7 +1007,7 @@ export class AcpAgent implements Agent {
 		if (builtinResult !== false) {
 			if ("prompt" in builtinResult) {
 				const residualBaseline = new Set(record.extensionUserMessageTasks);
-				const residualAgentInvoked = await record.session.prompt(builtinResult.prompt, { images });
+				const residualAgentInvoked = await record.session.prompt(builtinResult.prompt, { images, originalSubmission });
 				// A residual prompt can itself resolve locally (extension command,
 				// custom-TS command, file prompt template). No agent turn means no
 				// `agent_end`, so the prompt turn must be settled here — same pairing
@@ -1025,7 +1033,7 @@ export class AcpAgent implements Agent {
 		}
 
 		const extensionPromptBaseline = new Set(record.extensionUserMessageTasks);
-		const agentInvoked = await record.session.prompt(text, { images });
+		const agentInvoked = await record.session.prompt(text, { images, originalSubmission });
 		// Extension and custom-TS commands are handled locally inside session.prompt().
 		// An ACP extension command can still call pi.sendUserMessage(), which starts
 		// an async nested prompt through the extension runtime. Keep the ACP turn
@@ -1038,7 +1046,7 @@ export class AcpAgent implements Agent {
 		}
 	}
 
-	async #tryRunSkillCommand(record: ManagedSessionRecord, text: string): Promise<boolean> {
+	async #tryRunSkillCommand(record: ManagedSessionRecord, text: string, originalSubmission: import("@oh-my-pi/pi-ai").OriginalSubmission): Promise<boolean> {
 		if (!record.session.skillsSettings?.enableSkillCommands) {
 			return false;
 		}
@@ -1059,7 +1067,7 @@ export class AcpAgent implements Agent {
 				details: built.details,
 				attribution: "user",
 			},
-			{ streamingBehavior: "steer" },
+			{ streamingBehavior: "steer", producer: { type: "human" }, originalSubmission },
 		);
 		return true;
 	}

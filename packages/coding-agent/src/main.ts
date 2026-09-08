@@ -359,7 +359,13 @@ export async function submitInteractiveInput(
 		} else {
 			let forwarded = false;
 			try {
-				forwarded = await session.prompt(input.text, { images: input.images, streamingBehavior });
+				forwarded = await session.prompt(input.text, {
+					images: input.images,
+					streamingBehavior,
+					originalSubmission: input.originalSubmission,
+					imageLinks: input.imageLinks,
+					compactionOverride: input.compactionOverride,
+				});
 			} catch (error: unknown) {
 				mode.showError(error instanceof Error ? error.message : "Unknown error occurred");
 			}

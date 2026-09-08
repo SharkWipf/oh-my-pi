@@ -2335,6 +2335,7 @@ describe("ACP agent", () => {
 		}
 	});
 
+
 	it("suppresses late updates after cancel and waits cleanup before the next prompt", async () => {
 		const harness = await createHarness();
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
