@@ -10,6 +10,7 @@ import type {
 	UserMessage,
 } from "../types";
 import { isDemotedThinking, kDemotedThinking } from "../utils/block-symbols";
+import { combineSourceOrigins, setSourceOrigin, transferMessageSourceOrigin, transferSourceOrigin, transferTransformedSourceOrigin } from "../utils/source-origin";
 
 const enum ToolCallStatus {
 	/** A tool result has already been emitted for this tool call; later duplicates must be skipped. */
@@ -172,7 +173,7 @@ function deduplicateToolCallIds(
 
 			const rewrite = rewrites.shift();
 			if (rewrites.length === 0) pendingToolResultRewrites.delete(key);
-			if (rewrite) return { ...msg, toolCallId: rewrite.replacementId };
+			if (rewrite) return transferSourceOrigin(msg, { ...msg, toolCallId: rewrite.replacementId });
 			return msg;
 		}
 
@@ -239,11 +240,11 @@ function deduplicateToolCallIds(
 			seenToolCallIds.set(toolCallPairingKey(replacementId, originScope), 1);
 			enqueueToolResultRewrite(blockKey, { replacementId });
 			contentChanged = true;
-			return { ...block, id: replacementId };
+			return transferSourceOrigin(block, { ...block, id: replacementId });
 		});
 
 		if (!contentChanged) return msg;
-		return { ...msg, content };
+		return transferMessageSourceOrigin(msg, { ...msg, content });
 	});
 }
 
@@ -320,7 +321,7 @@ function sanitizeMalformedToolCalls(messages: Message[]): Message[] {
 				filtered.push(block);
 			}
 			if (filtered.length === 0) continue;
-			result.push(filtered.length === msg.content.length ? msg : { ...msg, content: filtered });
+			result.push(filtered.length === msg.content.length ? msg : transferMessageSourceOrigin(msg, { ...msg, content: filtered }));
 			continue;
 		}
 		if (msg.role === "toolResult") {
@@ -510,21 +511,21 @@ function redactSensitiveCredentialsInMessages(messages: Message[]): Message[] {
 			if (typeof userMsg.content === "string") {
 				const redacted = redactSensitiveCredentials(userMsg.content);
 				if (redacted === userMsg.content) return msg;
-				return { ...userMsg, content: redacted } as Message;
+				return transferTransformedSourceOrigin(userMsg, { ...userMsg, content: redacted }) as Message;
 			}
 			const contentArray = userMsg.content;
 			let changed = false;
-			const content = contentArray.map((block): UserMessage["content"][number] => {
+			const content = contentArray.map(block => {
 				if (block.type === "text") {
 					const redacted = redactSensitiveCredentials(block.text);
 					if (redacted !== block.text) {
 						changed = true;
-						return { ...block, text: redacted };
+						return transferTransformedSourceOrigin(block, { ...block, text: redacted });
 					}
 				}
 				return block;
 			});
-			return (changed ? { ...userMsg, content } : userMsg) as Message;
+			return (changed ? transferMessageSourceOrigin(userMsg, { ...userMsg, content }) : userMsg) as Message;
 		}
 
 		if (msg.role === "toolResult") {
@@ -535,12 +536,12 @@ function redactSensitiveCredentialsInMessages(messages: Message[]): Message[] {
 					const redacted = redactSensitiveCredentials(block.text);
 					if (redacted !== block.text) {
 						changed = true;
-						return { ...block, text: redacted };
+						return transferTransformedSourceOrigin(block, { ...block, text: redacted });
 					}
 				}
 				return block;
 			});
-			return (changed ? { ...toolResultMsg, content } : toolResultMsg) as Message;
+			return (changed ? transferMessageSourceOrigin(toolResultMsg, { ...toolResultMsg, content }) : toolResultMsg) as Message;
 		}
 
 		if (msg.role === "assistant") {
@@ -551,13 +552,13 @@ function redactSensitiveCredentialsInMessages(messages: Message[]): Message[] {
 					const redacted = redactSensitiveCredentials(block.text);
 					if (redacted !== block.text) {
 						changed = true;
-						return { ...block, text: redacted };
+						return transferTransformedSourceOrigin(block, { ...block, text: redacted });
 					}
 				} else if (block.type === "thinking") {
 					const redacted = redactSensitiveCredentials(block.thinking);
 					if (redacted !== block.thinking) {
 						changed = true;
-						return { ...block, thinking: redacted, thinkingSignature: undefined };
+						return transferTransformedSourceOrigin(block, { ...block, thinking: redacted, thinkingSignature: undefined });
 					}
 				} else if (block.type === "toolCall") {
 					if (block.arguments) {
@@ -568,17 +569,17 @@ function redactSensitiveCredentialsInMessages(messages: Message[]): Message[] {
 								redactedArgs && typeof redactedArgs === "object" && !Array.isArray(redactedArgs)
 									? (redactedArgs as Record<string, unknown>)
 									: undefined;
-							return {
+							return transferTransformedSourceOrigin(block, {
 								...block,
 								arguments: castArgs,
 								thoughtSignature: undefined,
-							} as AssistantMessage["content"][number];
+							}) as AssistantMessage["content"][number];
 						}
 					}
 				}
 				return block;
 			});
-			return (changed ? { ...assistantMsg, content } : assistantMsg) as Message;
+			return (changed ? transferMessageSourceOrigin(assistantMsg, { ...assistantMsg, content }) : assistantMsg) as Message;
 		}
 
 		return msg;
@@ -652,7 +653,7 @@ export function transformMessages<TApi extends Api>(
 					? responsesCompositeIdMap.get(responsesCallComponent(msg.toolCallId))
 					: undefined);
 			if (normalizedId && normalizedId !== msg.toolCallId) {
-				return { ...msg, toolCallId: normalizedId };
+				return transferSourceOrigin(msg, { ...msg, toolCallId: normalizedId });
 			}
 			return msg;
 		}
@@ -780,7 +781,7 @@ export function transformMessages<TApi extends Api>(
 					const signatureUntrustworthy = abandonedToolUse || (invalidStopReason && blockIndex === lastBlockIndex);
 					let sanitized: typeof block =
 						signatureUntrustworthy && block.thinkingSignature
-							? { ...block, thinkingSignature: undefined }
+							? transferSourceOrigin(block, { ...block, thinkingSignature: undefined })
 							: block;
 					if (isAnthropicReplay) {
 						// A signature is only replayable where its issuer can verify it.
@@ -807,7 +808,7 @@ export function transformMessages<TApi extends Api>(
 						const staleSignature =
 							!sameAnthropicDeployment && (isLatestSurvivingAssistant ? crossProviderSource : !isSameModel);
 						if (staleSignature && signingAnthropicInvolved && sanitized.thinkingSignature) {
-							sanitized = { ...sanitized, thinkingSignature: undefined };
+							sanitized = transferSourceOrigin(sanitized, { ...sanitized, thinkingSignature: undefined });
 						}
 						// Drop blocks with neither a signature anchor nor any text —
 						// nothing for the next turn to replay.
@@ -844,7 +845,7 @@ export function transformMessages<TApi extends Api>(
 					// keeping inert foreign CoT native for those flags loses the
 					// canonical visible-text fallback without adding model context.
 					if (targetReadsForeignThinking(model, targetCompat)) {
-						return sanitized.thinkingSignature ? { ...sanitized, thinkingSignature: undefined } : sanitized;
+						return sanitized.thinkingSignature ? transferSourceOrigin(sanitized, { ...sanitized, thinkingSignature: undefined }) : sanitized;
 					}
 					// Other cross-API targets (openai-responses encrypted blobs, google
 					// thought parts, anthropic-target from a non-Anthropic source, or any
@@ -867,11 +868,11 @@ export function transformMessages<TApi extends Api>(
 					// stay byte-identical. A separator baked into the block text would
 					// leak to non-flattening targets: Anthropic/Bedrock reject a
 					// terminal assistant message whose text ends with whitespace.
-					return {
+					return transferTransformedSourceOrigin(block, {
 						type: "text" as const,
 						text: renderDemotedThinking(model.id, sanitized.thinking),
 						[kDemotedThinking]: true,
-					};
+					});
 				}
 
 				if (block.type === "redactedThinking") {
@@ -932,10 +933,10 @@ export function transformMessages<TApi extends Api>(
 
 				if (block.type === "text") {
 					if (isSameModel) return block;
-					return {
+					return transferSourceOrigin(block, {
 						type: "text" as const,
 						text: block.text,
-					};
+					});
 				}
 
 				if (block.type === "toolCall") {
@@ -943,7 +944,7 @@ export function transformMessages<TApi extends Api>(
 					let normalizedToolCall: ToolCall = toolCall;
 
 					if (!isSameModel && toolCall.thoughtSignature) {
-						normalizedToolCall = { ...toolCall, thoughtSignature: undefined };
+						normalizedToolCall = transferSourceOrigin(toolCall, { ...toolCall, thoughtSignature: undefined });
 					}
 
 					let normalizedId: string | undefined;
@@ -965,7 +966,7 @@ export function transformMessages<TApi extends Api>(
 					if (normalizedId !== undefined) {
 						if (normalizedId !== toolCall.id) {
 							toolCallIdMap.set(toolCall.id, normalizedId);
-							normalizedToolCall = { ...normalizedToolCall, id: normalizedId };
+							normalizedToolCall = transferSourceOrigin(normalizedToolCall, { ...normalizedToolCall, id: normalizedId });
 						}
 						// Record the Responses call-component → emitted-id mapping
 						// EVEN WHEN the assistant id is plain and normalization is
@@ -995,13 +996,13 @@ export function transformMessages<TApi extends Api>(
 			// byte-exact replay material.
 			const finalBlock = transformedContent[transformedContent.length - 1];
 			if (finalBlock?.type === "text" && isDemotedThinking(finalBlock)) {
-				transformedContent[transformedContent.length - 1] = { ...finalBlock, text: finalBlock.text.trimEnd() };
+				transformedContent[transformedContent.length - 1] = transferTransformedSourceOrigin(finalBlock, { ...finalBlock, text: finalBlock.text.trimEnd() });
 			}
 
-			return {
+			return transferMessageSourceOrigin(assistantMsg, {
 				...assistantMsg,
 				content: transformedContent,
-			};
+			});
 		}
 		return msg;
 	});
@@ -1082,14 +1083,14 @@ export function transformMessages<TApi extends Api>(
 				toolCallStatus.set(statusKey, ToolCallStatus.Resolved);
 				continue;
 			}
-			result.push({
+			result.push(setSourceOrigin({
 				role: "toolResult",
 				toolCallId: tc.id,
 				toolName: tc.name,
-				content: [{ type: "text", text: "No result provided" }],
+				content: [setSourceOrigin({ type: "text", text: "No result provided" }, { kind: "synthetic", reason: "interrupted-tool-output" })],
 				isError: true,
 				timestamp,
-			} as ToolResultMessage);
+			} as ToolResultMessage, { kind: "synthetic", reason: "interrupted-tool-output" }));
 			toolCallStatus.set(statusKey, ToolCallStatus.Resolved);
 		}
 		pendingToolCalls = [];
@@ -1106,14 +1107,14 @@ export function transformMessages<TApi extends Api>(
 				toolCallStatus.set(statusKey, ToolCallStatus.Resolved);
 				continue;
 			}
-			result.push({
+			result.push(setSourceOrigin({
 				role: "toolResult",
 				toolCallId: tc.id,
 				toolName: tc.name,
-				content: [{ type: "text", text: "aborted" }],
+				content: [setSourceOrigin({ type: "text", text: "aborted" }, { kind: "synthetic", reason: "interrupted-tool-output" })],
 				isError: true,
 				timestamp: pendingAbortedTimestamp,
-			} as ToolResultMessage);
+			} as ToolResultMessage, { kind: "synthetic", reason: "interrupted-tool-output" }));
 			toolCallStatus.set(statusKey, ToolCallStatus.Aborted);
 		}
 		pendingAbortedToolCalls = new Map();
@@ -1231,11 +1232,12 @@ export function transformMessages<TApi extends Api>(
 				}
 				if (textParts.length > 0) {
 					const errorAttr = msg.isError ? ' is-error="true"' : "";
-					result.push({
+					const textOrigin = setSourceOrigin({}, combineSourceOrigins(msg.content.filter(part => part.type === "text" && part.text.trim() !== "")));
+					result.push(transferTransformedSourceOrigin(textOrigin, {
 						role: "user",
 						content: `<stale-tool-result tool="${msg.toolName}" id="${msg.toolCallId}"${errorAttr}>\n${textParts.join("\n")}\n</stale-tool-result>`,
 						timestamp: messageTimestamp,
-					} as UserMessage);
+					} as UserMessage));
 				}
 			}
 

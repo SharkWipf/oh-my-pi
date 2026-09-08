@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { Context, ImageContent, Message, Model, ProviderPayload, TextContent } from "@oh-my-pi/pi-ai";
+import { combineContentSourceOrigins, exportItemOrigins, importItemOrigins, setSourceOrigin, transferMessageSourceOrigin, transferSourceOrigin } from "@oh-my-pi/pi-ai/utils/source-origin";
 import { rasterizeSvg } from "@oh-my-pi/pi-natives";
 import {
 	formatBytes,
@@ -30,11 +31,11 @@ const modelBoundaryImageNormalizations = new Map<string, Promise<NormalizedImage
 const UNDECODABLE_STB_IMAGE_OMISSION_TEXT = "[image omitted: WebP could not be decoded for this model]";
 
 function createUndecodableStbImageOmission(): TextContent {
-	return { type: "text", text: UNDECODABLE_STB_IMAGE_OMISSION_TEXT };
+	return setSourceOrigin({ type: "text", text: UNDECODABLE_STB_IMAGE_OMISSION_TEXT }, { kind: "synthetic", reason: "image-omission" });
 }
 
 function createNativeUndecodableStbImageOmission(): Record<string, unknown> {
-	return { type: "input_text", text: UNDECODABLE_STB_IMAGE_OMISSION_TEXT };
+	return setSourceOrigin({ type: "input_text", text: UNDECODABLE_STB_IMAGE_OMISSION_TEXT }, { kind: "synthetic", reason: "image-omission" });
 }
 
 function hasWebPMagic(data: string): boolean {
@@ -77,7 +78,7 @@ async function memoizedStbImageNormalization(
 ): Promise<ImageContent | null> {
 	const key = modelBoundaryImageCacheKey(image, resize);
 	const cached = modelBoundaryImageCache.get(key);
-	if (cached !== undefined) return cached ? { ...image, ...cached } : null;
+	if (cached !== undefined) return cached ? transferSourceOrigin(image, { ...image, ...cached }) : null;
 
 	let pending = modelBoundaryImageNormalizations.get(key);
 	if (!pending) {
@@ -100,7 +101,7 @@ async function memoizedStbImageNormalization(
 		modelBoundaryImageNormalizations.set(key, pending);
 	}
 	const normalized = await pending;
-	return normalized ? { ...image, ...normalized } : null;
+	return normalized ? transferSourceOrigin(image, { ...image, ...normalized }) : null;
 }
 
 async function normalizeNativeResponsesImagePart(part: unknown): Promise<unknown> {
@@ -109,7 +110,7 @@ async function normalizeNativeResponsesImagePart(part: unknown): Promise<unknown
 	if (!image || !isWebPImage(image)) return part;
 	const normalized = await memoizedStbImageNormalization(image, undefined);
 	if (!normalized) return createNativeUndecodableStbImageOmission();
-	return { ...part, image_url: `data:${normalized.mimeType};base64,${normalized.data}` };
+	return transferSourceOrigin(part, { ...part, image_url: `data:${normalized.mimeType};base64,${normalized.data}` });
 }
 
 async function normalizeNativeResponsesItem(item: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -124,13 +125,14 @@ async function normalizeNativeResponsesItem(item: Record<string, unknown>): Prom
 		if (normalizedPart !== part) content ??= item.content.slice(0, index);
 		content?.push(normalizedPart);
 	}
-	return content ? { ...item, content } : item;
+	return content ? setSourceOrigin({ ...item, content }, combineContentSourceOrigins(content)) : item;
 }
 
 async function normalizeNativeResponsesHistoryPayload(
 	payload: ProviderPayload | undefined,
 ): Promise<ProviderPayload | undefined> {
 	if (payload?.type !== "openaiResponsesHistory" || !Array.isArray(payload.items)) return payload;
+	importItemOrigins(payload.items, payload.origins);
 	let items: Array<Record<string, unknown>> | undefined;
 	for (let index = 0; index < payload.items.length; index++) {
 		const item = payload.items[index]!;
@@ -138,7 +140,7 @@ async function normalizeNativeResponsesHistoryPayload(
 		if (normalizedItem !== item) items ??= payload.items.slice(0, index);
 		items?.push(normalizedItem);
 	}
-	return items ? { ...payload, items } : payload;
+	return items ? { ...payload, items, origins: exportItemOrigins(items) } : payload;
 }
 
 /**
@@ -330,7 +332,7 @@ async function loadInMemoryImageInput(options: LoadInMemoryImageInputOptions): P
 export async function convertImageToPng(image: ImageContent): Promise<ImageContent> {
 	const bytes = Buffer.from(image.data, "base64");
 	const data = await new Bun.Image(bytes).png().toBase64();
-	return { ...image, data, mimeType: "image/png" };
+	return transferSourceOrigin(image, { ...image, data, mimeType: "image/png" });
 }
 
 export async function ensureSupportedImageInput(image: ImageContent): Promise<ImageContent | null> {
@@ -378,7 +380,7 @@ export async function normalizeModelContextImages(
 				continue;
 			}
 			const resized = await resizeImage(image, resize);
-			normalized.push({ ...image, data: resized.data, mimeType: resized.mimeType });
+			normalized.push(transferSourceOrigin(image, { ...image, data: resized.data, mimeType: resized.mimeType }));
 		} catch {
 			// Preserve existing caller behavior for decode/resize failures: keep the
 			// user's image block rather than dropping it from the turn.
@@ -429,7 +431,7 @@ export async function normalizeModelContextMessages(messages: Message[], model: 
 				delete normalizedMessage.providerPayload;
 			}
 		}
-		output[messageIndex] = normalizedMessage;
+		output[messageIndex] = transferMessageSourceOrigin(message, normalizedMessage);
 	}
 	return output ?? messages;
 }
