@@ -2501,7 +2501,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (completedDescs.length === 0) return;
 
 		let mutated = false;
-		const next: TodoPhase[] = this.todoPhases.map(phase => ({
+		// A nested tool can update the canonical plan before its UI event is
+		// handled. Never write an older HUD snapshot back over that plan.
+		const owner = this.#todoPhasesOwner ?? this.session;
+		const next: TodoPhase[] = owner.getTodoPhases().map(phase => ({
 			name: phase.name,
 			tasks: phase.tasks.map(task => {
 				if (task.status !== "pending" && task.status !== "in_progress" && task.status !== "blocked") {
@@ -2520,7 +2523,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		// destination there would clobber its canonical plan. Leaving the owner
 		// bound (rather than routing through `setTodos`, which rebinds it to
 		// `viewSession`) keeps a follow-up reconcile in the same window correct.
-		const owner = this.#todoPhasesOwner ?? this.session;
 		owner.setTodoPhases(next);
 		this.todoPhases = next;
 		this.#syncTodoAutoClearTimer();

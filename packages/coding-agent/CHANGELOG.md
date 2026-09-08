@@ -50,6 +50,10 @@
 ### Fixed
 
 - Killing a subagent now cancels its assignment and provider requests immediately instead of leaving yield reminders or IRC auto-replies running behind an aborted row. Disposed sessions reject late prompts, and terminal agents cannot deliver late replies or revive.
+### Fixed
+
+- Streaming updates no longer cross queued message boundaries, which could lose assistant text and leave an orphaned running tool card that squeezed subsequent transcript entries into collapsed rows.
+- TODO changes made inside Eval now persist and refresh the TODO pane; subagent completion reconciliation no longer restores an older displayed plan over the current session plan.
 
 ## [18.1.15] - 2026-09-08
 

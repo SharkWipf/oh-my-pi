@@ -278,6 +278,7 @@ export class EventController {
 			ttsr_triggered: e => this.#handleTtsrTriggered(e),
 			todo_reminder: e => this.#handleTodoReminder(e),
 			todo_auto_clear: e => this.#handleTodoAutoClear(e),
+			todo_changed: () => this.ctx.reloadTodos(this.ctx.viewSession),
 			irc_message: e => this.#handleIrcMessage(e),
 			notice: e => this.#handleNotice(e),
 			model_changed: async () => {
@@ -599,8 +600,11 @@ export class EventController {
 				this.#enqueueMessageUpdate(event);
 				return;
 			}
+			// Freeze this boundary at arrival, not when its queued handler runs:
+			// a later message's delta must not jump ahead of its message_start.
+			const pendingUpdate = this.#takePendingMessageUpdate();
 			await this.#runSerialized(async () => {
-				await this.#flushPendingMessageUpdate();
+				if (pendingUpdate) await this.handleEvent(pendingUpdate);
 				await this.handleEvent(event);
 			});
 		});
@@ -672,15 +676,15 @@ export class EventController {
 		if (this.#messageUpdateTimer) return;
 		this.#messageUpdateTimer = setTimeout(() => {
 			this.#messageUpdateTimer = undefined;
+			const pendingUpdate = this.#takePendingMessageUpdate();
+			if (!pendingUpdate) return;
 			// Mirror AgentSession.#emit: attach a catch so a streaming rebuild
 			// failure surfaces as a logged warning instead of a process-level
 			// unhandled rejection (the timer path has no listener to attach one).
 			// Runs inside the serialized dispatch chain so a message_end /
 			// agent_end landing mid-window cannot overtake this flush (issue
 			// #7443 follow-up).
-			void this.#runSerialized(async () => {
-				await this.#flushPendingMessageUpdate();
-			}).catch(err => {
+			void this.#runSerialized(() => this.handleEvent(pendingUpdate)).catch(err => {
 				logger.warn("Message update flush rejected", {
 					error: err instanceof Error ? err.message : String(err),
 				});
@@ -689,19 +693,17 @@ export class EventController {
 	}
 
 	/**
-	 * Run the coalesced `message_update` handler on the latest pending snapshot
-	 * (dropping any superseded intermediates) and clear the queue. Safe to call
-	 * more than once; no-ops when nothing is pending.
+	 * Detach the current coalescing window before scheduling its dispatch.
+	 * Later arrivals belong to a new window, even while this one is queued.
 	 */
-	async #flushPendingMessageUpdate(): Promise<void> {
+	#takePendingMessageUpdate(): Extract<AgentSessionEvent, { type: "message_update" }> | undefined {
 		if (this.#messageUpdateTimer) {
 			clearTimeout(this.#messageUpdateTimer);
 			this.#messageUpdateTimer = undefined;
 		}
 		const event = this.#pendingMessageUpdate;
-		if (!event) return;
 		this.#pendingMessageUpdate = undefined;
-		await this.handleEvent(event);
+		return event;
 	}
 
 	/** Whether `#handleToolExecutionStart` has fired for this call id this turn. */
