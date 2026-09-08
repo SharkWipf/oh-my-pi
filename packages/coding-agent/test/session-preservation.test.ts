@@ -348,8 +348,9 @@ describe("durable manual preservation actions", () => {
 		});
 		const entry = f.manager.getEntry(id)!;
 		if (entry.type !== "message" || entry.message.role !== "user") throw new Error("Missing source");
+		const message = entry.message;
 		await f.manager.rewriteEntries([{ entryId: id, blocks: [{ oldBlockIndex: 0, newBlockIndex: 0 }, { oldBlockIndex: 1, newBlockIndex: null }] }], () => {
-			entry.message = { ...entry.message, content: [{ type: "text", text: "look" }] };
+			entry.message = { ...message, content: [{ type: "text", text: "look" }] };
 		});
 		const reopened = await SessionManager.open(f.manager.getSessionFile()!);
 		try {

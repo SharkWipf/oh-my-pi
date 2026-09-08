@@ -11,7 +11,7 @@ import type {
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
 import { decodeDataUri } from "@oh-my-pi/pi-ai/providers/openai-data-uri";
-import { combineContentSourceOrigins, exportItemOrigins, importItemOrigins, setSourceOrigin, transferMessageSourceOrigin } from "@oh-my-pi/pi-ai/utils/source-origin";
+import { combineContentSourceOrigins, exportItemOrigins, getSourceOrigin, importItemOrigins, setSourceOrigin, transferMessageSourceOrigin } from "@oh-my-pi/pi-ai/utils/source-origin";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { providerImageBudget } from "@oh-my-pi/snapcompact";
@@ -36,6 +36,16 @@ function countImages(context: Context): number {
 
 interface ImageClampState {
 	remainingDrops: number;
+	isSelectedSource?: (entryId: string) => boolean;
+}
+
+function isSelectedOriginalImage(image: ImageContent, state: ImageClampState): boolean {
+	const isSelectedSource = state.isSelectedSource;
+	if (!isSelectedSource) return false;
+	const origin = getSourceOrigin(image);
+	return origin?.kind === "source" && origin.parts.some(part =>
+		part.representation === "original-image" && (part.status === undefined || part.status === "exact-current") && isSelectedSource(part.entryId),
+	);
 }
 
 function clampContent(
@@ -45,7 +55,7 @@ function clampContent(
 	let changed = false;
 	const clamped: (TextContent | ImageContent)[] = [];
 	for (const part of content) {
-		if (part.type === "image" && state.remainingDrops > 0) {
+		if (part.type === "image" && state.remainingDrops > 0 && !isSelectedOriginalImage(part, state)) {
 			state.remainingDrops--;
 			changed = true;
 			continue;
@@ -74,17 +84,18 @@ function clampToolResultMessage(message: ToolResultMessage, state: ImageClampSta
 	return transferMessageSourceOrigin(message, { ...message, content: content.length > 0 ? content : [TOOL_RESULT_IMAGE_OMISSION] });
 }
 
-/** Drops oldest transient images to stay within the provider image cap. */
+/** Drops oldest transient images; currently selected originals are never omitted solely to satisfy the cap. */
 export function clampProviderContextImages(
 	context: Context,
 	model: Model,
+	isSelectedSource?: (entryId: string) => boolean,
 ): Context {
 	if (!model.input.includes("image")) return context;
 	const limit = providerImageBudget(model.provider);
 	const totalImages = countImages(context);
 	if (totalImages <= limit) return context;
 
-	const state: ImageClampState = { remainingDrops: totalImages - limit };
+	const state: ImageClampState = { remainingDrops: totalImages - limit, isSelectedSource };
 	const messages = context.messages.map(message => {
 		switch (message.role) {
 			case "user":
