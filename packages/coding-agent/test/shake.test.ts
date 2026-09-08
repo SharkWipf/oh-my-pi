@@ -10,6 +10,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { toRestoredQueuedMessage } from "@oh-my-pi/pi-coding-agent/session/queued-messages";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const usage = {
@@ -151,21 +152,27 @@ describe("AgentSession shake", () => {
 		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "user", content: "appended suffix" });
 	});
 
-	it("removes an image from the original captured source and its durable replay", async () => {
-		const image: ImageContent = { type: "image", data: "aW1n", mimeType: "image/png" };
-		const sourceCaptureId = await sessionManager.captureRequirementsInput("original instruction", [image]);
-		sessionManager.appendMessage({
+	it("drops delivered images without destroying the accepted original draft on reload", async () => {
+		const image: ImageContent = { type: "image", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=", mimeType: "image/png" };
+		const imageLinks = ["https://example.test/original.png"];
+		const entryId = sessionManager.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: "original instruction" }, image],
 			timestamp: Date.now(),
-			sourceCaptureId,
+			imageLinks,
 			producer: { type: "human" },
 		});
 		expect(await session.dropImages()).toEqual({ removed: 1 });
-		const originalText = [{ type: "text" as const, text: "original instruction" }];
-		expect(await sessionManager.readCapturedInput(sourceCaptureId)).toEqual(originalText);
+		const entry = sessionManager.getEntry(entryId);
+		if (entry?.type !== "message") throw new Error("Missing accepted source");
+		expect(entry.message).toMatchObject({ content: [{ type: "text", text: "original instruction" }] });
+		expect(toRestoredQueuedMessage(entry.message)).toMatchObject({ text: "original instruction", images: [image], imageLinks });
 		const reloaded = await SessionManager.open(sessionManager.getSessionFile()!, tempDir.path());
-		expect(await reloaded.readCapturedInput(sourceCaptureId)).toEqual(originalText);
+		try {
+			const restored = reloaded.getEntry(entryId);
+			if (restored?.type !== "message") throw new Error("Missing reloaded source");
+			expect(toRestoredQueuedMessage(restored.message)).toMatchObject({ text: "original instruction", images: [image], imageLinks });
+		} finally { await reloaded.close(); }
 	});
 
 	describe("elide", () => {

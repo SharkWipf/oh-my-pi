@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SourceRepresentation, SourceRewrite } from "@oh-my-pi/pi-agent-core/compaction/source";
 import type { AssistantMessage, Message } from "@oh-my-pi/pi-ai";
-import type { NativeItemOrigin, NativeSourcePart } from "@oh-my-pi/pi-ai/utils/source-origin";
+import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import { materializeOpenAIResponsesImage, visitOpenAIResponsesSourceContent } from "@oh-my-pi/pi-ai/utils";
+import { bindMessageSource, type NativeItemOrigin, type NativeSourcePart } from "@oh-my-pi/pi-ai/utils/source-origin";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	decodePreservedUserMessageClassifications,
 	INVALIDATED_USER_MESSAGE_CLASSIFICATION_CUSTOM_TYPE,
@@ -159,6 +162,47 @@ describe("SessionManager controlled source rewrites", () => {
 			await manager.close();
 			await rm(directory, { recursive: true, force: true });
 		}
+	});
+
+	it("consumes actual generated ingress before the first rewrite shifts source positions", async () => {
+		const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
+		const items = [
+			{ type: "image_generation_call", id: "ig_one", status: "completed", result: png },
+			{ type: "image_generation_call", id: "ig_two", status: "completed", result: png },
+			{ type: "code_interpreter_call", id: "ci_one", status: "completed", code: "plot()", container_id: "offline",
+				outputs: [{ type: "image", url: "data:image/png;base64," + png }] },
+		];
+		const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => {
+			const events = items.map((item, output_index) => ({ type: "response.output_item.done", item, output_index }));
+			return new Response([...events, { type: "response.completed", response: { id: "resp_offline", status: "completed" } }]
+				.map(event => "data: " + JSON.stringify(event) + "\n\n").join(""), { headers: { "content-type": "text/event-stream" } });
+		} });
+		const manager = SessionManager.inMemory();
+		try {
+			const model = buildModel({ id: "gpt-5.4", name: "offline ingress", provider: "openai", api: "openai-responses", baseUrl: String(server.url) + "v1",
+				input: ["text", "image"], reasoning: false, contextWindow: 400000, maxTokens: 128000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } });
+			const ingress = await streamOpenAIResponses(model as never, { messages: [{ role: "user", content: "draw", timestamp: 0 }] },
+				{ apiKey: "offline", statefulResponses: false }).result();
+			expect(ingress.stopReason).toBe("stop");
+			expect(ingress.content.map(block => block.type)).toEqual(["image", "image"]);
+			const root = user(manager, "root");
+			user(manager, "sibling");
+			manager.appendCustomEntry("sibling-only", {});
+			manager.branch(root);
+			const id = manager.appendMessage(ingress);
+			await manager.rewriteEntries([{ entryId: id, blocks: [{ oldBlockIndex: 0, newBlockIndex: null }, { oldBlockIndex: 1, newBlockIndex: null }] }],
+				() => { ingress.content = []; });
+			const replay: AssistantMessage = JSON.parse(JSON.stringify(message(manager, id).message));
+			bindMessageSource(replay, id, 1);
+			const images: Array<Record<string, unknown>> = [];
+			visitOpenAIResponsesSourceContent(replay, { image: image => images.push(materializeOpenAIResponsesImage(image)) });
+			expect(images).toEqual([{ type: "input_image", detail: "auto", image_url: "data:image/png;base64," + png }]);
+			if (replay.providerPayload?.type !== "openaiResponsesHistory") throw new Error("Missing native history");
+			expect(replay.providerPayload.items.slice(0, 2)).toEqual(items.slice(0, 2));
+			for (const origin of replay.providerPayload.origins!.slice(0, 2)) {
+				expect(origin).toMatchObject({ kind: "source", parts: [{ entryId: id, order: 1, status: "historical-not-current" }] });
+			}
+		} finally { server.stop(true); await manager.close(); }
 	});
 
 	it("uses the exact auxiliary projection: tool results/reasoning do not invalidate, assistant text does until displaced", async () => {

@@ -3454,7 +3454,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const transformProviderContext = async (context: Context, transformModel: Model): Promise<Context> => {
 			let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
 			if (snapcompactInline) transformed = await snapcompactInline.transform(transformed, transformModel);
-			transformed = clampProviderContextImages(transformed, transformModel);
+			await session.preparePreservedMessages();
+			const selection = session.getPreservedMessageSelection();
+			transformed = clampProviderContextImages(
+				transformed,
+				transformModel,
+				selection ? entryId => selection.P.has(entryId) || selection.N.has(entryId) || selection.H.has(entryId) : undefined,
+			);
 			transformed = await normalizeProviderContextImagesForModel(transformed, transformModel);
 			// After the model-specific normalizers: they carry better wording for the
 			// cases they own (STB WebP), so this stays the backstop for everything
