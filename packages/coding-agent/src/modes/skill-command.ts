@@ -17,11 +17,13 @@ type SkillPromptMessage = Pick<
 };
 
 type SkillPromptOptions = {
+	sourceCaptureId?: string;
 	streamingBehavior: "steer" | "followUp";
 	queueChipText: string;
 };
 
 interface InvokeSkillCommandOptions {
+	sourceCaptureId?: string;
 	propagateErrors?: boolean;
 	queueOnly?: boolean;
 	images?: ImageContent[];
@@ -46,12 +48,14 @@ export async function buildSkillCommandPrompt(
 	text: string,
 	streamingBehavior: "steer" | "followUp",
 	images?: ImageContent[],
+	sourceCaptureId?: string,
 ): Promise<BuiltSkillCommandPrompt | undefined> {
 	const parsed = parseSkillInvocation(text);
 	if (!parsed) return undefined;
 	const skill = ctx.skillCommands.get(getSkillSlashCommandName({ name: parsed.name }));
 	if (!skill) return undefined;
 
+	const captureId = sourceCaptureId ?? (await ctx.session.sessionManager.captureRequirementsInput(text, images));
 	const built = await buildSkillPromptMessage(skill, parsed.args, "user");
 	const textBlock: TextContent = { type: "text", text: built.message };
 	const promptContent = images && images.length > 0 ? [textBlock, ...images] : built.message;
@@ -64,7 +68,7 @@ export async function buildSkillCommandPrompt(
 			details: built.details,
 			attribution: "user",
 		},
-		options: { streamingBehavior, queueChipText: text },
+		options: { streamingBehavior, queueChipText: text, sourceCaptureId: captureId },
 	};
 }
 
@@ -76,7 +80,13 @@ export async function invokeSkillCommandFromText(
 	options?: InvokeSkillCommandOptions,
 ): Promise<boolean> {
 	try {
-		const built = await buildSkillCommandPrompt(ctx, text, streamingBehavior, options?.images);
+		const built = await buildSkillCommandPrompt(
+			ctx,
+			text,
+			streamingBehavior,
+			options?.images,
+			options?.sourceCaptureId,
+		);
 		if (!built) return false;
 		const promptOptions = options?.queueOnly ? { ...built.options, queueOnly: true } : built.options;
 		await ctx.session.promptCustomMessage(built.message, promptOptions);

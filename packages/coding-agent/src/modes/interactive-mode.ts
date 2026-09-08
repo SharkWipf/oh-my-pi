@@ -1333,6 +1333,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			if (!$env.PI_NO_TITLE && !this.sessionManager.getSessionName()) {
 				tinyTitleClient.prewarm(this.settings.get("providers.tinyModel"));
 			}
+			// Cold source coverage belongs after the first frame, never SDK/session construction.
+			void this.session.requirements.observeCommittedSources().catch(error => {
+				this.showError(`Requirements source initialization failed: ${error}`);
+			});
 		});
 
 		// Initialize hooks with TUI-based UI context
@@ -2005,6 +2009,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	startPendingSubmission(
 		input: {
+			sourceCaptureId?: string;
 			text: string;
 			images?: ImageContent[];
 			imageLinks?: (string | undefined)[];
@@ -2015,6 +2020,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		options?: { preserveDraft?: boolean },
 	): SubmittedUserInput {
 		const submission: SubmittedUserInput = {
+			sourceCaptureId: input.sourceCaptureId,
 			text: input.text,
 			images: input.images,
 			imageLinks: input.imageLinks,
@@ -5360,8 +5366,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#uiHelpers.updatePendingMessagesDisplay();
 	}
 
-	queueCompactionMessage(text: string, mode: "steer" | "followUp", images?: ImageContent[]): void {
-		this.#uiHelpers.queueCompactionMessage(text, mode, images);
+	queueCompactionMessage(
+		text: string,
+		mode: "steer" | "followUp",
+		images?: ImageContent[],
+		sourceCaptureId?: string,
+	): void {
+		this.#uiHelpers.queueCompactionMessage(text, mode, images, sourceCaptureId);
 	}
 
 	flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void> {

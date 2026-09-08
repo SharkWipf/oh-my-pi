@@ -9,11 +9,7 @@ import {
 	invalidateMessageCache,
 	registerMessageCacheInvalidator,
 } from "@oh-my-pi/pi-agent-core/compaction/message-cache";
-import {
-	type BranchSummaryMessage,
-	type CompactionSummaryMessage,
-	convertMessageToLlm,
-} from "@oh-my-pi/pi-agent-core/compaction/messages";
+import { type CustomMessage, type HookMessage, convertMessageToLlm } from "@oh-my-pi/pi-agent-core/compaction/messages";
 import type {
 	AssistantMessage,
 	ImageContent,
@@ -31,6 +27,8 @@ import { formatTitleConversationContext, type TitleConversationTurn } from "../t
 export {
 	type BranchSummaryMessage,
 	type CompactionSummaryMessage,
+	type CustomMessage,
+	type HookMessage,
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
@@ -40,17 +38,10 @@ import type { OutputMeta } from "../tools/output-meta";
 import { formatOutputNotice } from "../tools/output-meta";
 import { titleTextFromSkillPrompt } from "./skill-title-input";
 
-/** Host-recorded producer, independent of role and billing attribution. Absence means unknown. */
-export type UserMessageProducer =
-	| { type: "human" }
-	| { type: "tool"; name: string; toolCallId?: string }
-	| { type: "extension"; name?: string }
-	| { type: "generated"; name?: string };
-
 declare module "@oh-my-pi/pi-ai" {
 	interface UserMessage {
-		/** Local provenance only; never a provider role, retention rule, or human-authorship inference. */
-		producer?: UserMessageProducer;
+		imageLinks?: (string | undefined)[];
+		compactionOverride?: "keep" | "exclude";
 	}
 }
 
@@ -981,34 +972,6 @@ export interface PythonExecutionMessage {
 }
 
 /**
- * Message type for extension-injected messages via sendMessage().
- */
-export interface CustomMessage<T = unknown> {
-	role: "custom";
-	customType: string;
-	content: CustomMessageContent;
-	display: boolean;
-	details?: T;
-	/** Who initiated this message for billing/attribution semantics. */
-	attribution?: MessageAttribution;
-	timestamp: number;
-}
-
-/**
- * Legacy hook message type (pre-extensions). Kept for session migration.
- */
-export interface HookMessage<T = unknown> {
-	role: "hookMessage";
-	customType: string;
-	content: CustomMessageContent;
-	display: boolean;
-	details?: T;
-	/** Who initiated this message for billing/attribution semantics. */
-	attribution?: MessageAttribution;
-	timestamp: number;
-}
-
-/**
  * Message type for auto-read file mentions via @filepath syntax.
  */
 export interface FileMentionMessage {
@@ -1032,10 +995,7 @@ declare module "@oh-my-pi/pi-agent-core" {
 	interface CustomAgentMessages {
 		bashExecution: BashExecutionMessage;
 		pythonExecution: PythonExecutionMessage;
-		custom: CustomMessage;
-		hookMessage: HookMessage;
-		branchSummary: BranchSummaryMessage;
-		compactionSummary: CompactionSummaryMessage;
+
 		fileMention: FileMentionMessage;
 	}
 }

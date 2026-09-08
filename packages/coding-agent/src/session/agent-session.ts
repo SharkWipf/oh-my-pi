@@ -47,6 +47,7 @@ import {
 	type CompactionPreparation,
 	type CompactionResult,
 	calculatePromptTokens,
+	resolveBudgetReserveTokens,
 	collectEntriesForBranchSummary,
 	generateBranchSummary,
 	type ShakeConfig,
@@ -54,6 +55,7 @@ import {
 import type {
 	AssistantMessage,
 	CodexCompactionContext,
+	Context,
 	ImageContent,
 	Message,
 	Model,
@@ -162,7 +164,7 @@ import { containsOrchestrate, renderOrchestrateNotice } from "../modes/orchestra
 import { theme } from "../modes/theme/theme";
 import { parseTurnBudget } from "../modes/turn-budget";
 import { containsUltrathink, ULTRATHINK_NOTICE } from "../modes/ultrathink";
-import { computeNonMessageTokens } from "../modes/utils/context-usage";
+import { computeNonMessageTokens, estimateToolSchemaTokens } from "../modes/utils/context-usage";
 import { containsWorkflow, renderWorkflowNotice } from "../modes/workflow";
 import { type PlanApprovalDetails, resolveApprovedPlan } from "../plan-mode/approved-plan";
 import { listPlanFiles, readPlanFile } from "../plan-mode/plan-files";
@@ -187,8 +189,9 @@ import {
 	deobfuscateToolArguments,
 	obfuscateProviderContext,
 } from "../secrets/message-transform";
-import type { SecretObfuscator } from "../secrets/obfuscator";
+import { REQUIREMENTS_OPERATOR_DECISION_ENTRY } from "../requirements/source-capture";
 import { releaseSharpshooterSession } from "../sharpshooter/backend";
+import type { SecretObfuscator } from "../secrets/obfuscator";
 import { flushSharpshooterExtraction } from "../sharpshooter/extract";
 import {
 	AUTO_THINKING,
@@ -352,7 +355,7 @@ import {
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import { getRestorableSessionModels } from "./session-context";
 import { formatSessionDumpText } from "./session-dump-format";
-import type { BranchSummaryEntry, NewSessionOptions } from "./session-entries";
+import type { BranchSummaryEntry, NewSessionOptions, SessionMessageEntry } from "./session-entries";
 import { SessionHandoff, type SessionHandoffHost } from "./session-handoff";
 import {
 	COMPACTION_CHECK_NONE,
@@ -362,6 +365,9 @@ import {
 } from "./session-maintenance";
 import { cleanupEmptyMoveSession, copySessionArtifacts, type SessionManager } from "./session-manager";
 import { SessionMemory, type SessionMemoryHost } from "./session-memory";
+import { SessionRequirements, type RequirementsCallReceipt } from "./session-requirements";
+import { getInlineFrameAccounting, getInlineTextAccounting } from "./snapcompact-inline";
+import { getSourceOrigin } from "@oh-my-pi/pi-ai/utils/source-origin";
 import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
@@ -811,6 +817,13 @@ export class AgentSession {
 	#providerSessionState = new Map<string, ProviderSessionState>();
 	#hindsightSessionState: HindsightSessionState | undefined = undefined;
 	readonly #memory: SessionMemory;
+	readonly requirements: SessionRequirements;
+	readonly #disposeRequirementsTransform: () => void;
+	readonly #disposeRequirementsGate: () => void;
+	#preparedRequirementsReceipt: RequirementsCallReceipt | undefined;
+	readonly #countRequirementsTokens = (text: string): number => this.agent.tokenizer.countTokens(text);
+	#disposeAutolearn: (() => void) | undefined;
+	#getMemoryRecoveryContextFiles: () => readonly string[];
 	readonly rawSseDebugBuffer: RawSseDebugBuffer;
 
 	#resetPromptMaintenanceState(): void {
@@ -1214,6 +1227,7 @@ export class AgentSession {
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
+		this.#getMemoryRecoveryContextFiles = config.getMemoryRecoveryContextFiles ?? (() => []);
 		this.#codeModeState = config.codeModeState ?? {};
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
@@ -1422,7 +1436,6 @@ export class AgentSession {
 			takeMnemopiSessionState: () => setMnemopiSessionState(this, undefined),
 			setBaseSystemPrompt: prompt => {
 				this.#tools.setBaseSystemPrompt(prompt);
-				this.agent.setSystemPrompt(prompt);
 			},
 			refreshBaseSystemPrompt: () => this.#tools.refreshBaseSystemPrompt(),
 			replaceMemoryTools: tools => this.#tools.replaceMemoryTools(tools),
@@ -1431,6 +1444,38 @@ export class AgentSession {
 			memoryAgentDir: config.memoryAgentDir,
 			memoryTaskDepth: config.memoryTaskDepth,
 			createMemoryTools: config.createMemoryTools,
+		});
+		this.requirements = new SessionRequirements({
+			sessionManager: this.sessionManager,
+			agentStorage: this.settings.getStorage(),
+			settings: this.settings,
+			modelRegistry: this.#modelRegistry,
+			getContext: () => ({
+				systemPrompt: this.agent.state.systemPrompt,
+				messages: convertToLlm(this.agent.state.messages),
+				tools: this.agent.state.tools,
+			}),
+			getModel: () => this.model,
+			isDisposed: () => this.#isDisposed,
+			promptOperatorSource: async (text, targetRevisionIds, options) => {
+				const message = { role: "user" as const, content: [{ type: "text" as const, text }], timestamp: Date.now(), producer: { type: "human" as const } };
+				const entryId = options?.literal ? this.sessionManager.appendMessage(message) : this.#appendSessionMessage(message);
+				if (targetRevisionIds?.length) this.sessionManager.appendCustomEntry(REQUIREMENTS_OPERATOR_DECISION_ENTRY, { sourceEntryId: entryId, targetRevisionIds: [...targetRevisionIds] });
+				await this.sessionManager.ensureOnDisk();
+				await this.sessionManager.flush();
+				this.agent.appendMessage(message);
+				return entryId;
+			},
+		});
+		if (config.startWithoutMemory) this.requirements.setRecoveryMode("bypass");
+		this.#disposeRequirementsTransform = this.agent.addBeforeModelCallHook(async () => {
+			await this.requirements.refreshCurrentEvidence();
+			const prepared = this.requirements.prepareFragment(this.#countRequirementsTokens);
+			this.#tools.setRequirementsFragment(prepared.fragment);
+			this.#preparedRequirementsReceipt = prepared.receipt;
+		});
+		this.#disposeRequirementsGate = this.agent.addBeforeModelCall(async (context, _signal, request) => {
+			await this.#finalizeRequirementsContext(context, request.model);
 		});
 		// Resolve the wire service-tier per request so the Fireworks Priority
 		// toggle scopes priority to Fireworks alone, without mutating the shared
@@ -2169,6 +2214,7 @@ export class AgentSession {
 	 * No-op when no manager is reachable or this session has no agent id.
 	 */
 	#cancelOwnAsyncJobs(reason?: unknown): void {
+		this.requirements.cancelPending("Session-owned jobs cancelled");
 		if (!this.#agentId) return;
 		releaseCompletionHandles(this.#agentId);
 		WorkPoolRegistry.global().releaseOwner(this.#agentId);
@@ -2659,6 +2705,7 @@ export class AgentSession {
 	 * branch to verify content when a key hit could be a rare collision.
 	 */
 	#sessionMessageAlreadyPersisted(message: AgentMessage): boolean {
+
 		const key = sessionMessagePersistenceKey(message);
 		if (key === undefined) return false;
 		const keys = this.#ensurePersistedMessageKeys();
@@ -2681,10 +2728,11 @@ export class AgentSession {
 			| BashExecutionMessage
 			| PythonExecutionMessage
 			| FileMentionMessage,
+		sourceOrigin?: SessionMessageEntry["sourceOrigin"],
 	): string {
 		const cache = this.#persistedMessageKeys;
 		const wasFresh = cache !== undefined && cache.anchor === this.#persistedMessageKeysAnchor();
-		const entryId = this.sessionManager.appendMessage(message);
+		const entryId = this.sessionManager.appendMessage(message, sourceOrigin ? { sourceOrigin } : undefined);
 		if (message.role === "assistant") {
 			(message as PersistedAssistantMessage)[kPersistedSessionEntryId] = entryId;
 		}
@@ -2693,6 +2741,8 @@ export class AgentSession {
 			cache.keys.add(key);
 			cache.anchor = this.#persistedMessageKeysAnchor();
 		}
+		if ((message.role === "user" || message.role === "custom") && this.settings.get("requirements.enabled"))
+			void this.requirements.acceptDelivered(entryId).catch(error => this.emitNotice("warning", `Requirements intake failed: ${String(error)}`));
 		return entryId;
 	}
 
@@ -2763,6 +2813,10 @@ export class AgentSession {
 		// that boundary; never let its delayed persistence append the previous
 		// conversation to the replacement session.
 		if (this.#promptGeneration !== promptGeneration) return;
+		if (message.role === "custom" && (message.originalSubmission || message.compactionOverride !== undefined)) {
+			this.#appendSessionMessage(message);
+			return;
+		}
 		if (message.role === "hookMessage" || message.role === "custom") {
 			// One-run instructions must not return from persisted history: prewalk
 			// nudges are consumed once, and Vibe context is rebuilt only while active.
@@ -4402,7 +4456,7 @@ export class AgentSession {
 
 	/** Run one abortable auto-learn capture outside the primary agent loop. */
 	async runAutolearnCapture(capture: (signal: AbortSignal) => Promise<void>): Promise<void> {
-		if (this.#autolearnCaptureTask || this.#isDisposed) return;
+		if (this.#autolearnCaptureTask || this.#isDisposed || !this.settings.get("autolearn.enabled")) return;
 		const controller = new AbortController();
 		this.#autolearnCaptureAbortController = controller;
 		const task = (async () => {
@@ -4459,6 +4513,12 @@ export class AgentSession {
 	 */
 	beginDispose(): void {
 		this.#isDisposed = true;
+		this.#disposeRequirementsTransform();
+		this.#disposeRequirementsGate();
+		this.#tools.setRequirementsFragment("");
+		this.requirements.dispose();
+		this.#disposeAutolearn?.();
+		this.#disposeAutolearn = undefined;
 		this.#modelDiscoveryAbortController.abort();
 		this.#queuedMessageDrainBlocked = false;
 		this.#usagePreflightReadyForNextModelCall = false;
@@ -5334,13 +5394,124 @@ export class AgentSession {
 		this.#memory.endLocalMemoryStartup(signal);
 	}
 
+	get memoryRecoveryContextFiles(): readonly string[] {
+		return this.#getMemoryRecoveryContextFiles();
+	}
+
+	/** Host-owned automatic capture listener; never a model-controlled setting. */
+	setAutolearnDisposer(dispose: () => void): void {
+		this.#disposeAutolearn?.();
+		this.#disposeAutolearn = dispose;
+	}
+
+	/** Revoke V2 only. Ordinary memory and already contaminated history remain. */
+	bypassRequirementsForRun(): void {
+		this.requirements.setRecoveryMode("bypass");
+		this.emitNotice("info", "Future requirements recall bypassed. Existing transcript and provider history are NOT clean; ordinary memory tools remain enabled. AGENTS, rules, skills and context files remain separate.", "memory");
+	}
+
+	/** Use the ordinary fresh transcript/provider boundary with no implicit input carryover. */
+	async retryWithoutMemory(retainedSourceIds: string[] = []) {
+		const retained = [];
+		for (const id of retainedSourceIds) {
+			const sourceKey = id.startsWith("[") ? id : this.sessionManager.getRequirementsSource(id)?.key;
+			if (!sourceKey) throw new Error(`Original authoritative source unavailable: ${id}`);
+			const message = await this.sessionManager.retainRequirementsSource(sourceKey);
+			const [journalId, entryId] = JSON.parse(sourceKey) as [string, string];
+			retained.push({ message, sourceOrigin: { journalId, entryId } });
+		}
+		this.requirements.setRecoveryMode("bypass");
+		this.settings.override("memory.backend", "off");
+		this.settings.override("autolearn.enabled", false);
+		this.settings.override("requirements.enabled", false);
+		this.#disposeAutolearn?.();
+		this.#disposeAutolearn = undefined;
+		this.#abortAutolearnCapture();
+		await this.#drainAutolearnCapture();
+		await this.applyMemoryBackend();
+		this.#providerSessionId = undefined;
+		if (!(await this.newSession())) {
+			throw new Error("Clean retry cancelled before the new session opened. Learned memory is disabled, but existing transcript/provider history is NOT clean.");
+		}
+		for (const { message, sourceOrigin } of retained) {
+			this.#appendSessionMessage(message, sourceOrigin);
+			this.agent.appendMessage(message);
+		}
+		await this.sessionManager.ensureOnDisk();
+		await this.sessionManager.flush();
+		this.emitNotice("info", `Fresh session without learned memory; retained ${retained.length} explicitly selected originals. AGENTS, rules, skills and context files remain enabled and are not certified safe. Already submitted remote writes cannot be retracted.`, "memory");
+		return { sessionId: this.sessionId, retainedSourceIds: [...retainedSourceIds], remoteWritesNotRevocable: true };
+	}
+
 	/** Applies the selected memory backend to runtime state, tools, and prompt. */
 	applyMemoryBackend(): Promise<void> {
 		return this.#memory.applyMemoryBackend();
 	}
 
+	async #finalizeRequirementsContext(context: Context, model: Model): Promise<Context> {
+		const receipt = this.#preparedRequirementsReceipt;
+		this.#preparedRequirementsReceipt = undefined;
+		if (!receipt) return context;
+		if (this.#isDisposed || receipt.signature !== this.requirements.currentSignature()) {
+			this.requirements.recordCallReceipt({ ...receipt, phase: "refused" });
+			throw new Error(
+				"Requirements changed while preparing this request; retry against the current source and scope.",
+			);
+		}
+		if (receipt.tokens === 0 && receipt.revisionIds.length === 0) return context;
+		const contextWindow = model.contextWindow ?? 0;
+		const reserveTokens = resolveBudgetReserveTokens(contextWindow, this.settings.getGroup("compaction"));
+		let irreducibleTokens = this.agent.tokenizer.countTokens(context.systemPrompt ?? []);
+		if (context.tools?.length) irreducibleTokens += estimateToolSchemaTokens(context.tools, this.agent.tokenizer);
+		let unknownPhysical = false;
+		// Only identity-owned system/context frames and their control notes are irreducible.
+		// Ordinary user images, history and tool results remain ordinary compaction inputs.
+		for (const message of context.messages) {
+			if (!Array.isArray(message.content)) continue;
+			for (const block of message.content) {
+				if (block.type === "image") {
+					const fact = getInlineFrameAccounting(block);
+					if (fact && fact.owner !== "tool") irreducibleTokens += fact.estimatedTokens;
+					else if (!fact) {
+						const origin = getSourceOrigin(block);
+						if (origin?.kind === "synthetic" && origin.reason === "system-prompt-raster") unknownPhysical = true;
+					}
+				} else if (block.type === "text") {
+					const fact = getInlineTextAccounting(block);
+					if (fact && fact.owner !== "tool") irreducibleTokens += this.agent.tokenizer.countTokens(block.text);
+					else if (!fact) {
+						const origin = getSourceOrigin(block);
+						if (origin?.kind === "synthetic" && origin.reason === "raster-control") unknownPhysical = true;
+					}
+				}
+			}
+		}
+		const known =
+			!unknownPhysical &&
+			Number.isFinite(irreducibleTokens) &&
+			irreducibleTokens >= 0 &&
+			contextWindow > 0 &&
+			Number.isFinite(reserveTokens);
+		const refused = known && irreducibleTokens > contextWindow - reserveTokens;
+		this.requirements.recordCallReceipt({
+			...receipt,
+			phase: refused ? "refused" : "prepared",
+			capacity: {
+				contextWindow,
+				reserveTokens,
+				irreducibleTokens: known ? irreducibleTokens : null,
+				provenance: known ? "estimated" : "unknown",
+			},
+		});
+		if (refused)
+			throw new Error(
+				`Complete requirements and irreducible prepared input need about ${irreducibleTokens} tokens, exceeding the ${contextWindow - reserveTokens}-token prompt budget. Choose a larger context or explicitly revise scope, quarantine records, or bypass memory; no requirements were silently omitted.`,
+			);
+		return context;
+	}
+
 	/** Rebuilds the stable base prompt for the current tools and model. */
-	refreshBaseSystemPrompt(): Promise<void> {
+	async refreshBaseSystemPrompt(): Promise<void> {
 		return this.#tools.refreshBaseSystemPrompt();
 	}
 
@@ -6060,16 +6231,28 @@ export class AgentSession {
 	 * the ACP agent) use this to know whether to expect an `agent_end` event.
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<boolean> {
+		const originalText = text;
 		// Stamp the operator's submission instant before ANY async preprocessing —
 		// command execution, image normalization, vision-model description — so the
 		// prompt→yield delta includes the whole wait, whatever path the prompt takes.
 		const submittedAt = Date.now();
+		const intakeGeneration = this.#sessionGeneration;
+		const producer =
+			options?.producer ??
+			(options?.synthetic || options?.attribution === "agent"
+				? { type: "generated" as const }
+				: { type: "human" as const });
+		const originalSubmission = options?.synthetic
+			? undefined
+			: (options?.originalSubmission ??
+				{ text: originalText, images: options?.images, imageLinks: options?.imageLinks, compactionOverride: options?.compactionOverride });
 		// A manual `/compact` runs with the agent subscription disconnected until its
 		// cleanup finally re-drains the preserved queues. Starting a turn before then
 		// would neither persist nor forward its events and could race the in-flight
 		// history rewrite. `abort` still overtakes compaction; ordinary prompts wait
 		// here. No-op when no manual compaction is active.
 		await this.#maintenance.manualCompactionCleanup;
+		if (await this.#sessionGenerationChanged(intakeGeneration)) return false;
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		// Slash/custom-command handling below rewrites `text`; keep the original
 		// so a dropped prompt is handed back exactly as the user typed it.
@@ -6128,7 +6311,16 @@ export class AgentSession {
 			for (const notice of keywordNotices) {
 				await this.#queueCustomMessage(notice, streamingBehavior);
 			}
-			await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, submittedAt, undefined, options?.producer);
+			await this.#queueUserMessage(
+				expandedText,
+				options?.images,
+				streamingBehavior,
+				submittedAt,
+				undefined,
+				producer,
+				originalSubmission,
+				options,
+			);
 			return true;
 		}
 
@@ -6174,10 +6366,19 @@ export class AgentSession {
 			for (const notice of keywordNotices) {
 				await this.#queueCustomMessage(notice, streamingBehavior);
 			}
-			await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, submittedAt, {
-				images: normalizedImages,
-				descriptionNotice: imageDescriptionNotice,
-			}, options?.producer);
+			await this.#queueUserMessage(
+				expandedText,
+				options?.images,
+				streamingBehavior,
+				submittedAt,
+				{
+					images: normalizedImages,
+					descriptionNotice: imageDescriptionNotice,
+				},
+				producer,
+				originalSubmission,
+				options,
+			);
 			return true;
 		}
 
@@ -6197,7 +6398,16 @@ export class AgentSession {
 					synthetic: true,
 					userInitiated: options?.userInitiated === true ? true : undefined,
 				}
-			: { role: "user" as const, content: userContent, attribution: promptAttribution, timestamp: submittedAt, producer: options?.producer };
+			: {
+					role: "user" as const,
+					content: userContent,
+					attribution: promptAttribution,
+					timestamp: submittedAt,
+					producer,
+					originalSubmission,
+					imageLinks: options?.imageLinks,
+					compactionOverride: options?.compactionOverride,
+				};
 
 		const preludeMessages: AgentMessage[] = [];
 		if (eagerTodoPrelude) {
@@ -6241,7 +6451,13 @@ export class AgentSession {
 			// reached the agent or the session file. Hand it back to the host so the
 			// user can edit/resubmit instead of losing it (tree/branch can't offer
 			// a message that was never persisted).
-			this.#promptDropped?.({ text: typedText, images: options?.images });
+			this.#promptDropped?.({
+				text: typedText,
+				images: options?.images,
+				originalSubmission,
+				imageLinks: options?.imageLinks,
+				compactionOverride: options?.compactionOverride,
+			});
 		}
 		return true;
 	}
@@ -6255,7 +6471,10 @@ export class AgentSession {
 	 */
 	async promptCustomMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
-		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice"> & {
+		options?: Pick<
+			PromptOptions,
+			"streamingBehavior" | "toolChoice" | "originalSubmission" | "producer" | "imageLinks" | "compactionOverride"
+		> & {
 			queueChipText?: string;
 			queueOnly?: boolean;
 		},
@@ -6268,6 +6487,15 @@ export class AgentSession {
 						.map(content => content.text)
 						.join("");
 
+		const originalImages =
+			typeof message.content === "string"
+				? undefined
+				: message.content.filter((part): part is ImageContent => part.type === "image");
+		const originalSubmission =
+			options?.originalSubmission ??
+			(options?.producer?.type === "human"
+				? { text: textContent, images: originalImages, imageLinks: options.imageLinks, compactionOverride: options.compactionOverride }
+				: undefined);
 		let keywordNotices: CustomMessage[] = [];
 		if (message.customType === SKILL_PROMPT_MESSAGE_TYPE && message.attribution === "user") {
 			const details = message.details;
@@ -6294,7 +6522,7 @@ export class AgentSession {
 			for (const notice of keywordNotices) {
 				await this.#queueCustomMessage(notice, streamingBehavior);
 			}
-			await this.#queueCustomMessage(message, streamingBehavior, options.queueChipText);
+			await this.#queueCustomMessage(message, streamingBehavior, options.queueChipText, originalSubmission, options);
 			return true;
 		}
 		if (this.isStreaming) {
@@ -6304,11 +6532,15 @@ export class AgentSession {
 			for (const notice of keywordNotices) {
 				await this.#queueCustomMessage(notice, streamingBehavior);
 			}
-			await this.#queueCustomMessage(message, streamingBehavior, options?.queueChipText);
+			await this.#queueCustomMessage(message, streamingBehavior, options?.queueChipText, originalSubmission, options);
 			return true;
 		}
 
 		const customMessage: CustomMessage<T> = {
+			originalSubmission,
+			producer: options?.producer,
+			imageLinks: options?.imageLinks,
+			compactionOverride: options?.compactionOverride,
 			role: "custom",
 			customType: message.customType,
 			content: message.content,
@@ -6487,11 +6719,11 @@ export class AgentSession {
 					this.#tools.setTurnSystemPromptOverride(result.systemPrompt);
 				} else {
 					this.#tools.clearTurnSystemPromptOverride();
-					this.agent.setSystemPrompt(beforeAgentStartSystemPrompt);
+					this.#tools.setTurnSystemPromptOverride(beforeAgentStartSystemPrompt);
 				}
 			} else {
 				this.#tools.clearTurnSystemPromptOverride();
-				this.agent.setSystemPrompt(beforeAgentStartSystemPrompt);
+				this.#tools.setTurnSystemPromptOverride(beforeAgentStartSystemPrompt);
 			}
 
 			// Bail out if a newer abort/prompt cycle has started since we began setup
@@ -6731,16 +6963,32 @@ export class AgentSession {
 	/**
 	 * Queue a steering message to interrupt the agent mid-run.
 	 */
-	async steer(text: string, images?: ImageContent[]): Promise<void> {
+	async steer(
+		text: string,
+		images?: ImageContent[],
+		options?: Pick<PromptOptions, "originalSubmission" | "producer" | "imageLinks" | "compactionOverride">,
+	): Promise<void> {
 		if (text.startsWith("/")) {
 			this.#throwIfExtensionCommand(text);
 		}
 
+		const intakeGeneration = this.#sessionGeneration;
+		const originalSubmission = options?.originalSubmission ?? { text, images, imageLinks: options?.imageLinks, compactionOverride: options?.compactionOverride };
+		if (await this.#sessionGenerationChanged(intakeGeneration)) return;
 		const expandedText = expandPromptTemplate(text, [...this.#promptTemplates]);
 		// Stamp before image preprocessing so a queued image steer measures from
 		// the operator's submission, not after the vision-model description.
 		const submittedAt = Date.now();
-		await this.#queueUserMessage(expandedText, images, "steer", submittedAt);
+		await this.#queueUserMessage(
+			expandedText,
+			images,
+			"steer",
+			submittedAt,
+			undefined,
+			options?.producer,
+			originalSubmission,
+			options,
+		);
 	}
 
 	/**
@@ -6755,13 +7003,25 @@ export class AgentSession {
 			this.#throwIfExtensionCommand(text);
 		}
 
+		const intakeGeneration = this.#sessionGeneration;
+		const originalSubmission = options?.synthetic ? undefined : options?.originalSubmission ?? { text, images, imageLinks: options?.imageLinks, compactionOverride: options?.compactionOverride };
+		if (await this.#sessionGenerationChanged(intakeGeneration)) return;
 		const expandedText =
 			options?.expandPromptTemplates === false ? text : expandPromptTemplate(text, [...this.#promptTemplates]);
 		// Stamp before image preprocessing so a queued image follow-up measures
 		// from the operator's submission, not after the vision-model description.
 		const submittedAt = Date.now();
 		if (!options?.synthetic) {
-			await this.#queueUserMessage(expandedText, images, "followUp", submittedAt);
+			await this.#queueUserMessage(
+				expandedText,
+				images,
+				"followUp",
+				submittedAt,
+				undefined,
+				options?.producer,
+				originalSubmission,
+				options,
+			);
 			return;
 		}
 		// Synthetic branch: agent-initiated hidden developer message. Bypass
@@ -6824,13 +7084,17 @@ export class AgentSession {
 		mode: "steer" | "followUp" | "aside",
 		timestamp?: number,
 		preprocessed?: { images: ImageContent[] | undefined; descriptionNotice: CustomMessage | undefined },
-		producer?: UserMessage["producer"],
+		producer: UserMessage["producer"] = { type: "human" },
+		originalSubmission?: import("@oh-my-pi/pi-ai").OriginalSubmission,
+		inputOptions?: Pick<PromptOptions, "imageLinks" | "compactionOverride">,
 	): Promise<void> {
 		// Captured before any await below so the aside branch can detect a
 		// newSession()/switchSession() that completed while normalization/vision
 		// description was in flight and drop a record that would otherwise land in a
 		// different session's queue.
 		const sessionGeneration = this.#sessionGeneration;
+		originalSubmission ??= { text, images, imageLinks: inputOptions?.imageLinks, compactionOverride: inputOptions?.compactionOverride };
+		if (await this.#sessionGenerationChanged(sessionGeneration)) return;
 		// A queued user message (RPC/SDK/collab steer or follow-up, or a typed message
 		// while streaming) is a deliberate resume; re-enable advisor auto-resume that
 		// a user interrupt suppressed. An aside is non-interrupting by design — it must
@@ -6855,11 +7119,21 @@ export class AgentSession {
 			: normalizedImages?.length
 				? await this.#buildImageDescriptionNotice(normalizedImages)
 				: undefined;
+		if (await this.#sessionGenerationChanged(sessionGeneration)) return;
 		if (mode === "aside") {
 			if (await this.#sessionGenerationChanged(sessionGeneration)) return;
 			const records: AgentMessage[] = [];
 			if (imageDescriptionNotice) records.push(imageDescriptionNotice);
-			records.push({ role: "user", content, attribution: "user", timestamp: timestamp ?? Date.now(), producer });
+			records.push({
+				role: "user",
+				content,
+				attribution: "user",
+				timestamp: timestamp ?? Date.now(),
+				producer,
+				originalSubmission,
+				imageLinks: inputOptions?.imageLinks,
+				compactionOverride: inputOptions?.compactionOverride,
+			});
 			this.#irc.queueAside(records);
 			// The awaits above (image normalization / vision description) can span the run's
 			// settle, so the run may already be idle by the time the record lands in the aside
@@ -6875,6 +7149,9 @@ export class AgentSession {
 			this.agent.followUp({
 				role: "user",
 				producer,
+				originalSubmission,
+				imageLinks: inputOptions?.imageLinks,
+				compactionOverride: inputOptions?.compactionOverride,
 				content,
 				attribution: "user",
 				timestamp: timestamp ?? Date.now(),
@@ -6885,6 +7162,9 @@ export class AgentSession {
 			this.agent.steer({
 				role: "user",
 				producer,
+				originalSubmission,
+				imageLinks: inputOptions?.imageLinks,
+				compactionOverride: inputOptions?.compactionOverride,
 				content,
 				steering: true,
 				attribution: "user",
@@ -7086,6 +7366,8 @@ export class AgentSession {
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
 		deliverAs: "steer" | "followUp" | "aside",
 		queueChipText?: string,
+		originalSubmission?: import("@oh-my-pi/pi-ai").OriginalSubmission,
+		inputOptions?: Pick<PromptOptions, "imageLinks" | "compactionOverride" | "producer">,
 	): Promise<void> {
 		// Captured before the normalization await below — see #sessionGeneration's doc comment.
 		const sessionGeneration = this.#sessionGeneration;
@@ -7100,6 +7382,10 @@ export class AgentSession {
 					} as T)
 				: message.details;
 		const appMessage: CustomMessage<T> = {
+			originalSubmission,
+			producer: inputOptions?.producer,
+			imageLinks: inputOptions?.imageLinks,
+			compactionOverride: inputOptions?.compactionOverride,
 			role: "custom",
 			customType: message.customType,
 			content: message.content,
@@ -7280,7 +7566,13 @@ export class AgentSession {
 	 */
 	async sendUserMessage(
 		content: string | (TextContent | ImageContent)[],
-		options?: { deliverAs?: "steer" | "followUp" | "aside"; producer?: UserMessage["producer"] },
+		options?: {
+			deliverAs?: "steer" | "followUp" | "aside";
+			producer?: UserMessage["producer"];
+			originalSubmission?: import("@oh-my-pi/pi-ai").OriginalSubmission;
+			imageLinks?: (string | undefined)[];
+			compactionOverride?: "keep" | "exclude";
+		},
 	): Promise<void> {
 		// Normalize content to text string + optional images
 		let text: string;
@@ -7302,20 +7594,48 @@ export class AgentSession {
 			if (images.length === 0) images = undefined;
 		}
 
+		const originalSubmission = options?.originalSubmission ?? { text, images, imageLinks: options?.imageLinks, compactionOverride: options?.compactionOverride };
 		let deliveredAsAside = false;
 		if (options?.deliverAs === "aside") {
 			if (this.isStreaming) {
-				await this.#queueUserMessage(text, images, "aside", undefined, undefined, options?.producer);
+				await this.#queueUserMessage(
+					text,
+					images,
+					"aside",
+					undefined,
+					undefined,
+					options?.producer ?? { type: "generated" },
+					originalSubmission,
+					options,
+				);
 				return;
 			}
 			// Idle: fall through to the prompt flow below (starts a turn, like an omitted
 			// deliverAs) — there is no live run to inject an aside into.
 			deliveredAsAside = true;
 		} else if (options?.deliverAs === "followUp") {
-			await this.#queueUserMessage(text, images, "followUp", undefined, undefined, options?.producer);
+			await this.#queueUserMessage(
+				text,
+				images,
+				"followUp",
+				undefined,
+				undefined,
+				options?.producer ?? { type: "generated" },
+				originalSubmission,
+				options,
+			);
 			return;
 		} else if (options?.deliverAs === "steer") {
-			await this.#queueUserMessage(text, images, "steer", undefined, undefined, options?.producer);
+			await this.#queueUserMessage(
+				text,
+				images,
+				"steer",
+				undefined,
+				undefined,
+				options?.producer ?? { type: "generated" },
+				originalSubmission,
+				options,
+			);
 			return;
 		}
 
@@ -7328,7 +7648,10 @@ export class AgentSession {
 		// tool-batch-aborting steer.
 		await this.prompt(text, {
 			expandPromptTemplates: false,
-			producer: options?.producer,
+			originalSubmission,
+			producer: options?.producer ?? { type: "generated" },
+			imageLinks: options?.imageLinks,
+			compactionOverride: options?.compactionOverride,
 			images,
 			streamingBehavior: deliveredAsAside ? "aside" : "steer",
 		});
@@ -7914,6 +8237,8 @@ export class AgentSession {
 			}
 		}
 
+		this.requirements.cancelPending("Session fork");
+		this.requirements.releasePendingLive();
 		await this.#bash.flushPending();
 		// Flush current session to ensure all entries are written
 		await this.sessionManager.flush();
@@ -7953,6 +8278,7 @@ export class AgentSession {
 			this.#advisors.reattachRecorderFeeds();
 			advisorRecordersDetached = false;
 			await this.#memory.resetContextForNewTranscript();
+			void this.requirements.observeCommittedSources().catch(error => this.emitNotice("warning", `Requirements catalog: ${String(error)}`));
 
 			// Emit session_switch event with reason "fork" to hooks
 			if (this.#extensionRunner) {
@@ -8273,6 +8599,8 @@ export class AgentSession {
 		if (!checkpointState) {
 			return;
 		}
+		this.requirements.cancelPending("Rewind source ancestry changed");
+		this.requirements.releasePendingLive();
 		this.#bash.withBranchTransition(() => {
 			try {
 				this.sessionManager.branchWithSummary(checkpointState.checkpointEntryId, report, {
@@ -8314,6 +8642,7 @@ export class AgentSession {
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 		this.#checkpointState = undefined;
 		this.#pendingRewindReport = undefined;
+		void this.requirements.observeCommittedSources().catch(error => this.emitNotice("warning", `Requirements catalog: ${String(error)}`));
 	}
 	/** Plan-mode decision affordances: `ask`, or plan approval via `write xd://propose`. */
 	#isPlanDecisionTool(toolCall: { name: string; arguments?: Record<string, unknown> }): boolean {
@@ -8934,6 +9263,8 @@ export class AgentSession {
 			}
 		}
 
+		this.requirements.cancelPending("Session switch or reload");
+		this.requirements.releasePendingLive();
 		this.#disconnectFromAgent();
 		await this.abort({ goalReason: "internal" });
 		await this.#sessionBeforeSwitchReconciler?.();
@@ -8969,8 +9300,7 @@ export class AgentSession {
 		const previousAutoResolvedLevel = this.autoResolvedThinkingLevel();
 		const previousServiceTierByFamily = this.serviceTierByFamily;
 		const previousTools = [...this.agent.state.tools];
-		const previousBaseSystemPrompt = this.#tools.baseSystemPrompt;
-		const previousSystemPrompt = this.agent.state.systemPrompt;
+		const previousPromptState = this.#tools.capturePromptState();
 		const previousBaseSystemPromptBeforeMemoryPromotion = this.#memory.promotionSnapshot;
 		const previousFreshProviderSessionId = this.#freshProviderSessionId;
 		const previousInheritedProviderPromptCacheKey = this.#inheritedProviderPromptCacheKey;
@@ -9173,6 +9503,7 @@ export class AgentSession {
 				const costs = await loadAdvisorTranscriptCosts(this.sessionFile, { providersBySlug });
 				this.#advisors.restoreCost(costs, providersBySlug);
 			}
+			void this.requirements.observeCommittedSources().catch(error => this.emitNotice("warning", `Requirements catalog: ${String(error)}`));
 			this.#bash.finishSessionTransition(bashTransition, true);
 			if (previousSessionState.sessionId !== this.sessionManager.getSessionId()) {
 				this.#notifySessionChangeCallbacks();
@@ -9186,9 +9517,8 @@ export class AgentSession {
 			this.#syncAgentSessionId(previousSessionState.sessionId, false);
 			this.#memory.rekeyForCurrentSessionId();
 			this.agent.setTools(previousTools);
-			this.#tools.setBaseSystemPrompt(previousBaseSystemPrompt);
+			this.#tools.restorePromptState(previousPromptState);
 			this.#memory.restorePromotionSnapshot(previousBaseSystemPromptBeforeMemoryPromotion);
-			this.agent.setSystemPrompt(previousSystemPrompt);
 			this.agent.replaceMessages(previousAgentMessages);
 			this.agent.replaceQueues(previousSteeringMessages, previousFollowUpMessages);
 			this.#irc.restorePending(previousIrcPending);
@@ -9774,6 +10104,8 @@ export class AgentSession {
 
 		// Switch leaf (with or without summary)
 		// Summary is attached at the navigation target position (newLeafId), not the old branch
+		this.requirements.cancelPending("Session tree navigation");
+		this.requirements.releasePendingLive();
 		const bashTransition = this.#bash.beginSessionTransition();
 		let summaryEntry: BranchSummaryEntry | undefined;
 		let branchTransitioned = false;
@@ -9799,6 +10131,7 @@ export class AgentSession {
 		}
 
 		// Update agent state — build display context to populate agent messages.
+		void this.requirements.observeCommittedSources().catch(error => this.emitNotice("warning", `Requirements catalog: ${String(error)}`));
 		const stateContext = this.sessionManager.buildSessionContext();
 		const displayContext = deobfuscateSessionContext(stateContext, this.#obfuscator);
 		this.agent.replaceMessages(displayContext.messages);

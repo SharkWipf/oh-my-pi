@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added independent living requirements memory under `/memory requirements`, using host-recorded accepted originals, source-backed extraction, independent obligation/fidelity review and fresh candidate-only sanity, durable revisions, complete active recall, and explicit coverage-gap and quarantine controls. Ordinary memory backends remain independently selectable.
+- Added `--start-without-memory`, requirements-only future bypass, and clean retry through the normal fresh-session/provider-state transition with learned-memory startup disabled and only explicitly selected original inputs retained. Ordinary backend disposal keeps its normal semantics; recovery does not retract remote writes.
+- Requirements capacity is evaluated at the actual prepared provider-request boundary, after physical transforms and inband tool encoding, using emitted system/context frame estimates. Requests retain every applicable statement, reject known irreducible overflow or stale snapshots before provider execution, and report invalidated physical estimates as unknown rather than silently truncating requirements.
+- Quarantined requirement bodies no longer leak through unresolved conflict recall; source evidence and conflict lineage remain inspectable.
+- Disabled or bypassed requirements no longer pin original user history during ordinary compaction; enabling requirements still protects unresolved current delivery IDs until processing or explicit gap passage.
+- Revalidated consumed local and scoped foreign original evidence before provider dispatch without observing the whole historical catalog. Evidence availability and explicit quarantine are independent; identical originals returning never silently restore quarantined requirements.
+- Normalized requirements storage into indexed changed-row transactions and current scoped heads; historical catalogs and lineage are not loaded for normal recall. Publication joins persisted independent obligation/candidate decisions and compares exact current head identities.
+- Existing session-delete confirmations now expose active evidence dependencies and offer cancellation, needed-original BlobStore retention, or exact requirement withdrawal. Scoped clear prevents historical backfill from recreating old authority; newly accepted operator decisions remain usable.
 ## [18.1.15] - 2026-09-08
 
 ### Added
@@ -32,6 +42,12 @@
 ### Fixed
 
 - Secret redaction now covers provider-visible computer actions and safety messages, tool explanations, Anthropic server-tool text, and native web-search text while preserving opaque replay data, identifiers, and original screenshots.
+- Removed requirements capture and history scans from requirements-off input. Enabled historical metadata cataloging is cooperative and separate from new delivered live-input protection; opening a view does not launch model backfill.
+- Requirements adoption of earlier assistant and tool output resolves complete original journal/block units without granting nonhuman content operator authority or duplicating the transcript. Explicit processing receives sufficient chronological originals; candidate-only sanity remains source-free.
+- Packaged requirements extraction, evidence review, candidate-only sanity, and recall instructions as static prompt assets, preserving the provider-facing instructions and evidence payloads.
+- Replaced model-selected byte ranges and the extra quote-only review with host-issued whole-unit evidence and exactly three model stages. Independent coverage must map every inventoried obligation to supported candidate work or a genuinely matching current accepted head; legitimate empty proposals remain valid.
+- Requirements prompt composition now belongs to SessionTools and the existing early model-call hook, with a later generation/capacity check. Generic provider-transform registration and universal backend-recovery overrides were removed.
+- Original command/image/queue restoration uses ordinary accepted-submission metadata independently of optional requirements indexing.
 - Inline snap images now expose transient, identity-bound frame estimates and prompt/tool ownership through provider normalization, separately from original images. Outgoing image mutations no longer corrupt cached frames for later requests.
 - The startup update notice counts every change in a release: bullets written above a `###` heading now count under `Other`, and `+`/`*` markers and lightly indented bullets count like `-`.
 - Fixed Codex Astra retaining its larger window after disabling Extended Context, including cached models; explicit model overrides still take precedence.

@@ -46,12 +46,14 @@ import type { OAuthManualInputManager } from "./oauth-manual-input";
 import type { Theme } from "./theme/theme";
 
 export type CompactionQueuedMessage = {
+	sourceCaptureId?: string;
 	text: string;
 	mode: "steer" | "followUp";
 	images?: ImageContent[];
 };
 
 export type SubmittedUserInput = {
+	sourceCaptureId?: string;
 	text: string;
 	images?: ImageContent[];
 	imageLinks?: (string | undefined)[];
@@ -297,7 +299,12 @@ export interface InteractiveModeContext {
 	showNewVersionNotification(newVersion: string): void;
 	clearEditor(): void;
 	updatePendingMessagesDisplay(): void;
-	queueCompactionMessage(text: string, mode: "steer" | "followUp", images?: ImageContent[]): void;
+	queueCompactionMessage(
+		text: string,
+		mode: "steer" | "followUp",
+		images?: ImageContent[],
+		sourceCaptureId?: string,
+	): void;
 	flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void>;
 	flushPendingBashComponents(): void;
 	flushPendingModelSwitch(): Promise<void>;
@@ -307,6 +314,7 @@ export interface InteractiveModeContext {
 	/** Reconcile the idle "F5 to Retry" status row with the transcript tail. */
 	syncRetryHintRow(): void;
 	startPendingSubmission(input: {
+		sourceCaptureId?: string;
 		text: string;
 		images?: ImageContent[];
 		imageLinks?: (string | undefined)[];

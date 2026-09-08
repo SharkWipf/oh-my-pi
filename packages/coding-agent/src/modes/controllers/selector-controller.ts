@@ -23,6 +23,7 @@ import {
 } from "../../config/model-resolver";
 import { getRoleInfo } from "../../config/model-roles";
 import { settings } from "../../config/settings";
+import { confirmRequirementsJournalDeletion } from "../../requirements/commands";
 import { disableProvider, enableProvider } from "../../discovery";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
@@ -1796,7 +1797,8 @@ export class SelectorController {
 				: undefined;
 			onSelectSession = session => this.handleResumeSession(session.path);
 			selectorOptions = {
-				onDelete: async (session: SessionInfo) => {
+				onDelete: async (session, choose) => {
+					if (!(await confirmRequirementsJournalDeletion(this.ctx.settings, session.path, choose))) return false;
 					if (!(await this.#detachActiveSessionBeforeDeletion(session.path))) {
 						return false;
 					}
@@ -1962,6 +1964,10 @@ export class SelectorController {
 			return;
 		}
 
+		if (!(await confirmRequirementsJournalDeletion(this.ctx.settings, sessionFile, (title, options) => this.ctx.showHookSelector(title, options)))) {
+			this.ctx.showStatus("Delete cancelled");
+			return;
+		}
 		if (!(await this.#detachActiveSessionBeforeDeletion(sessionFile))) {
 			this.ctx.showStatus("Delete cancelled");
 			return;

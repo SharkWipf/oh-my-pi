@@ -7,6 +7,7 @@ import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import { loadSlashCommands } from "../extensibility/slash-commands";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-backend";
+import { executeRequirementsCommand, REQUIREMENTS_COMMANDS, renderRequirementsData } from "../requirements/commands";
 import type { FreshSessionResult, HandoffResult } from "../session/agent-session";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
@@ -543,6 +544,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		acpDescription: "Manage memory",
 		acpInputHint: "<subcommand>",
 		subcommands: [
+			...REQUIREMENTS_COMMANDS,
 			{ name: "view", description: "Show current memory injection payload" },
 			{ name: "stats", description: "Show memory backend statistics" },
 			{ name: "diagnose", description: "Run memory backend diagnostics" },
@@ -566,6 +568,19 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		allowArgs: true,
 		handle: async (command, runtime) => {
 			const verb = (command.args.trim().split(/\s+/)[0] ?? "").toLowerCase() || "view";
+			if (verb === "requirements") {
+				try {
+					await runtime.output(
+						await executeRequirementsCommand(
+							runtime.session,
+							command.args.trim().slice("requirements".length).trim(),
+						),
+					);
+				} catch (error) {
+					await runtime.output(renderRequirementsData(error instanceof Error ? error.message : String(error)));
+				}
+				return commandConsumed();
+			}
 			const backend = await resolveMemoryBackend(runtime.settings);
 			switch (verb) {
 				case "view": {

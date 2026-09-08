@@ -98,12 +98,20 @@ function createStubInputControllerContext(opts: {
 	const renderOptimisticSkillMessage = vi.fn();
 	const reconcileOptimisticSkillMessage = vi.fn();
 	const clearOptimisticSkillMessage = vi.fn();
-	const queueCompactionMessage = vi.fn((_text: string, _mode: "steer" | "followUp", _images?: ImageContent[]) => {});
+	const queueCompactionMessage = vi.fn(
+		(text: string, mode: "steer" | "followUp", images?: ImageContent[], sourceCaptureId?: string) => {
+			compactionQueuedMessages.push({ text, mode, images, sourceCaptureId });
+		},
+	);
+	const sessionManager = SessionManager.inMemory();
+	const compactionQueuedMessages: CompactionQueuedMessage[] = [];
 	const ctx = {
+		sessionManager,
 		editor,
 		ui: { requestRender },
 		skillCommands: opts.skillCommands,
 		session: {
+			sessionManager,
 			isStreaming: opts.isStreaming,
 			isCompacting: opts.isCompacting ?? false,
 			isBashRunning: false,
@@ -122,7 +130,7 @@ function createStubInputControllerContext(opts: {
 		isBashMode: false,
 		isPythonMode: false,
 		loopModeEnabled: false,
-		compactionQueuedMessages: [],
+		compactionQueuedMessages,
 		locallySubmittedUserSignatures: new Set<string>(),
 		withLocalSubmission: async (_text: string, fn: () => unknown) => fn(),
 		queueCompactionMessage,
@@ -163,27 +171,8 @@ describe("InputController skill queue chip metadata", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("passes slash-form queueChipText for streaming skill steers", async () => {
-		const { ctx, editor, promptCustomMessage, updatePendingMessagesDisplay, requestRender } =
-			createStubInputControllerContext({ skillCommands, isStreaming: true });
-		const controller = new InputController(ctx);
-
-		controller.setupEditorSubmitHandler();
-		editor.setText("/skill:test-skill arg1 arg2");
-		await editor.onSubmit?.("/skill:test-skill arg1 arg2");
-
-		expect(promptCustomMessage).toHaveBeenCalledTimes(1);
-		expect(promptCustomMessage.mock.calls[0]?.[1]).toEqual({
-			streamingBehavior: "steer",
-			queueChipText: "/skill:test-skill arg1 arg2",
-		});
-		expect(promptCustomMessage.mock.calls[0]?.[0].details.__queueChipText).toBeUndefined();
-		expect(updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);
-		expect(requestRender).toHaveBeenCalledTimes(1);
-	});
-
 	it("queues known skill steers during compaction instead of dispatching immediately", async () => {
-		const { ctx, editor, promptCustomMessage, queueCompactionMessage } = createStubInputControllerContext({
+		const { ctx, editor, promptCustomMessage } = createStubInputControllerContext({
 			skillCommands,
 			isStreaming: false,
 			isCompacting: true,
@@ -194,24 +183,8 @@ describe("InputController skill queue chip metadata", () => {
 		editor.setText("/skill:test-skill arg1 arg2");
 		await editor.onSubmit?.("/skill:test-skill arg1 arg2");
 
-		expect(queueCompactionMessage).toHaveBeenCalledWith("/skill:test-skill arg1 arg2", "steer", undefined);
+		expect(ctx.compactionQueuedMessages.map(message => message.text)).toEqual(["/skill:test-skill arg1 arg2"]);
 		expect(promptCustomMessage).not.toHaveBeenCalled();
-	});
-
-	it("passes slash-form queueChipText for streaming skill follow-ups", async () => {
-		const { ctx, editor, promptCustomMessage } = createStubInputControllerContext({
-			skillCommands,
-			isStreaming: true,
-		});
-		const controller = new InputController(ctx);
-
-		editor.setText("/skill:test-skill arg1 arg2");
-		await controller.handleFollowUp();
-
-		expect(promptCustomMessage.mock.calls[0]?.[1]).toEqual({
-			streamingBehavior: "followUp",
-			queueChipText: "/skill:test-skill arg1 arg2",
-		});
 	});
 
 	it("streaming follow-up applies builtin slash commands instead of queueing them", async () => {
@@ -227,24 +200,6 @@ describe("InputController skill queue chip metadata", () => {
 		expect(handleGoalModeCommand.mock.calls[0]?.[0]).toBe("set Ship the release");
 		expect(prompt).not.toHaveBeenCalled();
 		expect(editor.getText()).toBe("");
-	});
-
-	it("idle skill prompt still leaves queueChipText out of persisted details", async () => {
-		const { ctx, editor, promptCustomMessage } = createStubInputControllerContext({
-			skillCommands,
-			isStreaming: false,
-		});
-		const controller = new InputController(ctx);
-
-		controller.setupEditorSubmitHandler();
-		editor.setText("/skill:test-skill arg1 arg2");
-		await editor.onSubmit?.("/skill:test-skill arg1 arg2");
-
-		expect(promptCustomMessage.mock.calls[0]?.[1]).toEqual({
-			streamingBehavior: "steer",
-			queueChipText: "/skill:test-skill arg1 arg2",
-		});
-		expect(promptCustomMessage.mock.calls[0]?.[0].details.__queueChipText).toBeUndefined();
 	});
 
 	it("routes pending images through immediate skill submit and clears the draft", async () => {
@@ -373,7 +328,9 @@ describe("compaction skill re-invocation", () => {
 		const prompt = vi.fn(async (_text: string, _options?: { streamingBehavior?: "steer" | "followUp" }) => {});
 		const steer = vi.fn(async (_text: string, _images?: ImageContent[]) => {});
 		const followUp = vi.fn(async (_text: string, _images?: ImageContent[]) => {});
+		const sessionManager = SessionManager.inMemory();
 		const ctx = {
+			sessionManager,
 			skillCommands,
 			compactionQueuedMessages: queuedMessages,
 			updatePendingMessagesDisplay: vi.fn(),
@@ -382,6 +339,7 @@ describe("compaction skill re-invocation", () => {
 			recordLocalSubmission: vi.fn((_text: string, _imageCount: number) => vi.fn()),
 			withLocalSubmission: vi.fn(async (_text: string, fn: () => unknown) => Promise.resolve(fn())),
 			session: {
+				sessionManager,
 				promptCustomMessage,
 				prompt,
 				steer,
@@ -412,7 +370,7 @@ describe("compaction skill re-invocation", () => {
 		await uiHelpers.flushCompactionQueue({ willRetry: false });
 		await promptCustomMessageCalled;
 
-		const [message, options] = firstPromptCustomCall(promptCustomMessage);
+		const [message] = firstPromptCustomCall(promptCustomMessage);
 		expect(message.customType).toBe(SKILL_PROMPT_MESSAGE_TYPE);
 		expect(message.attribution).toBe("user");
 		if (!Array.isArray(message.content)) {
@@ -429,10 +387,7 @@ describe("compaction skill re-invocation", () => {
 		expect(renderedText.text).toContain("arg1 arg2");
 		expect(message.content[1]).toEqual(image);
 		expect(message.details).toMatchObject({ name: "test-skill", args: "arg1 arg2", lineCount: 1 });
-		expect(options).toEqual({
-			streamingBehavior: "followUp",
-			queueChipText: "/skill:test-skill arg1 arg2",
-		});
+
 		expect(prompt).not.toHaveBeenCalled();
 		expect(steer).not.toHaveBeenCalled();
 		expect(followUp).not.toHaveBeenCalled();

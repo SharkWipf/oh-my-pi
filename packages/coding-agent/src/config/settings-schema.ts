@@ -217,7 +217,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Git",
 	],
 	context: ["General", "Compaction", "Rules (TTSR)", "Experimental"],
-	memory: ["General", "Auto-Learn", "Mnemopi", "Hindsight", "Sharpshooter"],
+	memory: ["General", "Requirements", "Auto-Learn", "Mnemopi", "Hindsight", "Sharpshooter"],
 	files: ["Editing", "Reading", "Read Summaries", "LSP"],
 	shell: ["Bash", "Eval & Runtimes"],
 	tools: [
@@ -3014,7 +3014,7 @@ export const SETTINGS_SCHEMA = {
 			label: "Memory Backend",
 			description: "Off, local summary pipeline, Mnemopi SQLite, Hindsight remote memory, or Sharpshooter",
 			options: [
-				{ value: "off", label: "Off", description: "No memory subsystem runs" },
+				{ value: "off", label: "Off", description: "No ordinary memory backend; requirements are independent" },
 				{ value: "local", label: "Local", description: "Local rollout summarisation pipeline (memory_summary.md)" },
 				{ value: "hindsight", label: "Hindsight", description: "Vectorize Hindsight remote memory service" },
 				{
@@ -3029,6 +3029,17 @@ export const SETTINGS_SCHEMA = {
 						"Friction-gated project decision files (architecture/product/style), consolidated in the background",
 				},
 			],
+		},
+	},
+	"requirements.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "memory",
+			group: "Requirements",
+			label: "Living Requirements",
+			description:
+				"Independent source-backed requirements; inspect with /memory requirements; configure its three models in /model",
 		},
 	},
 	"sharpshooter.model": {

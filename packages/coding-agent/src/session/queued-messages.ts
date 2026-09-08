@@ -95,5 +95,16 @@ export function queueChipText(message: AgentMessage): string {
 
 /** Converts a queued user message to editor-restorable content. */
 export function toRestoredQueuedMessage(message: AgentMessage): RestoredQueuedMessage {
-	return { text: queueChipText(message), images: queuedImageContent(message) };
+	const original = (message.role === "user" || message.role === "custom") ? message.originalSubmission : undefined;
+	return {
+		text: original?.text ?? queueChipText(message),
+		images: original?.images ?? queuedImageContent(message),
+		...(message.role === "user" || message.role === "custom"
+			? {
+					originalSubmission: original,
+					imageLinks: original?.imageLinks ?? message.imageLinks,
+					compactionOverride: original?.compactionOverride ?? message.compactionOverride,
+				}
+			: {}),
+	};
 }

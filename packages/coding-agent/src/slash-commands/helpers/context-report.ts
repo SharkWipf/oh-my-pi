@@ -1,4 +1,5 @@
 import { computeContextBreakdown } from "../../modes/utils/context-usage";
+import { requirementsContextText } from "../../requirements/commands";
 import type { SlashCommandRuntime } from "../types";
 import { renderAsciiBar } from "./format";
 
@@ -8,6 +9,10 @@ import { renderAsciiBar } from "./format";
  * minimal "window/used" lines when the breakdown helper throws.
  */
 export function buildContextReportText(runtime: SlashCommandRuntime): string {
+	return `${buildUsageReportText(runtime)}\n\n${requirementsContextText(runtime.session)}`;
+}
+
+function buildUsageReportText(runtime: SlashCommandRuntime): string {
 	try {
 		const breakdown = computeContextBreakdown(runtime.session, { snapcompactSavings: true });
 		if (breakdown.contextWindow <= 0) {

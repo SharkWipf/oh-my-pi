@@ -6,6 +6,10 @@
 
 - Fixed local token estimates omitting user and developer images; original images now receive the same one-time baseline as tool-result and hook images.
 
+### Added
+
+- Pre-model-call gates receive the resolved request model alongside the actual post-inband provider context, so accounting and admission use the dispatched representation without preparing it again.
+
 ## [18.1.10] - 2026-09-04
 
 ### Fixed

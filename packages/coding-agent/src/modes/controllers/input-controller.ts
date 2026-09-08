@@ -760,7 +760,9 @@ export class InputController {
 			let inputImageLinks =
 				this.ctx.editor.pendingImageLinks.length > 0 ? [...this.ctx.editor.pendingImageLinks] : undefined;
 			let hasInputImages = (inputImages?.length ?? 0) > 0;
+			const submittedText = text;
 			const submittedImages = inputImages;
+			const sourceCaptureId = await this.ctx.sessionManager.captureRequirementsInput(text, inputImages);
 
 			if (runner?.hasHandlers("input")) {
 				const result = await runner.emitInput(text, inputImages, "interactive");
@@ -780,7 +782,18 @@ export class InputController {
 				}
 				hasInputImages = (inputImages?.length ?? 0) > 0;
 			}
-			const submittedMode = parseSlashCommand(text)?.name;
+			const transformedCommand = parseSlashCommand(text);
+			if (
+				text !== submittedText &&
+				transformedCommand?.name === "memory" &&
+				/^requirements(?:\s|$)/i.test(transformedCommand.args.trim())
+			) {
+				this.ctx.showError(
+					"Requirements operator commands must be typed directly; an extension transformed this input. Submit the intended command explicitly.",
+				);
+				return;
+			}
+			const submittedMode = transformedCommand?.name;
 			const draftDetached =
 				submittedMode === "plan" ||
 				submittedMode === "vibe" ||
@@ -864,10 +877,10 @@ export class InputController {
 			if (text && isKnownSkillCommand(this.ctx, text)) {
 				if (this.ctx.session.isCompacting) {
 					const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
-					this.ctx.queueCompactionMessage(text, "steer", images);
+					this.ctx.queueCompactionMessage(text, "steer", images, sourceCaptureId);
 					return;
 				}
-				if (await this.#invokeSkillCommand(text, "steer", inputImages, inputImageLinks)) {
+				if (await this.#invokeSkillCommand(text, "steer", inputImages, inputImageLinks, sourceCaptureId)) {
 					return;
 				}
 			}
@@ -912,7 +925,7 @@ export class InputController {
 			// Queue input during compaction
 			if (this.ctx.session.isCompacting) {
 				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
-				this.ctx.queueCompactionMessage(text, "steer", images);
+				this.ctx.queueCompactionMessage(text, "steer", images, sourceCaptureId);
 				// An inline `/loop` body queued here arms the loop only when it is
 				// an actual model prompt. Skill/bash/python bodies never reach this
 				// branch, but an extension-command body would otherwise be retained
@@ -928,7 +941,7 @@ export class InputController {
 			if (this.#isLocalExtensionCommand(text)) {
 				this.ctx.editor.clearDraft(text);
 				try {
-					await this.ctx.session.prompt(text, { images: inputImages });
+					await this.ctx.session.prompt(text, { images: inputImages, sourceCaptureId });
 				} catch (error) {
 					if (inputImages && inputImages.length > 0) {
 						this.ctx.editor.pendingImages = [...inputImages];
@@ -959,7 +972,7 @@ export class InputController {
 				try {
 					const forwarded = await this.ctx.withLocalSubmission(
 						text,
-						() => this.ctx.session.prompt(text, { streamingBehavior: "steer", images }),
+						() => this.ctx.session.prompt(text, { streamingBehavior: "steer", images, sourceCaptureId }),
 						{ imageCount: images?.length ?? 0 },
 					);
 					// An inline `/loop` body arms the loop only after dispatch
@@ -1012,6 +1025,7 @@ export class InputController {
 				// streaming-branch Enter (above) and keeps the message from throwing
 				// AgentBusyError on that race.
 				const submission = this.ctx.startPendingSubmission({
+					sourceCaptureId,
 					text,
 					images,
 					imageLinks: inputImageLinks,
@@ -1038,7 +1052,7 @@ export class InputController {
 				try {
 					const forwarded = await this.ctx.withLocalSubmission(
 						text,
-						() => this.ctx.session.prompt(text, { streamingBehavior: "steer", images }),
+						() => this.ctx.session.prompt(text, { streamingBehavior: "steer", images, sourceCaptureId }),
 						{
 							imageCount: images?.length ?? 0,
 						},
@@ -1264,6 +1278,7 @@ export class InputController {
 		streamingBehavior: "steer" | "followUp",
 		images?: ImageContent[],
 		imageLinks?: (string | undefined)[],
+		sourceCaptureId?: string,
 	): Promise<boolean> {
 		if (!isKnownSkillCommand(this.ctx, text)) return false;
 		const draftImages = images && images.length > 0 ? [...images] : undefined;
@@ -1284,7 +1299,7 @@ export class InputController {
 		try {
 			// Build the user-attributed skill message once so the optimistic
 			// transcript row and the dispatched message share content.
-			const built = await buildSkillCommandPrompt(this.ctx, text, streamingBehavior, draftImages);
+			const built = await buildSkillCommandPrompt(this.ctx, text, streamingBehavior, draftImages, sourceCaptureId);
 			if (!built) {
 				restoreDraft();
 				return false;

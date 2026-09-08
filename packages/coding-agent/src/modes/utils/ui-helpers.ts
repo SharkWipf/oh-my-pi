@@ -1101,9 +1101,19 @@ export class UiHelpers {
 		this.ctx.ui.requestComponentRender(this.ctx.pendingMessagesContainer);
 	}
 
-	queueCompactionMessage(text: string, mode: "steer" | "followUp", images?: ImageContent[]): void {
+	queueCompactionMessage(
+		text: string,
+		mode: "steer" | "followUp",
+		images?: ImageContent[],
+		sourceCaptureId?: string,
+	): void {
 		const queuedImages = images && images.length > 0 ? images : undefined;
-		this.ctx.compactionQueuedMessages.push({ text, mode, images: queuedImages } as CompactionQueuedMessage);
+		this.ctx.compactionQueuedMessages.push({
+			text,
+			mode,
+			images: queuedImages,
+			sourceCaptureId,
+		} as CompactionQueuedMessage);
 		this.ctx.editor.clearDraft(text);
 		this.ctx.updatePendingMessagesDisplay();
 		this.ctx.showStatus(
@@ -1126,12 +1136,13 @@ export class UiHelpers {
 				propagateErrors: true,
 				queueOnly: true,
 				images: message.images,
+				sourceCaptureId: message.sourceCaptureId,
 			})
 		) {
 			return;
 		}
 		if (this.ctx.isKnownSlashCommand(message.text)) {
-			const forwarded = await this.ctx.session.prompt(message.text);
+			const forwarded = await this.ctx.session.prompt(message.text, { sourceCaptureId: message.sourceCaptureId });
 			this.#parkLoopOnLocalConsume(message.text, forwarded);
 			return;
 		}
@@ -1139,8 +1150,8 @@ export class UiHelpers {
 			message.text,
 			() =>
 				message.mode === "followUp"
-					? this.ctx.session.followUp(message.text, message.images)
-					: this.ctx.session.steer(message.text, message.images),
+					? this.ctx.session.followUp(message.text, message.images, { sourceCaptureId: message.sourceCaptureId })
+					: this.ctx.session.steer(message.text, message.images, { sourceCaptureId: message.sourceCaptureId }),
 			{ imageCount: message.images?.length ?? 0 },
 		);
 	}
@@ -1202,7 +1213,7 @@ export class UiHelpers {
 			}
 			if (firstPromptIndex === -1) {
 				for (const message of queuedMessages) {
-					const forwarded = await this.ctx.session.prompt(message.text);
+					const forwarded = await this.ctx.session.prompt(message.text, { sourceCaptureId: message.sourceCaptureId });
 					this.#parkLoopOnLocalConsume(message.text, forwarded);
 				}
 				return;
@@ -1231,6 +1242,7 @@ export class UiHelpers {
 					firstPrompt.text,
 					firstPrompt.mode,
 					firstPrompt.images,
+					firstPrompt.sourceCaptureId,
 				);
 				promptPromise = built
 					? this.ctx.session.promptCustomMessage(built.message, built.options).catch(restoreQueue)
@@ -1244,6 +1256,7 @@ export class UiHelpers {
 					.prompt(firstPrompt.text, {
 						streamingBehavior: firstPrompt.mode === "followUp" ? "followUp" : "steer",
 						images: firstPrompt.images,
+						sourceCaptureId: firstPrompt.sourceCaptureId,
 					})
 					.catch((error: unknown) => {
 						disposeFirstPrompt();
