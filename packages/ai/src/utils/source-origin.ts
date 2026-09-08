@@ -1,9 +1,11 @@
 import { type FluentType, type } from "@oh-my-pi/omptype";
-import type { SourceRewrite } from "../compaction-source";
+import { compactionSourceKey, type SourceRewrite } from "../compaction-source";
 import type { ImageContent, Message, UserMessage } from "../types";
 
 export interface NativeSourcePart {
 	entryId: string;
+	/** Original-submission coordinates; absent means ordinary delivered content. */
+	projection?: "original";
 	order: number;
 	blockIndex: number | string;
 	coverage: "full" | "partial" | "derived";
@@ -44,6 +46,7 @@ const nativePositionSchema = type("number.integer").narrow(value => value >= 0);
 const nativeRangeSchema = type({ start: nativePositionSchema, end: nativePositionSchema }).narrow(range => range.end >= range.start);
 const nativeSourcePartSchema: FluentType<NativeSourcePart> = type({
 	entryId: "string",
+	"projection?": "'original' | undefined",
 	order: type("number").narrow(Number.isFinite),
 	blockIndex: nativePositionSchema.or(type("string")),
 	coverage: "'full' | 'partial' | 'derived'",
@@ -235,12 +238,14 @@ export function bindMessageSource(
 	message: Message | { role: "custom"; content: UserMessage["content"] },
 	entryId: string,
 	order: number,
+	projection?: "original",
 ): void {
 	sourceBindingGeneration++;
 	const parts: NativeSourcePart[] = [];
 	const bind = (block: object, blockIndex: number | string, text?: string, image = false): void => {
 		const part: NativeSourcePart = {
 			entryId,
+			...(projection ? { projection } : {}),
 			order,
 			blockIndex,
 			coverage: "full",
@@ -369,7 +374,7 @@ function occurrenceKey(item: object): string | object {
 	if (origin?.kind === "aggregate") return JSON.stringify(["aggregate", origin.compactionEntryId]);
 	if (origin?.kind !== "source" || origin.parts.length === 0) return item;
 	return JSON.stringify(origin.parts.map(part => [
-		part.entryId, part.order, part.blockIndex, part.coverage, part.representation,
+		compactionSourceKey(part), part.order, part.blockIndex, part.coverage, part.representation,
 		part.sourceSpan?.start, part.sourceSpan?.end, part.transportSpan?.start, part.transportSpan?.end,
 		part.transportBlockIndex, part.status ?? "exact-current", part.currentBlockIndex ?? part.blockIndex,
 		(part.currentSourceSpan ?? part.sourceSpan)?.start, (part.currentSourceSpan ?? part.sourceSpan)?.end,
@@ -420,9 +425,9 @@ export function mergeSourceHistory<T extends object>(prefix: readonly T[], histo
 
 /** Remap current correspondence only; never rewrite captured native bytes or source coordinates. */
 export function remapNativeItemOrigins(itemOrigins: readonly NativeItemOrigin[], rewrites: readonly SourceRewrite[]): NativeItemOrigin[] {
-	const byEntry = new Map(rewrites.map(rewrite => [rewrite.entryId, rewrite]));
+	const byEntry = new Map(rewrites.map(rewrite => [compactionSourceKey(rewrite), rewrite]));
 	const remapPart = (part: NativeSourcePart): NativeSourcePart[] => {
-		const rewrite = byEntry.get(part.entryId);
+		const rewrite = byEntry.get(compactionSourceKey(part));
 		if (!rewrite || part.status === "historical-not-current" || part.status === "unknown") return [part];
 		const historical = (status: "historical-not-current" | "unknown"): NativeSourcePart[] => {
 			const { currentSourceSpan: _current, currentBlockIndex: _block, currentSourceLength: _length, ...captured } = part;
@@ -479,7 +484,7 @@ export function remapNativeItemOrigins(itemOrigins: readonly NativeItemOrigin[],
 	};
 	return itemOrigins.map(origin => {
 		const parts = origin.kind === "source" ? origin.parts : origin.kind === "aggregate" ? origin.coveredSources : undefined;
-		if (!parts || !parts.some(part => byEntry.has(part.entryId))) return origin;
+		if (!parts || !parts.some(part => byEntry.has(compactionSourceKey(part)))) return origin;
 		const mapped = parts.flatMap(remapPart);
 		return origin.kind === "source" ? { ...origin, parts: mapped } : { ...origin, coveredSources: mapped };
 	});

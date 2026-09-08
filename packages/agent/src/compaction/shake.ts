@@ -26,6 +26,8 @@ import {
 } from "./tool-protection";
 
 export interface ShakeConfig {
+	/** Current policy-admitted source members, including complete assistant/tool atoms. */
+	protectedSourceEntryIds?: Pick<ReadonlySet<string>, "has">;
 	/** Keep the most recent context tokens (across all entries) intact. */
 	protectTokens: number;
 	/** Only shake when total estimated savings meets this threshold. */
@@ -342,7 +344,7 @@ export function collectShakeRegions(entries: SessionEntry[], tokenizer: Tokenize
 	const regions: ShakeRegion[] = [];
 	for (let i = 0; i < n; i++) {
 		const entry = entries[i];
-		if (i < boundaryIndex) continue;
+		if (i < boundaryIndex || config.protectedSourceEntryIds?.has(entry.id)) continue;
 		const toolResult = getToolResultMessage(entry);
 		// Useless-flagged results carry no information once consumed; they are
 		// eligible even inside the protect-recent window.

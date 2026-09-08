@@ -16,6 +16,8 @@ export interface SourceAtomicGroup {
 
 export interface SourceMessage<TMessage> {
 	entryId: string;
+	/** Original submission differs from delivered message; absent means delivery coordinates. */
+	projection?: "original";
 	/** Position in the frozen active, post-reset ancestry, not a timestamp. */
 	order: number;
 	message: TMessage;
@@ -24,6 +26,7 @@ export interface SourceMessage<TMessage> {
 
 export interface SourceCoverageRun {
 	entryId: string;
+	projection?: "original";
 	order: number;
 	atomicGroup?: SourceAtomicGroup;
 	/** Coordinates when the artifact was produced; never rewritten. */
@@ -41,6 +44,7 @@ export type SourceLayoutPart =
 	| {
 			kind: "original-image";
 			entryId: string;
+			projection?: "original";
 			order: number;
 			/** Immutable source block at capture. */
 			blockIndex: number;
@@ -50,6 +54,7 @@ export type SourceLayoutPart =
 	| {
 			kind: "source";
 			entryId: string;
+			projection?: "original";
 			order: number;
 			/** Current source blocks/ranges; absence means the complete original atom member. */
 			spans?: SourceBlockRange[];
@@ -88,6 +93,13 @@ export interface SourceBlockRewrite {
 
 export interface SourceRewrite {
 	entryId: string;
+	/** Coordinate space changed by this rewrite; absent means delivered message. */
+	projection?: "original";
 	/** Omission means no usable positional map: current coverage becomes unknown. */
 	blocks?: SourceBlockRewrite[];
+}
+
+/** Identity within one source projection; normal journal IDs are unchanged. */
+export function compactionSourceKey(source: { entryId: string; projection?: "original" }): string {
+	return source.projection === "original" ? `original:${source.entryId}` : source.entryId;
 }

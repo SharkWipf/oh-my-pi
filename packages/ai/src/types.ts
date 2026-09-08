@@ -901,7 +901,24 @@ export interface ProviderInputTransformation {
 	[key: string]: unknown;
 }
 
+/** Host-recorded producer; absence means unknown, independent of wire role. */
+export type UserMessageProducer =
+	| { type: "human" }
+	| { type: "tool"; name: string; toolCallId?: string }
+	| { type: "extension"; name?: string }
+	| { type: "generated"; name?: string };
+
+/** Host input before command expansion or image normalization; local journal metadata only. */
+export interface OriginalSubmission {
+	text: string;
+	images?: ImageContent[];
+	imageLinks?: (string | undefined)[];
+	compactionOverride?: "keep" | "exclude";
+}
+
 export interface UserMessage {
+	originalSubmission?: OriginalSubmission;
+	producer?: UserMessageProducer;
 	role: "user";
 	content: string | (TextContent | ImageContent)[];
 	/** True if the message was injected by the system (e.g., auto-continue). */

@@ -17,6 +17,8 @@ import {
 import { splitReadSelector } from "./utils";
 
 export interface PruneConfig {
+	/** Current policy-admitted source members, including complete assistant/tool atoms. */
+	protectedSourceEntryIds?: Pick<ReadonlySet<string>, "has">;
 	/** Keep the most recent tool output tokens intact. */
 	protectTokens: number;
 	/** Only prune if total savings meets this threshold. */
@@ -80,6 +82,8 @@ export const USELESS_NOTICE = "[Uneventful result elided]";
 export type SupersedeKeyFn = (toolName: string, args: Record<string, unknown>) => string | undefined;
 
 export interface SupersedePruneConfig {
+	/** Current policy-admitted source members, including complete assistant/tool atoms. */
+	protectedSourceEntryIds?: Pick<ReadonlySet<string>, "has">;
 	/** Supersede key function; results sharing a key supersede older ones. */
 	supersedeKey?: SupersedeKeyFn;
 	/** Also prune results flagged useless by their tool. Default false. */
@@ -286,7 +290,9 @@ export function pruneSupersededToolResults(
 		// Provider cache is cold (idle exceeds the retention TTL), so re-writing
 		// the sent region costs nothing. Entries before the compaction boundary
 		// are summarized away and never sent — skip them to avoid pointless churn.
-		toPrune = candidates.filter(candidate => candidate.index >= boundaryIndex);
+		toPrune = candidates.filter(
+			candidate => candidate.index >= boundaryIndex && !config.protectedSourceEntryIds?.has(candidate.entry.id),
+		);
 	} else {
 		const suffixTokenLimit = config.suffixTokenLimit ?? DEFAULT_SUFFIX_TOKEN_LIMIT;
 		// suffixTokens[i] = estimated tokens of all messages strictly after entry i.
@@ -295,7 +301,10 @@ export function pruneSupersededToolResults(
 		// at/after the compaction boundary.
 		const suffixTokens = computeMessageSuffixTokens(entries, tokenizer);
 		toPrune = candidates.filter(
-			candidate => candidate.index >= boundaryIndex && suffixTokens[candidate.index] <= suffixTokenLimit,
+			candidate =>
+				candidate.index >= boundaryIndex &&
+				suffixTokens[candidate.index] <= suffixTokenLimit &&
+				!config.protectedSourceEntryIds?.has(candidate.entry.id),
 		);
 	}
 	if (toPrune.length === 0) return { prunedCount: 0, tokensSaved: 0 };
@@ -378,7 +387,7 @@ export function pruneToolOutputs(
 		// still-cached copy; compaction/shake reclaim those when they rebuild.
 		const inWarmPrefix =
 			messageSuffix !== undefined && cacheWarmSuffixTokens !== undefined && messageSuffix[i] > cacheWarmSuffixTokens;
-		if (inWarmPrefix || i < boundaryIndex) {
+		if (inWarmPrefix || i < boundaryIndex || config.protectedSourceEntryIds?.has(entry.id)) {
 			accumulatedTokens += tokens;
 			continue;
 		}
