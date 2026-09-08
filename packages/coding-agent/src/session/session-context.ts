@@ -248,60 +248,56 @@ export function buildSessionContext(
 	}
 	path.reverse();
 
-	// Extract settings and find compaction
-	let thinkingLevel: string | undefined = "off";
-	let configuredThinkingLevel: string | undefined;
-	let serviceTier: ServiceTierByFamily | undefined;
-	const models: Record<string, string> = {};
-	let compaction: CompactionEntry | null = null;
-	const injectedTtsrRulesSet = new Set<string>();
-	let mode = "none";
-	let modeData: Record<string, unknown> | undefined;
-	// Track whether an explicit `model_change` with role="default" has been
-	// seen on this path. Once a user (or the agent itself) records an
-	// explicit default, later assistant-message inference must NOT overwrite
-	// it: temporary fallbacks (retry fallback, context promotion) and
-	// server-side model downgrades both produce assistant messages tagged
-	// with the wrong model id, which previously clobbered the user's pick on
-	// resume (issue #849).
-	let hasExplicitDefaultModel = false;
+	return buildSessionContextFromPath(path, options);
+}
 
-	for (const entry of path) {
-		if (entry.type === "thinking_level_change") {
-			thinkingLevel = entry.thinkingLevel ?? "off";
-			configuredThinkingLevel = entry.configured ?? entry.thinkingLevel ?? undefined;
-		} else if (entry.type === "model_change") {
-			// New format: { model: "provider/id", role?: string }
-			if (entry.model) {
-				const role = entry.role ?? "default";
-				models[role] = entry.model;
-				if (role === "default") {
-					hasExplicitDefaultModel = true;
-				}
-			}
-		} else if (entry.type === "service_tier_change") {
-			serviceTier = coerceServiceTierByFamily(entry.serviceTier);
-		} else if (entry.type === "message" && entry.message.role === "assistant") {
-			// Legacy fallback: infer default model from assistant messages only
-			// when no explicit `model_change` (role=default) entry has been
-			// recorded yet. Newer sessions always record an explicit default
-			// model_change at the start of the conversation, so this branch is
-			// only used to keep pre-model_change sessions working.
-			if (!hasExplicitDefaultModel) {
-				models.default = `${entry.message.provider}/${entry.message.model}`;
-			}
-		} else if (entry.type === "compaction") {
-			compaction = entry;
-		} else if (entry.type === "ttsr_injection") {
-			// Collect injected TTSR rule names
-			for (const ruleName of entry.injectedRules) {
-				injectedTtsrRulesSet.add(ruleName);
-			}
-		} else if (entry.type === "mode_change") {
-			mode = entry.mode;
-			modeData = entry.data;
-		}
+/** Branch control state, independent of the retained message suffix. */
+export interface SessionContextControlState {
+	thinkingLevel: string | undefined;
+	configuredThinkingLevel?: string;
+	serviceTier?: ServiceTierByFamily;
+	models: Record<string, string>;
+	injectedTtsrRules: Set<string>;
+	mode: string;
+	modeData?: Record<string, unknown>;
+	hasExplicitDefaultModel: boolean;
+}
+
+export function createSessionContextControlState(): SessionContextControlState {
+	return {
+		thinkingLevel: "off",
+		models: {},
+		injectedTtsrRules: new Set(),
+		mode: "none",
+		hasExplicitDefaultModel: false,
+	};
+}
+
+export function cloneSessionContextControlState(state: SessionContextControlState): SessionContextControlState {
+	return { ...state, models: { ...state.models }, injectedTtsrRules: new Set(state.injectedTtsrRules) };
+}
+
+/** Fold exactly the persisted controls used by both full and bounded context construction. */
+export function applySessionContextControlEntry(state: SessionContextControlState, entry: SessionEntry): void {
+	if (entry.type === "thinking_level_change") {
+		state.thinkingLevel = entry.thinkingLevel ?? "off";
+		state.configuredThinkingLevel = entry.configured ?? entry.thinkingLevel ?? undefined;
+	} else if (entry.type === "model_change" && entry.model) {
+		const role = entry.role ?? "default";
+		state.models[role] = entry.model;
+		if (role === "default") state.hasExplicitDefaultModel = true;
+	} else if (entry.type === "service_tier_change") {
+		state.serviceTier = coerceServiceTierByFamily(entry.serviceTier);
+	} else if (entry.type === "message" && entry.message.role === "assistant") {
+		// Explicit default choices survive temporary serving-model fallbacks.
+		if (!state.hasExplicitDefaultModel) state.models.default = `${entry.message.provider}/${entry.message.model}`;
+	} else if (entry.type === "ttsr_injection") {
+		for (const rule of entry.injectedRules) state.injectedTtsrRules.add(rule);
+	} else if (entry.type === "mode_change") {
+		state.mode = entry.mode;
+		state.modeData = entry.data;
 	}
+}
 
 /** Cold journal-index facts needed when omitted ancestry is absent from a bounded path. */
 export interface SessionContextSourceInventory {
@@ -309,7 +305,6 @@ export interface SessionContextSourceInventory {
 	orders: ReadonlyMap<string, number>;
 	total: number;
 }
-
 /** Render a resolved chronological path with optional already-folded branch controls. */
 export function buildSessionContextFromPath(
 	path: SessionEntry[],
@@ -789,7 +784,7 @@ export function buildSessionContextFromPath(
 		cacheMissExplainedAt: options?.transcript ? cacheMissExplainedAt : undefined,
 		thinkingLevel,
 		configuredThinkingLevel,
-		serviceTier,
+		serviceTier: controlState && serviceTier ? { ...serviceTier } : serviceTier,
 		models,
 		injectedTtsrRules,
 		mode,

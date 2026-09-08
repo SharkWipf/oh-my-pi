@@ -399,11 +399,17 @@ class SessionEntryIndex {
 		this.#labels.clear();
 		this.#leaf = null;
 		this.#usage = emptyUsageStatistics();
+		this.#assistantUsage = emptyUsageStatistics();
+		this.#fold = this.#emptyFold();
+		this.#boundaryFold = undefined;
 	}
 
 	rebuild(entries: readonly SessionEntry[]): void {
 		this.clear();
+		this.#rebuilding = true;
 		for (const entry of entries) this.insert(entry);
+		this.#rebuilding = false;
+		this.branchFold();
 	}
 
 	insert(entry: SessionEntry): void {
@@ -419,7 +425,13 @@ class SessionEntryIndex {
 			else this.#labels.delete(entry.targetId);
 		}
 
-		addUsage(this.#usage, entryUsage(entry));
+		const usage = entryUsage(entry);
+		addUsage(this.#usage, usage);
+		if (entry.type === "message" && entry.message.role === "assistant") addUsage(this.#assistantUsage, usage);
+		if (!this.#rebuilding) {
+			if (entry.parentId === this.#fold.id) this.#foldEntry(entry);
+			else if (entry.type === "compaction" || entry.type === "reset_boundary") this.branchFold();
+		}
 	}
 
 	has(id: string): boolean {
@@ -2199,6 +2211,11 @@ export class SessionManager {
 		return this.#index.usageSnapshot();
 	}
 
+	/** Cumulative top-level assistant spend, excluding task and background model usage. */
+	getAssistantUsageStatistics(): UsageStatistics {
+		return this.#index.assistantUsageSnapshot();
+	}
+
 	/**
 	 * Open a new per-turn budget window: snapshot the cumulative output baseline,
 	 * reset the eval-subagent counter, and set the (optional) ceiling.
@@ -2706,14 +2723,7 @@ export class SessionManager {
 	 */
 	getCredentialPins(): Map<string, { hash: string; lastUsedAt: number }> {
 		const pins = new Map<string, { hash: string; lastUsedAt: number }>();
-		for (const entry of this.getBranch()) {
-			if (entry.type === "credential_pin") {
-				pins.set(entry.provider, { hash: entry.hash, lastUsedAt: new Date(entry.timestamp).getTime() });
-			} else if (entry.type === "message" && entry.message.role === "assistant") {
-				const pin = pins.get(entry.message.provider);
-				if (pin) pin.lastUsedAt = Math.max(pin.lastUsedAt, entry.message.timestamp);
-			}
-		}
+		for (const [provider, pin] of this.#index.branchFold().pins) pins.set(provider, { ...pin });
 		return pins;
 	}
 

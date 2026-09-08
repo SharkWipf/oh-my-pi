@@ -20,6 +20,13 @@ For a prepared provider `Context`, `getInlineFrameAccounting(image)` and `getInl
 Count the transformed system-prompt stub and emitted text, not the replaced prompt. When starting from `Tokenizer.countMessages`, replace each inline image baseline with its frame estimate by adding only `estimatedTokens - IMAGE_TOKEN_ESTIMATE`. Irreducible prompt accounting includes only the `system`/`context` frames and notes, not ordinary history or tool-result frames.
 
 Facts use the existing source-origin sidecar and survive explicit image-normalization and blob-decoration clones. Arbitrary untracked clones, changed image/text fields, invalidated hook output, and persisted/reloaded origin maps do not provide current inline facts. Inspect the actual prepared pre-hook context; do not infer ownership from equal text or treat missing facts as a known zero cost.
+## Long-session runtime reads
+
+`SessionManager` keeps cumulative usage in its existing journal index. `getUsageStatistics()` includes task and background model usage; `getAssistantUsageStatistics()` is the top-level assistant-only subtotal displayed by the footer. Branch navigation does not reset either cumulative total.
+
+Credential pins and retained-context controls use one active branch fold and one reset/compaction checkpoint. Recent sibling branches reuse that checkpoint; navigating to unrelated older history may still require a full ancestry walk. `buildSessionContext({ transcript: true })` intentionally retains full-history export semantics. No historical messages are evicted by these optimizations.
+
+After modifying persisted entries in place, call `await sessionManager.rewriteEntries()` before reading derived state. It rebuilds the index while preserving the selected leaf, including for in-memory sessions. Returned credential maps and usage snapshots may be changed without changing the index.
 
 ## Memory backends
 

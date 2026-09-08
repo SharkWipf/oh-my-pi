@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Added a protected indexed child-removal seam and overridable child-array accessors so transcript containers can track public mutations without rescanning committed history.
 ## [18.1.15] - 2026-09-08
 
 ### Fixed
