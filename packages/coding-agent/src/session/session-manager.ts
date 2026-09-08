@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import type { CompactionDiagnostics } from "@oh-my-pi/pi-agent-core/compaction/diagnostics";
 import { getCompactionSourceRepresentation, type SourceRewrite } from "@oh-my-pi/pi-agent-core/compaction/source";
+
 import * as path from "node:path";
 import type {
 	ImageContent,

@@ -1,5 +1,7 @@
 import type {
 	ImageContent,
+	OriginalSubmission,
+	UserMessageProducer,
 	Message,
 	MessageAttribution,
 	ProviderPayload,
@@ -18,8 +20,9 @@ const HANDOFF_SUMMARY_TEMPLATE = handoffSummaryContextPrompt;
 const BRANCH_SUMMARY_TEMPLATE = branchSummaryContextPrompt;
 
 export interface CustomMessage<T = unknown> {
-	/** Host capture identity, retained through custom skill delivery and queued replay. */
-	sourceCaptureId?: string;
+	/** Original host input, retained through custom skill delivery and queued replay. */
+	originalSubmission?: OriginalSubmission;
+	producer?: UserMessageProducer;
 	imageLinks?: (string | undefined)[];
 	compactionOverride?: "keep" | "exclude";
 	role: "custom";

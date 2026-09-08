@@ -40,17 +40,10 @@ import type { OutputMeta } from "../tools/output-meta";
 import { formatOutputNotice } from "../tools/output-meta";
 import { titleTextFromSkillPrompt } from "./skill-title-input";
 
-/** Host-recorded producer, independent of role and billing attribution. Absence means unknown. */
-export type UserMessageProducer =
-	| { type: "human" }
-	| { type: "tool"; name: string; toolCallId?: string }
-	| { type: "extension"; name?: string }
-	| { type: "generated"; name?: string };
-
 declare module "@oh-my-pi/pi-ai" {
 	interface UserMessage {
-		/** Local provenance only; never a provider role, retention rule, or human-authorship inference. */
-		producer?: UserMessageProducer;
+		imageLinks?: (string | undefined)[];
+		compactionOverride?: "keep" | "exclude";
 	}
 }
 
