@@ -3,7 +3,7 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-
+import { getOriginalSourceMessage } from "../src/session/messages";
 import { SessionMaintenance, type SessionMaintenanceHost } from "../src/session/session-maintenance";
 import { SessionManager } from "../src/session/session-manager";
 import { MemorySessionStorage, type SessionStorageWriter } from "../src/session/session-storage";
@@ -77,7 +77,7 @@ function fixture() {
 		sessionId: () => manager.getSessionId(),
 		compactionOwnership: () => ownership,
 		compactionPolicyIdentity: () => policy,
-		compactionSourceSelection: async () => ({}),
+		compactionSourceSelection: async () => ({ originalSourceMessage: getOriginalSourceMessage }),
 
 		isDisposed: () => false,
 		isGeneratingHandoff: () => false,
