@@ -1446,11 +1446,11 @@ export class Agent {
 			},
 			beforeModelCall:
 				this.#beforeModelCall || this.#additionalBeforeModelCalls.size > 0
-					? async (context, signal) => {
-							const result = (await this.#beforeModelCall?.(context, signal)) || undefined;
+					? async (context, signal, request) => {
+							const result = (await this.#beforeModelCall?.(context, signal, request)) || undefined;
 							if (result?.stop) return result;
 							for (const callback of this.#additionalBeforeModelCalls) {
-								const callbackResult = (await callback(context, signal)) || undefined;
+								const callbackResult = (await callback(context, signal, request)) || undefined;
 								if (callbackResult?.stop) return callbackResult;
 							}
 							return undefined;
