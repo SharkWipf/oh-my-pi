@@ -970,6 +970,48 @@ test("only accepted live delivery acquires a frozen hold; disable and bypass nev
 	expect(owner.status({ includeLedger: true }).snapshot.sources.map(source => source.key)).toContain(cold.source.key);
 });
 
+test("exact literal actions finish during cold indexing and still reject unavailable originals", async () => {
+	const harness = createHarness();
+	const owner = harness.session.requirements;
+	const text = "Preserve the complete selected requirement while unrelated catalog indexing waits.";
+	const captured = await capture(harness, text);
+	harness.manager.appendMessage({ role: "user", content: "Unrelated cold source.", timestamp: Date.now() });
+	const entered = Promise.withResolvers<void>();
+	const release = Promise.withResolvers<void>();
+	const iterate = harness.manager.iterateRequirementsSources.bind(harness.manager);
+	harness.manager.iterateRequirementsSources = async function* (...args) {
+		entered.resolve();
+		await release.promise;
+		return yield* iterate(...args);
+	};
+	const catalog = owner.observeCommittedSources();
+	await entered.promise;
+	const action = {
+		kind: "literal-adopt" as const, sourceKey: captured.source.key, unitId: captured.source.units[0]!.id,
+		scope: { kind: "session" as const, sessionId: harness.manager.getSessionId(), epoch: captured.source.epoch },
+	};
+	let timeout: ReturnType<typeof setTimeout> | undefined;
+	const admission = owner.applyOperatorAction(action);
+	try {
+		const result = await Promise.race([admission, new Promise<never>((_resolve, reject) => {
+			timeout = setTimeout(() => reject(new Error("Exact action waited for the unrelated cold catalog")), 2000);
+		})]);
+		expect(result).toMatchObject({ status: "accepted" });
+		await harness.session.prompt("Execute the selected requirement.", { synthetic: true });
+		await harness.session.agent.waitForIdle();
+		expect(harness.calls.map(call => requirementStatements(call))).toEqual([[text]]);
+		expect(owner.status().sourceCatalog).toBe("observing");
+		expect(owner.status().receipt?.coverageComplete).toBe(false);
+		harness.manager.invalidateRequirementsSources([captured.entryId]);
+		await expect(owner.applyOperatorAction(action)).rejects.toThrow("unavailable");
+	} finally {
+		clearTimeout(timeout);
+		release.resolve();
+		await catalog;
+		await admission;
+	}
+});
+
 test("cold catalog never blocks an ordinary provider request or acquires a live hold", async () => {
 	const manager = SessionManager.inMemory("/requirements-cold-catalog");
 	manager.appendMessage({ role: "user", content: "Cold requirement remains inspectable.", timestamp: 1, producer: { type: "human" } });
