@@ -7,10 +7,7 @@ function queuedTextContent(message: AgentMessage): string | undefined {
 	if (!("content" in message)) return undefined;
 	const content = message.content;
 	if (typeof content === "string") return content;
-	for (const part of content) {
-		if (part.type === "text") return part.text;
-	}
-	return undefined;
+	return content.filter(part => part.type === "text").map(part => part.text).join("");
 }
 
 function queuedImageContent(message: AgentMessage): ImageContent[] | undefined {

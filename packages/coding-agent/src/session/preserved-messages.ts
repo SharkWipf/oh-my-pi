@@ -9,6 +9,7 @@ import {
 	USER_MESSAGE_CLASSIFICATION_CUSTOM_TYPE,
 	INVALIDATED_USER_MESSAGE_CLASSIFICATION_CUSTOM_TYPE,
 	decodeCompactionMessageOverride,
+	parseCompactionOverridePrompt,
 	unpackPreservedUserMessageClassifications,
 	decodePreservedUserMessageClassifications,
 	type PreservationLimit,
@@ -419,7 +420,15 @@ export class PreservedMessageQuery {
 	#entry(position: number): SessionMessageEntry | undefined {
 		const index = position + this.#offset;
 		const entry = index < this.#baseLength ? this.#entries[index] : this.#appended[index - this.#baseLength];
-		if (entry?.type === "message") return entry;
+		if (entry?.type === "message") {
+			const message = entry.message;
+			if (message.role !== "user" || !message.originalSubmission) return entry;
+			const original = message.originalSubmission;
+			const text = message.compactionOverride !== undefined
+				? parseCompactionOverridePrompt(original.text)?.text ?? original.text : original.text;
+			return { ...entry, message: { ...message, providerPayload: undefined, content:
+				original.images?.length ? [{ type: "text", text }, ...original.images] : text } };
+		}
 		if (entry?.type !== "custom_message" || !isCustomMessageContent(entry.content)) return undefined;
 		const normalized = normalizeCustomMessagePayload(entry);
 		if (!normalized.display || normalized.attribution !== "user") return undefined;

@@ -367,7 +367,7 @@ import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { buildSessionMetadata } from "./session-metadata";
 import { SessionMessageClassifier, type MessageClassificationListener } from "./session-message-classifier";
 import { PreservedMessageQuery, type PreservationSelection, readPreservedUserMessageClassificationMasks } from "./preserved-messages";
-import { parseCompactionOverridePrompt, readPreservationPolicySettings, type PreservationAction } from "./preserved-message-settings";
+import { parseCompactionOverridePrompt, restoreCompactionOverridePrompt, readPreservationPolicySettings, type PreservationAction } from "./preserved-message-settings";
 import { SessionPreservation, ensurePreservedMessageStateOnDisk, type PreservedMessageOverrideResetSnapshot } from "./session-preservation";
 import type { CompactionSourceSelection } from "@oh-my-pi/pi-agent-core/compaction";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
@@ -2537,6 +2537,7 @@ export class AgentSession {
 				return;
 			}
 			this.#emit(event);
+
 		} finally {
 			releaseGate();
 		}
@@ -5675,7 +5676,7 @@ export class AgentSession {
 			const entry = this.sessionManager.getEntry(id);
 			const order = query.positionOf(id);
 			if (!candidate || entry?.type !== "message" || order === undefined) throw new Error("Selected source is no longer available.");
-			selectedSources.push({ entryId: id, order, message: entry.message,
+			selectedSources.push({ entryId: id, order, message: query.inspectCandidate(id, true)!.message,
 				spans: candidate.spans.map(span => ({ blockIndex: span.blockIndex, start: span.text?.start ?? 0, end: span.text?.end ?? 1 })) });
 		}
 		const admittedNonUserSources: NonNullable<CompactionSourceSelection["admittedNonUserSources"]>[number][] = [];
@@ -9721,6 +9722,7 @@ export class AgentSession {
 	async branch(entryId: string): Promise<{
 		selectedText: string;
 		selectedImages: ImageContent[];
+		sourceInput?: RestoredQueuedMessage;
 		cancelled: boolean;
 	}> {
 		this.#messageClassifier.pause();
@@ -9732,8 +9734,9 @@ export class AgentSession {
 			throw new Error("Invalid entry ID for branching");
 		}
 
-		const selectedText = this.#extractUserMessageText(selectedEntry.message.content);
-		const selectedImages = this.#extractUserMessageImages(selectedEntry.message.content);
+		const sourceInput = toRestoredQueuedMessage(selectedEntry.message);
+		const selectedText = sourceInput.originalSubmission ? sourceInput.text : restoreCompactionOverridePrompt(sourceInput.text, sourceInput.compactionOverride);
+		const selectedImages = sourceInput.images ?? [];
 
 		let skipConversationRestore = false;
 
@@ -9745,7 +9748,7 @@ export class AgentSession {
 			})) as SessionBeforeBranchResult | undefined;
 
 			if (result?.cancel) {
-				return { selectedText, selectedImages, cancelled: true };
+				return { selectedText, selectedImages, sourceInput, cancelled: true };
 			}
 			skipConversationRestore = result?.skipConversationRestore ?? false;
 		}
@@ -9814,7 +9817,7 @@ export class AgentSession {
 			this.#advisors.reattachRecorderFeeds();
 			advisorRecordersDetached = false;
 			await this.#reconcileModeAfterBranch();
-			return { selectedText, selectedImages, cancelled: false };
+			return { selectedText, selectedImages, sourceInput, cancelled: false };
 		} finally {
 			if (advisorRecordersDetached) {
 				if (sessionTransitioned) this.#advisors.resetSessionState();
@@ -9997,6 +10000,7 @@ export class AgentSession {
 		editorText?: string;
 		/** Image attachments of the target user message, parallel to the positional `[Image #N]` markers in {@link editorText}. */
 		editorImages?: ImageContent[];
+		sourceInput?: RestoredQueuedMessage;
 		cancelled: boolean;
 		aborted?: boolean;
 		summaryEntry?: BranchSummaryEntry;
@@ -10176,6 +10180,7 @@ export class AgentSession {
 		let newLeafId: string | null;
 		let editorText: string | undefined;
 		let editorImages: ImageContent[] | undefined;
+		let sourceInput: RestoredQueuedMessage | undefined;
 		// Set when the second-pass `ask` re-answer branch below actually commits a
 		// new sibling answer — the trigger for resuming the agent afterwards so the
 		// model consumes it, mirroring a live `ask` completion (issue #6483).
@@ -10184,9 +10189,9 @@ export class AgentSession {
 		if (targetEntry.type === "message" && targetEntry.message.role === "user") {
 			// User message: leaf = parent (null if root), text goes to editor
 			newLeafId = targetEntry.parentId;
-			editorText = this.#extractUserMessageText(targetEntry.message.content);
-			const targetImages = this.#extractUserMessageImages(targetEntry.message.content);
-			if (targetImages.length > 0) editorImages = targetImages;
+			sourceInput = toRestoredQueuedMessage(targetEntry.message);
+			editorText = sourceInput.originalSubmission ? sourceInput.text : restoreCompactionOverridePrompt(sourceInput.text, sourceInput.compactionOverride);
+			editorImages = sourceInput.images;
 		} else if (targetEntry.type === "custom_message" && targetEntry.customType !== SKILL_PROMPT_MESSAGE_TYPE) {
 			// Custom message: leaf = parent (null if root), text goes to editor
 			newLeafId = targetEntry.parentId;
@@ -10288,6 +10293,7 @@ export class AgentSession {
 			return {
 				editorText,
 				editorImages,
+				sourceInput,
 				cancelled: false,
 				summaryEntry,
 				sessionContext: rawContext,
@@ -10297,6 +10303,7 @@ export class AgentSession {
 		return {
 			editorText,
 			editorImages,
+			sourceInput,
 			cancelled: false,
 			summaryEntry,
 			sessionContext: stateContext,
@@ -10416,13 +10423,7 @@ export class AgentSession {
 		return "";
 	}
 
-	/** Image parts of a stored user message, in submission order — index N-1 backs the
-	 *  `[Image #N]` marker in the message text, so restoring them alongside the text keeps
-	 *  positional markers resolvable on resubmit. */
-	#extractUserMessageImages(content: UserMessage["content"]): ImageContent[] {
-		if (!Array.isArray(content)) return [];
-		return content.filter((c): c is ImageContent => c.type === "image");
-	}
+
 
 	/**
 	 * Get session statistics.
