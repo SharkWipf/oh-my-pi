@@ -850,6 +850,10 @@ export class AcpAgent implements Agent {
 			}
 			this.#throwIfRecordClosed(record);
 
+			const originalText = params.prompt
+				.filter(block => block.type === "text")
+				.map(block => block.text)
+				.join("\n\n");
 			const converted = this.#convertPromptBlocks(params.prompt);
 			const pendingPrompt = Promise.withResolvers<PromptResponse>();
 			record.promptTurn = {
@@ -872,7 +876,7 @@ export class AcpAgent implements Agent {
 			// guard above cannot fire and a client prompt lands on AgentSession's busy
 			// guard. Type that failure for the wire instead of letting transport.ts wrap
 			// it as a generic -32603 internal error.
-			this.#runPromptOrCommand(record, converted.text, converted.images, { text: originalText, images: originalImages }, originalText)
+			this.#runPromptOrCommand(record, converted.text, converted.images, { text: originalText, images: converted.images }, originalText)
 				.catch((error: unknown) => {
 					if (record.promptTurn !== promptTurn || promptTurn.settled) return;
 					this.#finishPrompt(
