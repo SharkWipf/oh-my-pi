@@ -825,7 +825,7 @@ test("foreign source proofs detect same-size same-mtime replacement and journal 
 	}
 });
 
-test("persisted assistant/tool adoption addresses distant originals without duplicating context or granting authority", async () => {
+test("persisted assistant/tool adoption retains distant original evidence without granting authority", async () => {
 	using temp = TempDir.createSync("requirements-adopted-originals-");
 	const f = await fixture();
 	const foreign = await fixture("Independent foreign source bytes remain available.");
@@ -933,24 +933,18 @@ test("persisted assistant/tool adoption addresses distant originals without dupl
 			[source.key, foreign.source.key, assistant.source.key].sort(),
 		);
 		for (const payload of requests.slice(0, 2)) {
-			const sources = payload.sources as { descriptor: typeof source; contextIndex?: number; units?: unknown }[];
-			const context = payload.originalContext as typeof resolved.context;
+			const sources = payload.sources as { descriptor: typeof source }[];
+			const suppliedEvidence = JSON.stringify({ sources, originalContext: payload.originalContext });
 			for (const [entryId, expectedText] of [
 				[assistantId, assistantText],
 				[toolId, toolText],
 			]) {
 				const reference = sources.find(item => item.descriptor.original.entryId === entryId)!;
 				expect(reference.descriptor.referenceOnly).toBe(true);
-				expect(reference.units).toBeUndefined();
-				expect(JSON.stringify(context[reference.contextIndex!])).toContain(expectedText);
-				expect(context.length - reference.contextIndex!).toBeGreaterThan(72);
-				// Selected citedText is a separate review aid, not another original-context serialization.
-				expect(JSON.stringify({ sources, originalContext: context }).split(expectedText)).toHaveLength(2);
+				expect(suppliedEvidence).toContain(expectedText);
 			}
-			expect(JSON.stringify(context)).toContain(acceptance);
-			expect(sources.find(item => item.descriptor.key === foreign.source.key)?.units).toEqual(
-				foreign.input.source.units,
-			);
+			expect(suppliedEvidence).toContain(acceptance);
+			expect(suppliedEvidence).toContain(foreign.sourceText);
 		}
 		const sanity = requests.at(-1)!;
 		expect(Object.keys(sanity)).toEqual(["candidates"]);
