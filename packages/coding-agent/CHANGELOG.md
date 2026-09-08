@@ -40,6 +40,7 @@
 - Long-session footer totals, credential pins, and retained-context reconstruction now reuse the session index instead of repeatedly scanning cold history. Recent sibling branches reuse a bounded control-state checkpoint; full transcript exports still include historical messages.
 - Transcript retirement and tail updates skip already committed blocks while preserving public middle-child replacements and externally assigned child arrays.
 - Compacted selected originals now retain their own text/image coordinates through reload and repeated compaction, without replacing an ordinarily retained expanded submission.
+- Fixed physical attribution joining original-input and expanded-delivery coverage solely by journal entry ID; reconstructed and prepared inventories now keep their distinct physical charges without inflating shared ownership.
 
 ## [18.1.15] - 2026-09-08
 
