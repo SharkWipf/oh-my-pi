@@ -75,6 +75,22 @@ describe("Tokenizer", () => {
 		expect(tokenizer.countMessages(messages)).toBe(4 * expected);
 	});
 
+	test("distinguishes authored images from raster frames in one compaction summary", () => {
+		const original: ImageContent = { type: "image", data: "cG5n", mimeType: "image/png" };
+		const frame: ImageContent = { ...original };
+		bindMessageSource({ role: "user", content: [original], timestamp: 0 }, "source-user", 0);
+		const mixed: AgentMessage = {
+			role: "compactionSummary",
+			summary: "",
+			blocks: [original, frame],
+			tokensBefore: 0,
+			timestamp: 0,
+		};
+		const tokenizer = new Tokenizer();
+		expect(tokenizer.countMessage(mixed)).toBe(1200 + 5024);
+		expect(tokenizer.countMessage(mixed, { excludeEncryptedReasoning: true })).toBe(1200 + 5024);
+	});
+
 	test("charges a metadata-only computer screenshot without charging content mirrors again", () => {
 		const tokenizer = new Tokenizer();
 		const screenshot: ToolResultMessage = {

@@ -42,6 +42,18 @@ The agent works with `AgentMessage`, a flexible type that can include:
 
 LLMs only understand `user`, `assistant`, and `toolResult`. The `convertToLlm` function bridges this gap by filtering and transforming messages before each LLM call.
 
+### Compaction source coverage
+
+`@oh-my-pi/pi-agent-core/compaction/source` exports the local `SourceRepresentation`
+descriptor stored in `preserveData.sourceRepresentation`. Source IDs and block/range
+coordinates identify retained content; generated summaries remain aggregates.
+`remapCompactionSourceRepresentation` applies known positional source edits without
+rerendering historical artifacts. Journal owners must apply it to every referencing
+compaction leaf in the same rewrite that publishes source changes. Snapshot and
+archive offsets stay historical; only intact ranges retain exact current coverage.
+Explicit image deletion removes the corresponding original-image reference.
+These descriptors are local metadata, never provider wire fields.
+
 ### Message Flow
 
 ```

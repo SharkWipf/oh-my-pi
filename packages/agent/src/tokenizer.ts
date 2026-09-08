@@ -1,4 +1,5 @@
 import type { Model } from "@oh-my-pi/pi-ai";
+import { getSourceOrigin } from "@oh-my-pi/pi-ai/utils/source-origin";
 import { visitOpenAIResponsesLogicalContent, visitOpenAIResponsesSourceContent } from "@oh-my-pi/pi-ai/utils";
 import type { ModelTokenizer } from "@oh-my-pi/pi-catalog/types";
 import * as natives from "@oh-my-pi/pi-natives";
@@ -306,7 +307,14 @@ export class Tokenizer {
 					if (message.blocks) {
 						for (const block of message.blocks) {
 							if (block.type === "text") fragments.push(block.text);
-							else extra += snapcompact.FRAME_TOKEN_ESTIMATE;
+							else {
+								const origin = getSourceOrigin(block);
+								const originalImage =
+									origin?.kind === "source" &&
+									origin.parts.length > 0 &&
+									origin.parts.every(part => part.representation === "original-image");
+								extra += originalImage ? IMAGE_TOKEN_ESTIMATE : snapcompact.FRAME_TOKEN_ESTIMATE;
+							}
 						}
 					} else if (message.images) {
 						// Snapcompact frames render at ≥1568px; providers bill the downscaled cap.
