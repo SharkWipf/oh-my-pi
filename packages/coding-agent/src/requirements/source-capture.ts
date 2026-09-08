@@ -26,7 +26,7 @@ export function requirementsUnits(content: (TextContent | ImageContent)[]): Requ
 	});
 }
 export async function captureRequirementsSources(manager: SessionManager): Promise<{
-	observations: (RequirementsObservation & { fromIntegrity: string })[];
+	observations: RequirementsObservation[];
 	sources: RequirementsSource[];
 	context: AgentMessage[];
 }> {

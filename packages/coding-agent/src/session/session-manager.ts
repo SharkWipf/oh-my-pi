@@ -2712,7 +2712,7 @@ export class SessionManager {
 	/** An explicit replay is newly accepted input; forks preserve origin on their journal entries. */
 	async retainRequirementsSource(key: string): Promise<import("@oh-my-pi/pi-ai").UserMessage> {
 		const resolved = await this.#resolveRequirementsUnits(key);
-		if (!resolved || (resolved.source.origin.kind !== "human" && resolved.source.origin.kind !== "sdk"))
+		if (!resolved || resolved.source.origin.kind !== "human")
 			throw new Error("Original authoritative requirements source is unavailable");
 		return { role: "user", content: resolved.units.map(unit => unit.image ?? { type: "text", text: unit.text ?? "" }),
 			producer: { type: "human" }, timestamp: Date.now() };
