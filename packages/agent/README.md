@@ -42,6 +42,18 @@ The agent works with `AgentMessage`, a flexible type that can include:
 
 LLMs only understand `user`, `assistant`, and `toolResult`. The `convertToLlm` function bridges this gap by filtering and transforming messages before each LLM call.
 
+### Compaction source coverage
+
+`@oh-my-pi/pi-agent-core/compaction/source` exports the local `SourceRepresentation`
+descriptor stored in `preserveData.sourceRepresentation`. Source IDs and block/range
+coordinates identify retained content; generated summaries remain aggregates.
+`remapCompactionSourceRepresentation` applies known positional source edits without
+rerendering historical artifacts. Journal owners must apply it to every referencing
+compaction leaf in the same rewrite that publishes source changes. Snapshot and
+archive offsets stay historical; only intact ranges retain exact current coverage.
+Explicit image deletion removes the corresponding original-image reference.
+These descriptors are local metadata, never provider wire fields.
+
 ### Message Flow
 
 ```
@@ -195,7 +207,7 @@ await agent.prompt({ role: "user", content: "Hello", timestamp: Date.now() });
 await agent.continue();
 ```
 
-`Tokenizer.countMessage` includes a local baseline of 1,200 tokens per original image in user, developer, assistant, tool-result, and hook messages. The baseline is exported as `IMAGE_TOKEN_ESTIMATE` from `@oh-my-pi/pi-agent-core/tokenizer`. It is not a provider invoice: image detail, dimensions, and model-specific billing remain provider-owned. A projection using a different effective image estimate must replace the included baseline (add only the difference), not charge the image again. Snapcompact frames retain their separate frame estimate.
+`Tokenizer.countMessage` counts normalized custom-message text regardless of attribution or display settings, and includes a local baseline of 1,200 tokens per original image in user, developer, custom, assistant, tool-result, and hook messages. The baseline is exported as `IMAGE_TOKEN_ESTIMATE` from `@oh-my-pi/pi-agent-core/tokenizer`. It is not a provider invoice: image detail, dimensions, and model-specific billing remain provider-owned. A projection using a different effective image estimate must replace the included baseline (add only the difference), not charge the image again. Snapcompact frames retain their separate frame estimate.
 
 Computer tool results count the screenshot in their typed provider metadata as one image, even when no content image is present. Content-image mirrors are not charged separately because computer-result serialization consumes the metadata screenshot instead. This baseline applies to both ordinary estimates and the compaction floor.
 

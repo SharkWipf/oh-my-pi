@@ -3,6 +3,7 @@ import type { AssistantMessage, ImageContent, TextContent, ToolResultMessage } f
 import { createOpenAIResponsesHistoryPayload } from "@oh-my-pi/pi-ai/utils";
 import { bindMessageSource, remapNativeItemOrigins } from "@oh-my-pi/pi-ai/utils/source-origin";
 import * as natives from "@oh-my-pi/pi-natives";
+import { createCustomMessage } from "../src/compaction/messages";
 import { Tokenizer, tokenizerEncodingForModel } from "../src/tokenizer";
 import type { AgentMessage } from "../src/types";
 
@@ -32,6 +33,26 @@ describe("tokenizerEncodingForModel", () => {
 });
 
 describe("Tokenizer", () => {
+	test("charges normalized custom source text and images an ordinary baseline", () => {
+		const tokenizer = new Tokenizer();
+		const text = "A durable custom source.";
+		const scalar = createCustomMessage("notice", text, false, undefined, "2026-09-07", "agent");
+		const illustrated = createCustomMessage(
+			"manual",
+			[
+				{ type: "text", text },
+				{ type: "image", data: "cG5n", mimeType: "image/png", detail: "high" },
+			],
+			true,
+			undefined,
+			"2026-09-07",
+			"user",
+		);
+		expect(tokenizer.countMessage(scalar)).toBe(6);
+		expect(tokenizer.countMessage(illustrated)).toBe(1206);
+		expect(tokenizer.countMessage(illustrated, { excludeEncryptedReasoning: true })).toBe(1206);
+		expect(tokenizer.countMessages([scalar, illustrated])).toBe(1212);
+	});
 	test("counts each original image once across user, developer, tool and hook content", () => {
 		const tokenizer = new Tokenizer();
 		const content: (TextContent | ImageContent)[] = [
@@ -52,6 +73,22 @@ describe("Tokenizer", () => {
 			expect(tokenizer.countMessage(message, { excludeEncryptedReasoning: true })).toBe(expected);
 		}
 		expect(tokenizer.countMessages(messages)).toBe(4 * expected);
+	});
+
+	test("distinguishes authored images from raster frames in one compaction summary", () => {
+		const original: ImageContent = { type: "image", data: "cG5n", mimeType: "image/png" };
+		const frame: ImageContent = { ...original };
+		bindMessageSource({ role: "user", content: [original], timestamp: 0 }, "source-user", 0);
+		const mixed: AgentMessage = {
+			role: "compactionSummary",
+			summary: "",
+			blocks: [original, frame],
+			tokensBefore: 0,
+			timestamp: 0,
+		};
+		const tokenizer = new Tokenizer();
+		expect(tokenizer.countMessage(mixed)).toBe(1200 + 5024);
+		expect(tokenizer.countMessage(mixed, { excludeEncryptedReasoning: true })).toBe(1200 + 5024);
 	});
 
 	test("charges a metadata-only computer screenshot without charging content mirrors again", () => {
