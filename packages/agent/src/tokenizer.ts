@@ -239,7 +239,12 @@ export class Tokenizer {
 				break;
 			}
 			case "assistant": {
-				visitOpenAIResponsesSourceContent(message, { sourceText: text => fragments.push(text), image: () => { extra += IMAGE_TOKEN_ESTIMATE; } });
+				visitOpenAIResponsesSourceContent(message, {
+					sourceText: text => fragments.push(text),
+					image: () => {
+						extra += IMAGE_TOKEN_ESTIMATE;
+					},
+				});
 				for (const block of message.content) {
 					if (block.type === "text") {
 						fragments.push(block.text);
@@ -277,7 +282,8 @@ export class Tokenizer {
 			case "hookMessage":
 			case "toolResult": {
 				// Computer serializers consume the typed screenshot, not content image mirrors.
-				const hasComputerScreenshot = message.role === "toolResult" && message.providerMetadata?.type === "computer";
+				const hasComputerScreenshot =
+					message.role === "toolResult" && message.providerMetadata?.type === "computer";
 				if (hasComputerScreenshot) extra += IMAGE_TOKEN_ESTIMATE;
 				if (typeof message.content === "string") {
 					fragments.push(message.content);
