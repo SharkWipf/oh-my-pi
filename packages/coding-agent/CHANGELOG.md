@@ -60,10 +60,6 @@
 - Original requirements evidence remains readable when unrelated conversation entries append during resolution; addressed source rewrites and lifecycle changes still invalidate the read.
 - Exact-source requirements actions no longer wait for unrelated cold catalog enumeration. Current accepted requirements can be recalled while historical catalog coverage remains explicitly incomplete.
 - Cataloging accepted originals at new locators preserves their reviewed state after evidence refresh. Completing catalog observation refreshes the next coverage receipt without rewriting earlier request receipts.
-- Long-session footer totals, credential pins, and retained-context reconstruction now reuse the session index instead of repeatedly scanning cold history. Recent sibling branches reuse a bounded control-state checkpoint; full transcript exports still include historical messages.
-- Transcript retirement and tail updates skip already committed blocks while preserving public middle-child replacements and externally assigned child arrays.
-- Compacted selected originals now retain their own text/image coordinates through reload and repeated compaction, without replacing an ordinarily retained expanded submission.
-- Fixed physical attribution joining original-input and expanded-delivery coverage solely by journal entry ID; reconstructed and prepared inventories now keep their distinct physical charges without inflating shared ownership.
 - Ordinary turns prepare preservation policy only after finding an eligible pruning victim. Full selected-user, complete non-user, and pending-live protection still applies before mutation, including source ownership checks and minimum-savings revalidation.
 ### Fixed
 

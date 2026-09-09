@@ -64,9 +64,9 @@ describe("async speculative compaction", () => {
 		options: {
 			asyncEnabled?: boolean;
 			methodOrder?: CompactionMethod[];
-			handoff?: () => Promise<void>;
 			experimental?: boolean;
 			recoveryTools?: boolean;
+			handoff?: () => Promise<void>;
 		} = {},
 	): SessionMaintenance {
 		agent = new Agent({
