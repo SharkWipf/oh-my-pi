@@ -2604,7 +2604,8 @@ function decodeReasoningEnvelope(text: string): string {
 			record.codex_item_type !== "reasoning" ||
 			typeof record.text !== "string" ||
 			Object.keys(record).length !== 4
-		) return text;
+		)
+			return text;
 		return record.text;
 	} catch {
 		return text;
@@ -2614,10 +2615,13 @@ function decodeReasoningEnvelope(text: string): string {
 // Object-like summary prefixes cannot be published until a completion boundary
 // distinguishes a protocol record from literal JSON. Keep references to the
 // existing wire accumulator, not another copy of every streamed delta.
-const pendingReasoningEnvelopes = new WeakMap<ThinkingContent, {
-	part: ResponseReasoningItem["summary"][number];
-	prefix: string;
-}>();
+const pendingReasoningEnvelopes = new WeakMap<
+	ThinkingContent,
+	{
+		part: ResponseReasoningItem["summary"][number];
+		prefix: string;
+	}
+>();
 
 // Sequential-cutoff streams may repeat the full canonical summary as later parts.
 function foldReasoningSummary(parts: ResponseReasoningItem["summary"] | undefined): string {
@@ -3367,7 +3371,13 @@ export async function processResponsesStream<TApi extends Api>(
 								| undefined);
 				if (reasoningBlock) {
 					finalizeReasoningThinking(
-						item, reasoningBlock, stream, output, contentIndexOf(reasoningBlock), undefined, entry?.rawThinking,
+						item,
+						reasoningBlock,
+						stream,
+						output,
+						contentIndexOf(reasoningBlock),
+						undefined,
+						entry?.rawThinking,
 					);
 					normalizedContentIndex = contentIndexOf(reasoningBlock);
 				}
@@ -3491,7 +3501,13 @@ export async function processResponsesStream<TApi extends Api>(
 				const item = finalItem?.type === "reasoning" ? structuredCloneJSON(finalItem) : entry.item;
 				if (finalItem) options?.onOutputItemDone?.(item);
 				finalizeReasoningThinking(
-					item, entry.block, stream, output, contentIndexOf(entry.block), undefined, entry.rawThinking,
+					item,
+					entry.block,
+					stream,
+					output,
+					contentIndexOf(entry.block),
+					undefined,
+					entry.rawThinking,
 				);
 			}
 			const shouldPromoteIncompleteToolUse =

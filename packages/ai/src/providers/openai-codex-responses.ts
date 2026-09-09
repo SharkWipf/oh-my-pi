@@ -2243,7 +2243,12 @@ class CodexStreamProcessor {
 			}
 			if (entry?.item.type === "reasoning" && entry.block?.type === "thinking") {
 				appendReasoningSummaryTextDelta(
-					entry.item, entry.block, delta, stream, output, entry.contentIndex,
+					entry.item,
+					entry.block,
+					delta,
+					stream,
+					output,
+					entry.contentIndex,
 					typeof rawEvent.summary_index === "number" ? rawEvent.summary_index : 0,
 				);
 			}
@@ -2262,15 +2267,23 @@ class CodexStreamProcessor {
 						: 0;
 				if (this.#sequentialCutoffSummaries) {
 					applyReasoningSummaryDone(
-						this.runtime.cutoffSummaries, entry.block,
-						typeof rawEvent.text === "string" ? rawEvent.text : "", summaryIndex,
-						stream, output, entry.contentIndex,
+						this.runtime.cutoffSummaries,
+						entry.block,
+						typeof rawEvent.text === "string" ? rawEvent.text : "",
+						summaryIndex,
+						stream,
+						output,
+						entry.contentIndex,
 					);
 				} else {
 					applyReasoningSummaryTextDone(
-						entry.item, entry.block,
-						typeof rawEvent.text === "string" ? rawEvent.text : "", summaryIndex,
-						stream, output, entry.contentIndex,
+						entry.item,
+						entry.block,
+						typeof rawEvent.text === "string" ? rawEvent.text : "",
+						summaryIndex,
+						stream,
+						output,
+						entry.contentIndex,
 					);
 				}
 			}
@@ -2404,14 +2417,27 @@ class CodexStreamProcessor {
 				summaryIndex++;
 			} else {
 				appendReasoningSummaryTextDelta(
-					entry.item, entry.block, delta, this.stream, this.output, entry.contentIndex, summaryIndex,
+					entry.item,
+					entry.block,
+					delta,
+					this.stream,
+					this.output,
+					entry.contentIndex,
+					summaryIndex,
 				);
 			}
 		}
 		const part = entry.item.summary?.[summaryIndex];
-		if (part) applyReasoningSummaryTextDone(
-			entry.item, entry.block, part.text, summaryIndex, this.stream, this.output, entry.contentIndex,
-		);
+		if (part)
+			applyReasoningSummaryTextDone(
+				entry.item,
+				entry.block,
+				part.text,
+				summaryIndex,
+				this.stream,
+				this.output,
+				entry.contentIndex,
+			);
 	}
 	#handleOutputItemDone(rawEvent: Record<string, unknown>): void {
 		const { runtime, output, stream } = this;
