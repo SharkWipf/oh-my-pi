@@ -238,9 +238,10 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Called at injection boundaries only (loop start and after a tool batch
 	 * fully settles), so dequeued messages are immediately injected. The
 	 * mid-batch interrupt poll uses {@link hasSteeringMessages} instead and
-	 * never consumes the queue.
+	 * never consumes the queue. The optional messages argument is the live loop
+	 * context at this injection boundary, including fully settled tool results.
 	 */
-	getSteeringMessages?: (signal?: AbortSignal) => Promise<AgentMessage[]>;
+	getSteeringMessages?: (signal?: AbortSignal, messages?: AgentMessage[]) => Promise<AgentMessage[]>;
 
 	/**
 	 * Peeks whether steering messages are queued, without consuming them.
@@ -285,9 +286,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 *
 	 * Called when the agent has no more tool calls and no steering messages.
 	 * If messages are returned, they're added to the context and the agent
-	 * continues with another turn.
+	 * continues with another turn. The messages argument is the live loop context.
 	 */
-	getFollowUpMessages?: (signal?: AbortSignal) => Promise<AgentMessage[]>;
+	getFollowUpMessages?: (signal?: AbortSignal, messages?: AgentMessage[]) => Promise<AgentMessage[]>;
 	/**
 	 * Returns non-interrupting "aside" messages to inject at a step boundary.
 	 *
@@ -296,9 +297,10 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * notifications (e.g. background-job completions, late LSP diagnostics) that
 	 * should reach the model between requests without waiting for the agent to
 	 * fully stop. Returned messages are appended to the context with normal
-	 * message events and keep the loop running so the model can react.
+	 * message events and keep the loop running so the model can react. The optional
+	 * messages and signal arguments describe the live injection boundary.
 	 */
-	getAsideMessages?: () => Promise<AsideMessage[]>;
+	getAsideMessages?: (messages?: AgentMessage[], signal?: AbortSignal) => Promise<AsideMessage[]>;
 	/**
 	 * Hook fired right before the loop would exit.
 	 *
