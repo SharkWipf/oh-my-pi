@@ -40,7 +40,17 @@ import {
 	sanitizeRehydratedOpenAIResponsesAssistantMessage,
 	stripInternalDetailsFields,
 } from "./messages";
-import { type BuildSessionContextOptions, buildSessionContext, getOpenAiRemoteCompactionPayload, type SessionContext } from "./session-context";
+import {
+	applySessionContextControlEntry,
+	type BuildSessionContextOptions,
+	buildSessionContext,
+	buildSessionContextFromPath,
+	cloneSessionContextControlState,
+	createSessionContextControlState,
+	getOpenAiRemoteCompactionPayload,
+	type SessionContext,
+	type SessionContextControlState,
+} from "./session-context";
 import {
 	type BranchSummaryEntry,
 	type CompactionEntry,
@@ -249,6 +259,12 @@ function orderedByTimestamp(a: SessionTreeNode, b: SessionTreeNode): number {
 	return new Date(a.entry.timestamp).getTime() - new Date(b.entry.timestamp).getTime();
 }
 
+interface SessionBranchFold {
+	id: string | null;
+	controls: SessionContextControlState;
+	pins: Map<string, { hash: string; lastUsedAt: number }>;
+}
+
 /**
  * Maintains the derived views over a session's entry list: id lookup, the
  * parent→children adjacency, the resolved label map, the active leaf, and the
@@ -261,9 +277,57 @@ class SessionEntryIndex {
 	#labels = new Map<string, string>();
 	#leaf: string | null = null;
 	#usage = emptyUsageStatistics();
+	// One branch fold and one applicable boundary checkpoint, never one per message.
+	// Older unrelated branches may replay ancestry; only recent siblings share this checkpoint.
+	#fold = this.#emptyFold();
+	#boundaryFold: SessionBranchFold | undefined;
+	#rebuilding = false;
+
+	#emptyFold(): SessionBranchFold {
+		return { id: null, controls: createSessionContextControlState(), pins: new Map() };
+	}
+
+	#cloneFold(fold: SessionBranchFold): SessionBranchFold {
+		const pins = new Map<string, { hash: string; lastUsedAt: number }>();
+		for (const [provider, pin] of fold.pins) pins.set(provider, { ...pin });
+		return { ...fold, controls: cloneSessionContextControlState(fold.controls), pins };
+	}
+
+	#foldEntry(entry: SessionEntry): void {
+		applySessionContextControlEntry(this.#fold.controls, entry);
+		if (entry.type === "credential_pin") {
+			this.#fold.pins.set(entry.provider, { hash: entry.hash, lastUsedAt: new Date(entry.timestamp).getTime() });
+		} else if (entry.type === "message" && entry.message.role === "assistant") {
+			const pin = this.#fold.pins.get(entry.message.provider);
+			if (pin) pin.lastUsedAt = Math.max(pin.lastUsedAt, entry.message.timestamp);
+		}
+		this.#fold.id = entry.id;
+		if (entry.type === "reset_boundary" || entry.type === "compaction") {
+			this.#boundaryFold = this.#cloneFold(this.#fold);
+		}
+	}
+
+	branchFold(fromId: string | null = this.#leaf): SessionBranchFold {
+		if (this.#fold.id === fromId) return this.#fold;
+		const pending: SessionEntry[] = [];
+		const seen = new Set<string>();
+		let cursor = fromId ? this.#entriesById.get(fromId) : undefined;
+		while (cursor && !seen.has(cursor.id) && cursor.id !== this.#fold.id && cursor.id !== this.#boundaryFold?.id) {
+			seen.add(cursor.id);
+			pending.push(cursor);
+			cursor = cursor.parentId ? this.#entriesById.get(cursor.parentId) : undefined;
+		}
+		if (cursor?.id === this.#boundaryFold?.id && this.#boundaryFold) this.#fold = this.#cloneFold(this.#boundaryFold);
+		else if (!cursor || cursor.id !== this.#fold.id) this.#fold = this.#emptyFold();
+		for (let i = pending.length - 1; i >= 0; i--) this.#foldEntry(pending[i]);
+		return this.#fold;
+	}
 
 	/** Walk only the actual replay suffix; full historical inspection still uses pathTo. */
-	contextPath(options?: BuildSessionContextOptions, fromId: string | null = this.#leaf): SessionEntry[] {
+	contextPath(options?: BuildSessionContextOptions, fromId: string | null = this.#leaf): {
+		path: SessionEntry[]; controls: SessionContextControlState;
+	} {
+		const fold = this.branchFold(fromId);
 		const path: SessionEntry[] = [];
 		const seen = new Set<string>();
 		let cursor = fromId ? this.#entriesById.get(fromId) : undefined;
@@ -286,7 +350,10 @@ class SessionEntryIndex {
 			cursor = cursor.parentId ? this.#entriesById.get(cursor.parentId) : undefined;
 		}
 		path.reverse();
-		return path;
+		// Retain only the request visible at the boundary, not its discarded turn.
+		const request = !options?.transcript && compaction ? fold.controls.rolloverUserRequest : undefined;
+		if (request && !seen.has(request.id)) path.unshift(request);
+		return { path, controls: fold.controls };
 	}
 
 	clear(): void {
@@ -295,11 +362,16 @@ class SessionEntryIndex {
 		this.#labels.clear();
 		this.#leaf = null;
 		this.#usage = emptyUsageStatistics();
+		this.#fold = this.#emptyFold();
+		this.#boundaryFold = undefined;
 	}
 
 	rebuild(entries: readonly SessionEntry[]): void {
 		this.clear();
+		this.#rebuilding = true;
 		for (const entry of entries) this.insert(entry);
+		this.#rebuilding = false;
+		this.branchFold();
 	}
 
 	insert(entry: SessionEntry): void {
@@ -316,6 +388,10 @@ class SessionEntryIndex {
 		}
 
 		addUsage(this.#usage, entryUsage(entry));
+		if (!this.#rebuilding) {
+			if (entry.parentId === this.#fold.id) this.#foldEntry(entry);
+			else if (entry.type === "compaction" || entry.type === "reset_boundary") this.branchFold();
+		}
 	}
 
 	has(id: string): boolean {
@@ -2620,9 +2696,8 @@ export class SessionManager {
 		const wasApplicable = this.isRequirementsSourceApplicable(descriptor);
 		const journalLocator = { sessionId: this.#sessionId, journalPath: this.#sessionFile, entryId: "" };
 		const journalVersion = this.#requirementsJournalVersion(journalLocator);
-		const path = this.#index.contextPath(undefined, locator.entryId);
-		const byId = new Map(path.map(entry => [entry.id, entry]));
-		const execution = buildSessionContext(path, locator.entryId, byId).messages;
+		const { path, controls } = this.#index.contextPath(undefined, locator.entryId);
+		const execution = buildSessionContextFromPath(path, undefined, controls).messages;
 		const context = structuredClone(execution);
 		const messageIndices = new Map(execution.map((message, index) => [message, index]));
 		const selected = path.filter((entry): entry is SessionMessageEntry | CustomMessageEntry => entry.type === "message" || entry.type === "custom_message");
@@ -3061,14 +3136,7 @@ export class SessionManager {
 	 */
 	getCredentialPins(): Map<string, { hash: string; lastUsedAt: number }> {
 		const pins = new Map<string, { hash: string; lastUsedAt: number }>();
-		for (const entry of this.getBranch()) {
-			if (entry.type === "credential_pin") {
-				pins.set(entry.provider, { hash: entry.hash, lastUsedAt: new Date(entry.timestamp).getTime() });
-			} else if (entry.type === "message" && entry.message.role === "assistant") {
-				const pin = pins.get(entry.message.provider);
-				if (pin) pin.lastUsedAt = Math.max(pin.lastUsedAt, entry.message.timestamp);
-			}
-		}
+		for (const [provider, pin] of this.#index.branchFold().pins) pins.set(provider, { ...pin });
 		return pins;
 	}
 
@@ -3130,7 +3198,11 @@ export class SessionManager {
 	 * the full-history display transcript, from the current leaf path.
 	 */
 	buildSessionContext(options?: BuildSessionContextOptions): SessionContext {
-		return buildSessionContext(this.#entries, this.#index.leafId(), this.#index.entriesById(), options);
+		if (options?.transcript && !options.collapseCompactedHistory) {
+			return buildSessionContext(this.#entries, this.#index.leafId(), this.#index.entriesById(), options);
+		}
+		const { path, controls } = this.#index.contextPath(options);
+		return buildSessionContextFromPath(path, options, controls);
 	}
 
 	/** Strip stale OpenAI Responses assistant replay metadata from loaded entries. */
