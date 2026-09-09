@@ -1770,7 +1770,7 @@ export class SelectorController {
 			this.#rewind.invalidate();
 			this.#rewind = undefined;
 		}
-		let overlayHandle: OverlayHandle | undefined;
+		let overlayHandle: OverlayHandle | undefined = undefined;
 		let closed = false;
 		let selecting = false;
 		let invalidated = false;
