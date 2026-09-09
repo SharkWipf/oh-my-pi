@@ -30,6 +30,7 @@
 ### Added
 
 - Added guarded transient inline-rendering facts to source-origin metadata. Known clone operations preserve them; changed blocks, unknown hook output, and persisted metadata cannot retain stale physical attribution.
+- Decoded explicitly tagged Codex reasoning envelopes in Responses/Azure/Codex raw reasoning, completed summaries, and split summary streams, including sequential-cutoff delivery. Display receives the reasoning text while native replay payloads and literal message JSON remain unchanged.
 - Codex SSE streams that end without a terminal completion event now retry when replay-safe and remain transient errors when partial output prevents replay ([#11349](https://github.com/can1357/oh-my-pi/issues/11349)).
 
 ## [18.1.15] - 2026-09-08

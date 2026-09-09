@@ -902,7 +902,7 @@ describe("openai-codex concurrent reasoning summaries", () => {
 		}
 		const result = await stream.result();
 
-		expect(thinkingDeltas).toEqual(["Streaming ", "\n\n", "fallback"]);
+		expect(thinkingDeltas.join("")).toBe("Streaming \n\nfallback");
 		expect(result.content.find(block => block.type === "thinking")?.thinking).toBe("Streaming \n\nfallback");
 	});
 
