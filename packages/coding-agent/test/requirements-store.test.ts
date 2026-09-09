@@ -572,6 +572,12 @@ test("bulk intake preserves accepted coverage and atomically reconciles changed 
 	expect(f.publish(proposal).status).toBe("accepted");
 	const moved = { ...acceptance, locators: [...acceptance.locators, { sessionId: "fork", entryId: "copy" }] };
 	f.storage.intakeRequirementsSources([referent, moved, moved]);
+	f.storage.reconcileRequirementsSources([{ key: referent.key, integrity: null }]);
+	expect(f.applicable().active).toEqual([]);
+	f.storage.intakeRequirementsSources([{ ...referent, units: [], integrityAvailable: false }, moved]);
+	expect(f.applicable().active).toEqual([]);
+	f.storage.intakeRequirementsSource(referent);
+	expect(f.applicable().active.map(revision => revision.statement)).toEqual(["Use UTF-8."]);
 	await f.restart();
 	const before = f.storage.getRequirementsSnapshot();
 	expect(before.sources.find(source => source.key === acceptance.key)?.locators).toEqual(moved.locators);
