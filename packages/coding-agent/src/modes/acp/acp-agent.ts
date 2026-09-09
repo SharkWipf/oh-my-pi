@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { AgentBusyError, type AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Model, OriginalSubmission } from "@oh-my-pi/pi-ai";
 import { getBlobsDir, isEnoent, logger, type postmortem, VERSION } from "@oh-my-pi/pi-utils";
 import {
 	type Agent,
@@ -68,6 +68,7 @@ import { isSilentAbort, SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "
 import type { UsageStatistics } from "../../session/session-entries";
 import type { SessionInfo as StoredSessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
+import { parseCompactionOverridePrompt } from "../../session/preserved-message-settings";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands, toAcpAvailableCommands } from "../../slash-commands/available-commands";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS } from "../../stt/models";
@@ -850,7 +851,15 @@ export class AcpAgent implements Agent {
 			}
 			this.#throwIfRecordClosed(record);
 
+			const originalText = params.prompt
+				.filter(block => block.type === "text")
+				.map(block => block.text)
+				.join("\n\n");
+
 			const converted = this.#convertPromptBlocks(params.prompt);
+			const directive = parseCompactionOverridePrompt(originalText);
+			if (directive && !directive.text.trim())
+				throw new Error(`Usage: /${directive.compactionOverride === "keep" ? "keep" : "once"} <message>`);
 			const pendingPrompt = Promise.withResolvers<PromptResponse>();
 			record.promptTurn = {
 				cancelRequested: false,
@@ -867,23 +876,26 @@ export class AcpAgent implements Agent {
 			record.promptTurn.unsubscribe = record.session.subscribe(event => {
 				this.#trackPromptEvent(record, event);
 			});
+			const promptTurn = record.promptTurn;
 
 			// Autonomous turns stream without an owning promptTurn, so the implicit-cancel
 			// guard above cannot fire and a client prompt lands on AgentSession's busy
 			// guard. Type that failure for the wire instead of letting transport.ts wrap
 			// it as a generic -32603 internal error.
-			this.#runPromptOrCommand(record, converted.text, converted.images).catch((error: unknown) => {
-				this.#finishPrompt(
-					record,
-					undefined,
-					error instanceof AgentBusyError
-						? RequestError.sessionBusy(error.message, {
-								reason: "session_busy",
-								hint: "steer|followUp|wait",
-							})
-						: error,
-				);
-			});
+			this.#runPromptOrCommand(record, converted.text, converted.images, converted.imageLinks, { text: originalText, images: converted.images, imageLinks: converted.imageLinks }, originalText)
+				.catch((error: unknown) => {
+					if (record.promptTurn !== promptTurn || promptTurn.settled) return;
+					this.#finishPrompt(
+						record,
+						undefined,
+						error instanceof AgentBusyError
+							? RequestError.sessionBusy(error.message, {
+									reason: "session_busy",
+									hint: "steer|followUp|wait",
+								})
+							: error,
+					);
+				});
 
 			return await pendingPrompt.promise;
 		});
@@ -958,13 +970,20 @@ export class AcpAgent implements Agent {
 		}
 	}
 
-	async #runPromptOrCommand(record: ManagedSessionRecord, text: string, images: AgentImageContent[]): Promise<void> {
-		const skillResult = await this.#tryRunSkillCommand(record, text);
+	async #runPromptOrCommand(
+		record: ManagedSessionRecord,
+		text: string,
+		images: AgentImageContent[],
+		imageLinks: (string | undefined)[],
+		originalSubmission: OriginalSubmission,
+		originalText: string,
+	): Promise<void> {
+		const skillResult = await this.#tryRunSkillCommand(record, originalText, originalSubmission);
 		if (skillResult) {
 			return;
 		}
 
-		const builtinResult = await executeAcpBuiltinSlashCommand(text, {
+		const builtinResult = await executeAcpBuiltinSlashCommand(parseCompactionOverridePrompt(originalText) ? text : originalText, {
 			session: record.session,
 			sessionManager: record.session.sessionManager,
 			settings: record.session.settings,
@@ -999,7 +1018,7 @@ export class AcpAgent implements Agent {
 		if (builtinResult !== false) {
 			if ("prompt" in builtinResult) {
 				const residualBaseline = new Set(record.extensionUserMessageTasks);
-				const residualAgentInvoked = await record.session.prompt(builtinResult.prompt, { images });
+				const residualAgentInvoked = await record.session.prompt(builtinResult.prompt, { images, imageLinks, originalSubmission, compactionOverride: builtinResult.compactionOverride });
 				// A residual prompt can itself resolve locally (extension command,
 				// custom-TS command, file prompt template). No agent turn means no
 				// `agent_end`, so the prompt turn must be settled here — same pairing
@@ -1025,7 +1044,7 @@ export class AcpAgent implements Agent {
 		}
 
 		const extensionPromptBaseline = new Set(record.extensionUserMessageTasks);
-		const agentInvoked = await record.session.prompt(text, { images });
+		const agentInvoked = await record.session.prompt(text, { images, imageLinks, originalSubmission });
 		// Extension and custom-TS commands are handled locally inside session.prompt().
 		// An ACP extension command can still call pi.sendUserMessage(), which starts
 		// an async nested prompt through the extension runtime. Keep the ACP turn
@@ -1038,7 +1057,7 @@ export class AcpAgent implements Agent {
 		}
 	}
 
-	async #tryRunSkillCommand(record: ManagedSessionRecord, text: string): Promise<boolean> {
+	async #tryRunSkillCommand(record: ManagedSessionRecord, text: string, originalSubmission: OriginalSubmission): Promise<boolean> {
 		if (!record.session.skillsSettings?.enableSkillCommands) {
 			return false;
 		}
@@ -1059,7 +1078,7 @@ export class AcpAgent implements Agent {
 				details: built.details,
 				attribution: "user",
 			},
-			{ streamingBehavior: "steer" },
+			{ streamingBehavior: "steer", producer: { type: "human" }, originalSubmission },
 		);
 		return true;
 	}
@@ -1680,9 +1699,14 @@ export class AcpAgent implements Agent {
 		}
 	}
 
-	#convertPromptBlocks(blocks: PromptRequest["prompt"]): { text: string; images: AgentImageContent[] } {
+	#convertPromptBlocks(blocks: PromptRequest["prompt"]): {
+		text: string;
+		images: AgentImageContent[];
+		imageLinks: (string | undefined)[];
+	} {
 		const textParts: string[] = [];
 		const images: AgentImageContent[] = [];
+		const imageLinks: (string | undefined)[] = [];
 		for (const block of blocks) {
 			switch (block.type) {
 				case "text":
@@ -1690,6 +1714,7 @@ export class AcpAgent implements Agent {
 					break;
 				case "image":
 					images.push({ type: "image", data: block.data, mimeType: block.mimeType });
+					imageLinks.push(undefined);
 					break;
 				case "resource":
 					if ("text" in block.resource) {
@@ -1700,6 +1725,7 @@ export class AcpAgent implements Agent {
 						// to the images array so the user's intent survives; everything
 						// else falls back to the URI placeholder below.
 						images.push({ type: "image", data: block.resource.blob, mimeType: block.resource.mimeType });
+						imageLinks.push(block.resource.uri);
 					} else {
 						textParts.push(`[embedded resource: ${block.resource.uri}]`);
 					}
@@ -1714,6 +1740,7 @@ export class AcpAgent implements Agent {
 		}
 		return {
 			text: textParts.join("\n\n").trim(),
+			imageLinks,
 			images,
 		};
 	}

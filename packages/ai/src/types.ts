@@ -2,6 +2,7 @@ export * from "@oh-my-pi/pi-catalog/effort";
 export * from "@oh-my-pi/pi-catalog/types";
 
 import type { Type } from "@oh-my-pi/omptype";
+import type { NativeItemOrigin } from "./utils/source-origin";
 import type {
 	DeleteArgs,
 	DeleteResult,
@@ -876,6 +877,10 @@ export interface OpenAIResponsesHistoryPayload {
 	provider?: string;
 	dt?: boolean;
 	items: Array<Record<string, unknown>>;
+	/** Local provenance sidecar; never part of a provider wire item. */
+	origins?: NativeItemOrigin[];
+	/** Actual ingress correspondence, consumed into durable origins when the source is bound; never wire data. */
+	contentBlocks?: Array<{ itemIndex: number; contentIndex: number }>;
 }
 
 /** Anthropic-only controls attached to a mid-conversation system message. */
@@ -896,7 +901,24 @@ export interface ProviderInputTransformation {
 	[key: string]: unknown;
 }
 
+/** Host-recorded producer; absence means unknown, independent of wire role. */
+export type UserMessageProducer =
+	| { type: "human" }
+	| { type: "tool"; name: string; toolCallId?: string }
+	| { type: "extension"; name?: string }
+	| { type: "generated"; name?: string };
+
+/** Host input before command expansion or image normalization; local journal metadata only. */
+export interface OriginalSubmission {
+	text: string;
+	images?: ImageContent[];
+	imageLinks?: (string | undefined)[];
+	compactionOverride?: "keep" | "exclude";
+}
+
 export interface UserMessage {
+	originalSubmission?: OriginalSubmission;
+	producer?: UserMessageProducer;
 	role: "user";
 	content: string | (TextContent | ImageContent)[];
 	/** True if the message was injected by the system (e.g., auto-continue). */

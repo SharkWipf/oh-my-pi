@@ -429,11 +429,7 @@ export class AgentLifecycleManager {
 		}
 
 		const park = this.#parks.get(id);
-		if (park && park.ref === ref) {
-			// Prefer cancel when the session is still live so release owns dispose.
-			if (!park.detached) park.cancel();
-			await park.promise;
-		}
+		if (park?.ref === ref && !park.detached) park.cancel();
 
 		const live = this.#registry.get(id) === ref ? ref.session : null;
 		if (options?.tombstone) {
@@ -453,18 +449,18 @@ export class AgentLifecycleManager {
 				logger.warn("AgentLifecycleManager.release: terminal transition rejected", { id });
 			}
 		}
+		// Start disposal before any filesystem/park await. The terminal row alone
+		// does not stop providers or prevent a late callback from prompting again.
+		const disposal = live?.dispose().catch(error => {
+			logger.warn("AgentLifecycleManager.release: session dispose failed", { id, error: String(error) });
+		});
 		try {
 			if (options?.tombstone && ref.sessionFile) await persistAgentTombstone(ref.sessionFile);
 		} finally {
-			// Detaching removes the registry's only route to the live session. Always
-			// dispose the captured session, even when tombstone persistence fails.
-			if (live) {
-				try {
-					await live.dispose();
-				} catch (error) {
-					logger.warn("AgentLifecycleManager.release: session dispose failed", { id, error: String(error) });
-				}
-			}
+			// Cleanup must finish even when tombstone persistence fails. A detached
+			// park already owns the session's disposal; a cancelled park yields to us.
+			if (park?.ref === ref) await park.promise;
+			await disposal;
 		}
 		if (!options?.tombstone) this.#registry.unregister(id, ref);
 		return true;

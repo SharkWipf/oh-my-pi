@@ -1534,10 +1534,10 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		}
 		void (async () => {
 			try {
-				if (ref.status === "running" && ref.session) {
-					await ref.session.abort({ reason: USER_INTERRUPT_LABEL });
-				}
-				await this.#lifecycle().release(ref.id, ref, { tombstone: true });
+				const abort =
+					ref.status === "running" ? ref.session?.abort({ reason: USER_INTERRUPT_LABEL }) : undefined;
+				// Publish the terminal kill before awaiting the recoverable turn abort.
+				await Promise.all([abort, this.#lifecycle().release(ref.id, ref, { tombstone: true })]);
 			} catch (error) {
 				logger.warn("Agent hub: kill failed", { id: ref.id, error: String(error) });
 				this.#notice = error instanceof Error ? error.message : String(error);

@@ -31,6 +31,7 @@ import {
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../../memory-backend";
 import { BashExecutionComponent, bashPtyViewport } from "../../modes/components/bash-execution";
 import { BorderedLoader } from "../../modes/components/bordered-loader";
+import { ContextDetailsOverlay } from "../../modes/components/context-details-overlay";
 import { DynamicBorder } from "../../modes/components/dynamic-border";
 import { EvalExecutionComponent } from "../../modes/components/eval-execution";
 import { MoveOverlay, type MoveOverlayResult } from "../../modes/components/move-overlay";
@@ -39,8 +40,13 @@ import { getMarkdownTheme, getSymbolTheme, theme } from "../../modes/theme/theme
 import type { InteractiveModeContext } from "../../modes/types";
 import { computeContextBreakdown, renderContextUsage } from "../../modes/utils/context-usage";
 import { buildHotkeysMarkdown } from "../../modes/utils/hotkeys-markdown";
-import { buildToolsMarkdown } from "../../modes/utils/tools-markdown";
+import {
+	executeRequirementsCommand,
+	requirementsContextText,
+	renderRequirementsData,
+} from "../../requirements/commands";
 import type { AsyncJobSnapshotItem } from "../../session/agent-session";
+import { buildToolsMarkdown } from "../../modes/utils/tools-markdown";
 import type { AuthStorage, OAuthAccountIdentity } from "../../session/auth-storage";
 import type { CompactMode } from "../../session/compact-modes";
 import type { NewSessionOptions } from "../../session/session-entries";
@@ -670,13 +676,30 @@ export class CommandController {
 		showMarkdownPanel(this.ctx, "Available Tools", tools);
 	}
 
-	handleContextCommand(): void {
-		const breakdown = computeContextBreakdown(this.ctx.session, { snapcompactSavings: true });
-		if (breakdown.contextWindow <= 0) {
-			this.ctx.showWarning("Context usage is unavailable: no model is selected for this session.");
+	handleContextCommand(argument: "usage" | "details" = "usage"): void {
+		if (argument === "details") {
+			const current = this.ctx.session.getCompactionDiagnostics("current");
+			const recorded = this.ctx.session.getCompactionDiagnostics("recorded");
+			const prepared = this.ctx.session.getPreparedCompactionDiagnostics();
+			const component = new ContextDetailsOverlay(this.ctx.ui, this.ctx.keybindings, current, recorded, () => {
+				handle.hide();
+				component.dispose();
+				this.ctx.ui.setFocus(this.ctx.editorContainer.children[0] ?? this.ctx.editor);
+				this.ctx.ui.requestRender();
+			}, prepared);
+			const handle = this.ctx.ui.showOverlay(component, {
+				anchor: "bottom-center",
+				width: "100%",
+				maxHeight: "100%",
+				margin: 0,
+				fullscreen: true,
+			});
+			this.ctx.ui.setFocus(component);
+			this.ctx.ui.requestRender();
 			return;
 		}
-		const output = renderContextUsage(breakdown, theme);
+		const breakdown = computeContextBreakdown(this.ctx.session, { snapcompactSavings: true });
+		const output = `${breakdown.contextWindow > 0 ? renderContextUsage(breakdown, theme) : "Context usage is unavailable: no model is selected."}\n\n${requirementsContextText(this.ctx.session)}`;
 		const block = new TranscriptBlock();
 		block.addChild(new DynamicBorder());
 		block.addChild(new Text(theme.bold(theme.fg("accent", "Context Usage")), 1, 0));
@@ -689,6 +712,23 @@ export class CommandController {
 	async handleMemoryCommand(text: string): Promise<void> {
 		const argumentText = text.slice(7).trim();
 		const action = argumentText.split(/\s+/, 1)[0]?.toLowerCase() || "view";
+		if (action === "requirements") {
+			try {
+				const payload = await executeRequirementsCommand(
+					this.ctx.session,
+					argumentText.slice("requirements".length).trim(),
+				);
+				const block = new TranscriptBlock();
+				block.addChild(new DynamicBorder());
+				block.addChild(new Text(theme.bold(theme.fg("accent", "Living Requirements")), 1, 0));
+				block.addChild(new Text(payload, 1, 1));
+				block.addChild(new DynamicBorder());
+				this.ctx.presentCommandOutput(block);
+			} catch (error) {
+				this.ctx.showError(renderRequirementsData(error instanceof Error ? error.message : String(error)));
+			}
+			return;
+		}
 		const agentDir = this.ctx.settings.getAgentDir();
 		const backend = await resolveMemoryBackend(this.ctx.settings);
 
@@ -776,7 +816,9 @@ export class CommandController {
 			return;
 		}
 
-		this.ctx.showError("Usage: /memory <view|stats|diagnose|clear|reset|enqueue|rebuild|queue|sync|mm ...>");
+		this.ctx.showError(
+			"Usage: /memory <requirements|view|stats|diagnose|clear|reset|enqueue|rebuild|queue|sync|mm ...>",
+		);
 	}
 
 	async #handleMentalModelsSubcommand(argumentText: string): Promise<void> {

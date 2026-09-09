@@ -590,22 +590,43 @@ export class RpcClient {
 	 * Returns immediately after sending; use onEvent() to receive streaming events.
 	 * Use waitForIdle() to wait for completion.
 	 */
-	async prompt(message: string, images?: ImageContent[]): Promise<void> {
-		await this.#send({ type: "prompt", message, images });
+	async prompt(
+		message: string,
+		images?: ImageContent[],
+		options?: Pick<
+			Extract<RpcCommand, { type: "prompt" }>,
+			"imageLinks" | "compactionOverride" | "streamingBehavior"
+		>,
+	): Promise<void> {
+		await this.#send({ type: "prompt", message, images, ...options });
 	}
 
 	/**
 	 * Queue a steering message to interrupt the agent mid-run.
 	 */
-	async steer(message: string, images?: ImageContent[]): Promise<void> {
-		await this.#send({ type: "steer", message, images });
+	async steer(
+		message: string,
+		images?: ImageContent[],
+		options?: Pick<
+			Extract<RpcCommand, { type: "prompt" }>,
+			"imageLinks" | "compactionOverride" | "streamingBehavior"
+		>,
+	): Promise<void> {
+		await this.#send({ type: "steer", message, images, ...options });
 	}
 
 	/**
 	 * Queue a follow-up message to be processed after the agent finishes.
 	 */
-	async followUp(message: string, images?: ImageContent[]): Promise<void> {
-		await this.#send({ type: "follow_up", message, images });
+	async followUp(
+		message: string,
+		images?: ImageContent[],
+		options?: Pick<
+			Extract<RpcCommand, { type: "prompt" }>,
+			"imageLinks" | "compactionOverride" | "streamingBehavior"
+		>,
+	): Promise<void> {
+		await this.#send({ type: "follow_up", message, images, ...options });
 	}
 
 	/**
@@ -618,8 +639,15 @@ export class RpcClient {
 	/**
 	 * Abort current operation and immediately start a new turn with the given message.
 	 */
-	async abortAndPrompt(message: string, images?: ImageContent[]): Promise<void> {
-		await this.#send({ type: "abort_and_prompt", message, images });
+	async abortAndPrompt(
+		message: string,
+		images?: ImageContent[],
+		options?: Pick<
+			Extract<RpcCommand, { type: "prompt" }>,
+			"imageLinks" | "compactionOverride" | "streamingBehavior"
+		>,
+	): Promise<void> {
+		await this.#send({ type: "abort_and_prompt", message, images, ...options });
 	}
 
 	/**

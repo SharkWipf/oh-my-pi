@@ -3512,9 +3512,15 @@ describe("AgentSession retry delay cap", () => {
 		// transient provider abort. It MUST settle the turn instead of entering
 		// auto-retry: a retry here schedules a continuation that the disposed guard
 		// skips without resolving #retryPromise, hanging prompt() during shutdown.
+		const started = Promise.withResolvers<void>();
+		const stopped = Promise.withResolvers<void>();
 		const mock = createMockModel({
 			responses: [
-				{ stopReason: "aborted", errorMessage: "Request was aborted" },
+				async () => {
+					started.resolve();
+					await stopped.promise;
+					return { stopReason: "aborted", errorMessage: "Request was aborted" };
+				},
 				{ content: ["should not be reached after dispose"] },
 			],
 		});
@@ -3550,10 +3556,12 @@ describe("AgentSession retry delay cap", () => {
 			if (event.type === "auto_retry_start") retryStartEvents.push(event);
 		});
 
-		// Enter the disposing window before the empty abort lands. Without the
-		// #isDisposed guard this prompt would hang on an orphaned retry promise.
+		// Dispose an already-running turn; a disposed session never accepts a new prompt.
+		const pending = session.prompt("Trigger empty aborted turn while disposing");
+		await started.promise;
 		session.beginDispose();
-		await session.prompt("Trigger empty aborted turn while disposing");
+		stopped.resolve();
+		await pending;
 		await session.waitForIdle();
 
 		expect(retryStartEvents).toHaveLength(0);

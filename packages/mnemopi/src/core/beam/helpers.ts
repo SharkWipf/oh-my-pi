@@ -788,8 +788,9 @@ export interface EmbedItem {
 
 async function runEmbedding(beam: BeamMemoryState, items: readonly EmbedItem[]): Promise<void> {
 	try {
+		if (beam.backgroundSignal?.aborted) return;
 		const matrix = await embed(items.map(item => item.content));
-		if (matrix === null) return;
+		if (beam.backgroundSignal?.aborted || matrix === null) return;
 		const model = currentEmbeddingModel();
 		using insertEmbedding = beam.db.prepare(
 			"INSERT OR REPLACE INTO memory_embeddings(memory_id, embedding_json, model) VALUES (?, ?, ?)",
@@ -830,7 +831,7 @@ async function runEmbedding(beam: BeamMemoryState, items: readonly EmbedItem[]):
 export function scheduleEmbedding(beam: BeamMemoryState, items: readonly EmbedItem[]): void {
 	const cleaned = items.filter(item => item.content.trim() !== "");
 	if (cleaned.length === 0) return;
-	const runtimeOptions = getMnemopiRuntimeOptions();
+	const runtimeOptions = { ...getMnemopiRuntimeOptions(), signal: beam.backgroundSignal };
 	const task = withMnemopiRuntimeOptions(runtimeOptions, () => runEmbedding(beam, cleaned));
 	const pending = beam.pendingExtractions;
 	if (pending !== undefined) {

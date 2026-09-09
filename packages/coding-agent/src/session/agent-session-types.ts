@@ -10,6 +10,7 @@ import type {
 	Context,
 	Effort,
 	ImageContent,
+	OriginalSubmission,
 	Message,
 	MessageAttribution,
 	Model,
@@ -39,7 +40,9 @@ import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { XdevState } from "../tools/xdev";
 import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
+import type { UserMessageProducer } from "@oh-my-pi/pi-ai";
 import type { SessionManager } from "./session-manager";
+
 
 /** Maximum time the interactive shutdown path waits for Mnemopi consolidation. */
 export const SHUTDOWN_CONSOLIDATE_BUDGET_MS = 1_500;
@@ -123,6 +126,10 @@ export interface InitialRetryFallbackState {
 
 /** Dependencies and initial state used to construct an AgentSession. */
 export interface AgentSessionConfig {
+	/** Run without learned-memory startup, recall or automatic writes. */
+	startWithoutMemory?: boolean;
+	/** Explicit context files remain enabled during memory recovery. */
+	getMemoryRecoveryContextFiles?: () => readonly string[];
 	agent: Agent;
 	/** Shared with the provider stream wrapper: current Codex Code Mode tool exposure snapshot for turn metadata. */
 	codeModeState?: { namespacesInfo?: unknown };
@@ -329,6 +336,12 @@ export interface AgentSessionConfig {
 
 /** Options for AgentSession.prompt(). */
 export interface PromptOptions {
+	imageLinks?: (string | undefined)[];
+	compactionOverride?: "keep" | "exclude";
+	/** Original host input, preserved across expansion, queue delivery and retry. */
+	originalSubmission?: OriginalSubmission;
+	/** Host-recorded producer, separate from billing attribution. */
+	producer?: UserMessageProducer;
 	/** Whether to expand file-based prompt templates (default: true). */
 	expandPromptTemplates?: boolean;
 	/** Image attachments. */
@@ -353,6 +366,9 @@ export interface PromptOptions {
  *  before it reached the agent (an abort or usage preflight denial raced turn
  *  setup), so it was never persisted to the session. */
 export interface DroppedPrompt {
+	originalSubmission?: OriginalSubmission;
+	imageLinks?: (string | undefined)[];
+	compactionOverride?: "keep" | "exclude";
 	/** The prompt exactly as typed, before template/command expansion. */
 	text: string;
 	/** Image attachments submitted with the prompt. */
@@ -361,6 +377,10 @@ export interface DroppedPrompt {
 
 /** Options for AgentSession.followUp(). */
 export interface FollowUpOptions {
+	imageLinks?: (string | undefined)[];
+	compactionOverride?: "keep" | "exclude";
+	originalSubmission?: OriginalSubmission;
+	producer?: UserMessageProducer;
 	/** Enqueue as a hidden developer message instead of a user follow-up. */
 	synthetic?: boolean;
 	/** Whether to expand file-based prompt templates (default: true). */
@@ -379,6 +399,7 @@ export interface HandoffResult {
 export interface SessionHandoffOptions {
 	autoTriggered?: boolean;
 	signal?: AbortSignal;
+
 }
 
 /** Result from cycleModel(). */
@@ -471,4 +492,10 @@ export interface ResetSessionContextResult {
 }
 
 /** Queued user content restored to the editor. */
-export type RestoredQueuedMessage = { text: string; images?: ImageContent[] };
+export type RestoredQueuedMessage = {
+	text: string;
+	images?: ImageContent[];
+	originalSubmission?: OriginalSubmission;
+	imageLinks?: (string | undefined)[];
+	compactionOverride?: "keep" | "exclude";
+};

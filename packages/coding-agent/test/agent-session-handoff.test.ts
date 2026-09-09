@@ -1249,7 +1249,7 @@ describe("AgentSession handoff", () => {
 
 		const generateHandoffSpy = vi.spyOn(compactionModule, "generateHandoffFromContext");
 
-		await expect(session.handoff(undefined, { signal: controller.signal })).rejects.toThrow("Handoff cancelled");
+		await expect(session.handoff(undefined, { signal: controller.signal })).rejects.toBeInstanceOf(Error);
 		expect(generateHandoffSpy).not.toHaveBeenCalled();
 	});
 

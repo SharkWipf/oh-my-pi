@@ -1,4 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { CompactionDiagnostics } from "@oh-my-pi/pi-agent-core/compaction/diagnostics";
 import type {
 	ImageContent,
 	MessageAttribution,
@@ -68,9 +69,15 @@ export interface SessionEntryBase {
 	id: string;
 	parentId: string | null;
 	timestamp: string;
+	/** Initial user override, recorded with the source before asynchronous work starts. */
+	compactionOverride?: "keep" | "exclude";
 }
 
 export interface SessionMessageEntry extends SessionEntryBase {
+	/** Original namespace identity; not a human-authorship attestation. */
+	sourceOrigin?: { journalId: string; entryId: string };
+	/** Explicit authored deletion: old frozen evidence no longer establishes current authority. */
+	requirementsInvalidated?: true;
 	type: "message";
 	message: AgentMessage;
 }
@@ -121,6 +128,7 @@ export interface CompactionEntry<T = unknown> extends SessionEntryBase {
 	shortSummary?: string;
 	firstKeptEntryId: string;
 	tokensBefore: number;
+	diagnostics?: CompactionDiagnostics;
 	/** Estimated context tokens after the rewrite (display metadata). */
 	tokensAfter?: number;
 	/** Method that produced this entry; absent on legacy sessions and extension-provided compactions. */
@@ -281,6 +289,10 @@ export interface ModeChangeEntry extends SessionEntryBase {
  * - true: rendered with distinct styling (different from user messages)
  */
 export interface CustomMessageEntry<T = unknown> extends SessionEntryBase {
+	/** Original namespace identity; not a human-authorship attestation. */
+	sourceOrigin?: { journalId: string; entryId: string };
+	/** Explicit authored deletion: old frozen evidence no longer establishes current authority. */
+	requirementsInvalidated?: true;
 	type: "custom_message";
 	customType: string;
 	content: string | (TextContent | ImageContent)[];

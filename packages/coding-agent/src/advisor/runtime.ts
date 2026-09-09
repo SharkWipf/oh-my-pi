@@ -501,6 +501,17 @@ export class AdvisorRuntime {
 		} catch {}
 	}
 
+	#clearInvalidatedPromptState(): void {
+		// The aborted Agent loop can append its terminal state AFTER reset().
+		// Clear it only once prompt() settles, before the next epoch can dispatch.
+		this.#clearSeenContext();
+		try {
+			this.agent.reset();
+		} catch (err) {
+			logger.debug("advisor invalidated prompt cleanup failed", { err: String(err) });
+		}
+	}
+
 	#resetAdvisorContext(clearBacklog: boolean, wakeWaiters: boolean, reason?: string): void {
 		if (reason) {
 			logger.debug("advisor context reset", {
@@ -1187,6 +1198,10 @@ export class AdvisorRuntime {
 					} finally {
 						if (this.#promptInFlight === prompt) this.#promptInFlight = undefined;
 					}
+					if (this.#epoch !== epoch) {
+						this.#clearInvalidatedPromptState();
+						continue;
+					}
 					// Agent.#runLoop catches provider/stream failures internally and
 					// resolves prompt() cleanly with stopReason: "error". Treat that
 					// as a failed turn so endpoint rejections trip the retry path.
@@ -1216,14 +1231,16 @@ export class AdvisorRuntime {
 						}
 					}
 				} catch (err) {
+					// reset()/dispose() invalidates even a concurrently paused transition.
+					if (this.#epoch !== epoch) {
+						this.#clearInvalidatedPromptState();
+						continue;
+					}
 					if (this.#sessionTransitionPaused) {
 						this.#rollbackFailedTurn(messageSnapshot);
 						this.#pending.unshift(...popped);
 						continue;
 					}
-					// reset()/dispose() aborts the in-flight prompt; treat it as a
-					// reset, not a transient failure — drop the stale batch.
-					if (this.#epoch !== epoch) continue;
 					// Release any parked primary-agent waiters IMMEDIATELY — before
 					// the async onTurnError hook or any retry sleep — and refuse new
 					// parks until a turn succeeds. A failing advisor must never hold

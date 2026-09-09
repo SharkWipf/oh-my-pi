@@ -526,6 +526,8 @@ export interface ExecutorOptions {
 	 * artifacts directory (no per-subagent subdir).
 	 */
 	parentArtifactManager?: ArtifactManager;
+	/** Inherit operator memory recovery before constructing a child. */
+	startWithoutMemory?: boolean;
 	parentHindsightSessionState?: HindsightSessionState;
 	parentMnemopiSessionState?: MnemopiSessionState;
 	/** Parent agent's eval executor session id. Subagents reuse it so eval state is shared. */
@@ -1276,6 +1278,18 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		);
 	}
 
+	// A manager kill is terminal for the assignment, not just its current turn.
+	// Follow the exact registration so a killed worker cannot enter the yield
+	// reminder ladder, and a stale generation cannot stop a same-id replacement.
+	const registry = AgentRegistry.global();
+	let runRef = registry.get(id);
+	const unsubscribeRegistry = registry.onChange(event => {
+		if (event.ref.id !== id) return;
+		if (event.type === "registered" && !runRef) runRef = event.ref;
+		if (event.ref === runRef && event.type === "status_changed" && event.ref.status === "aborted") {
+			requestAbort("signal");
+		}
+	});
 	// Wall-clock hard limit. Defense-in-depth for the case where a provider stream
 	// hang escapes the inference-layer watchdog (see openai-completions
 	// `isOpenAICompletionsProgressChunk`). Disabled by default; set
@@ -1920,11 +1934,15 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		resolveAbortReasonText,
 		setActiveSession: session => {
 			activeSession = session;
+			const ref = registry.get(id);
+			if (ref?.session === session) runRef = ref;
+			if (runRef?.status === "aborted") requestAbort("signal");
 			publishAdvisorState(session);
 		},
 		takeActiveSession: () => {
 			const session = activeSession;
 			activeSession = null;
+			unsubscribeRegistry();
 			return session;
 		},
 		attach,
@@ -1935,6 +1953,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		finish: () => {
 			resolved = true;
 			listenerController.abort();
+			unsubscribeRegistry();
 			if (runtimeTimeoutId !== undefined) {
 				clearTimeout(runtimeTimeoutId);
 				runtimeTimeoutId = undefined;
@@ -2594,7 +2613,9 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 		const turnStartTime = Date.now();
 		const relay = Promise.withResolvers<void>();
 		session.trackIrcReply(relay.promise);
-		const sessionFile = AgentRegistry.global().get(id)?.sessionFile ?? options.sessionFile ?? undefined;
+		const registry = AgentRegistry.global();
+		const ref = registry.get(id);
+		const sessionFile = ref?.sessionFile ?? options.sessionFile ?? undefined;
 		const turnMonitor = createSubagentRunMonitor({
 			index,
 			id,
@@ -2635,7 +2656,10 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			const lastAssistant = session.getLastAssistantMessage();
 			const yielded = turnMonitor.yieldCalled();
 			const runtimeLimitExceeded = turnMonitor.runtimeLimitExceeded();
-			const aborted = runtimeLimitExceeded || (lastAssistant?.stopReason === "aborted" && !yielded);
+			const aborted =
+				(turnMonitor.abortSignal.aborted && turnMonitor.isAbortedRun()) ||
+				runtimeLimitExceeded ||
+				(lastAssistant?.stopReason === "aborted" && !yielded);
 			const error =
 				lastAssistant?.stopReason === "error"
 					? attributeSubagentError(lastAssistant.errorMessage, lastAssistant)
@@ -2676,7 +2700,13 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					sessionFile,
 					startTime: turnStartTime,
 				});
-				if (!aborted && !error) {
+				if (
+					!aborted &&
+					!error &&
+					registry.get(id) === ref &&
+					ref?.status !== "aborted" &&
+					(!session.isDisposed || (ref?.status === "parked" && !ref.session))
+				) {
 					await relayWakeTurnOutput({ id, records, turnStartTime, yielded, result, turnText });
 				}
 			} catch (finalizeError) {
@@ -3502,6 +3532,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				// so nested lifecycle/progress/event frames reach its surfaces
 				// without leaking into another root session's traffic.
 				subagentEventBus: options.subagentEventBus,
+				startWithoutMemory: options.startWithoutMemory,
 				parentHindsightSessionState: options.parentHindsightSessionState,
 				parentMnemopiSessionState: options.parentMnemopiSessionState,
 				parentTaskPrefix: id,

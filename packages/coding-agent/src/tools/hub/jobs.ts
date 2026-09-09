@@ -414,7 +414,7 @@ export async function executeCancel(
 
 /**
  * Kill a non-job-backed agent registration named by `id`: abort any in-flight
- * turn, then release it from the lifecycle (dispose session + unregister). This
+ * turn and release it terminally without waiting for that turn to unwind. This
  * is the only kill path for a keep-alive subagent that was budget-aborted, went
  * `idle`/`parked`, and outlived its job row — otherwise it is unstoppable short
  * of a broker restart (issue #6315). Scoped to the caller's own descendants so
@@ -439,14 +439,14 @@ async function cancelAgentRegistration(
 	}
 	const lifecycle = session.agentLifecycle?.();
 	try {
-		if (ref.status === "running" && ref.session) {
-			await ref.session.abort({ reason: USER_INTERRUPT_LABEL });
-		}
+		const live = ref.session;
+		const abort = ref.status === "running" ? live?.abort({ reason: USER_INTERRUPT_LABEL }) : undefined;
 		if (lifecycle) {
-			await lifecycle.release(id);
+			await Promise.all([abort, lifecycle.release(id, ref, { tombstone: true })]);
 		} else {
-			await ref.session?.dispose();
-			registry?.unregister(id);
+			registry?.detachSession(id, ref);
+			registry?.setStatus(id, "aborted", ref);
+			await Promise.all([abort, live?.dispose()]);
 		}
 	} catch (error) {
 		return {
@@ -455,7 +455,7 @@ async function cancelAgentRegistration(
 			message: `Agent ${id} could not be fully cancelled: ${error instanceof Error ? error.message : String(error)}.`,
 		};
 	}
-	return { id, status: "cancelled", message: `Cancelled agent ${id} (killed session, dropped registration).` };
+	return { id, status: "cancelled", message: `Cancelled agent ${id} (killed session, retained transcript).` };
 }
 
 /** `jobs`: read-only snapshot of every job plus the jobless running-agent roster. */

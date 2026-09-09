@@ -732,10 +732,10 @@ class GatedAtomicFailureStorage extends MemorySessionStorage {
 		return { started: started.promise, release: release.resolve };
 	}
 
-	override async writeTextAtomic(path: string, content: string, options?: WriteTextAtomicOptions): Promise<void> {
+	override async appendTextAtomic(path: string, content: string, options?: WriteTextAtomicOptions): Promise<void> {
 		const failure = this.#nextFailure;
 		if (!failure) {
-			await super.writeTextAtomic(path, content, options);
+			await super.appendTextAtomic(path, content, options);
 			return;
 		}
 		this.#nextFailure = undefined;
@@ -747,6 +747,16 @@ class GatedAtomicFailureStorage extends MemorySessionStorage {
 
 class ScriptedAtomicFailureStorage extends MemorySessionStorage {
 	readonly behaviors: Array<{ commit: boolean; error: Error }> = [];
+
+	override async appendTextAtomic(path: string, suffix: string, options?: WriteTextAtomicOptions): Promise<void> {
+		const behavior = this.behaviors.shift();
+		if (!behavior) {
+			await super.appendTextAtomic(path, suffix, options);
+			return;
+		}
+		if (behavior.commit) await super.appendTextAtomic(path, suffix, options);
+		throw behavior.error;
+	}
 
 	override async writeTextAtomic(path: string, content: string, options?: WriteTextAtomicOptions): Promise<void> {
 		const behavior = this.behaviors.shift();
@@ -760,6 +770,102 @@ class ScriptedAtomicFailureStorage extends MemorySessionStorage {
 }
 
 describe("SessionManager atomic entry batches", () => {
+	it("preserves raw history and publishes each append once across flush, close, copy, and acknowledgement", async () => {
+		const flushing = Promise.withResolvers<void>();
+		const allowFlush = Promise.withResolvers<void>();
+		const closing = Promise.withResolvers<void>();
+		const allowClose = Promise.withResolvers<void>();
+		const staging = Promise.withResolvers<void>();
+		const allowCommit = Promise.withResolvers<void>();
+		const committed = Promise.withResolvers<void>();
+		const allowAcknowledgement = Promise.withResolvers<void>();
+		let armed = false;
+		let firstPublication = true;
+		class GatedBatchStorage extends MemorySessionStorage {
+			override openWriter(
+				path: string,
+				options?: { flags?: "a" | "w"; onError?: (err: Error) => void },
+			): SessionStorageWriter {
+				const writer = super.openWriter(path, options);
+				const flush = writer.flush.bind(writer);
+				const close = writer.close.bind(writer);
+				writer.flush = async () => {
+					if (armed) {
+						flushing.resolve();
+						await allowFlush.promise;
+					}
+					await flush();
+				};
+				writer.close = async () => {
+					if (armed) {
+						closing.resolve();
+						await allowClose.promise;
+					}
+					await close();
+				};
+				return writer;
+			}
+
+			override async appendTextAtomic(path: string, suffix: string, options?: WriteTextAtomicOptions): Promise<void> {
+				if (!firstPublication) return super.appendTextAtomic(path, suffix, options);
+				firstPublication = false;
+				staging.resolve();
+				await allowCommit.promise;
+				await super.appendTextAtomic(path, suffix, options);
+				committed.resolve();
+				await allowAcknowledgement.promise;
+			}
+		}
+		const storage = new GatedBatchStorage();
+		const manager = SessionManager.create("/cwd", "/sessions", storage);
+		const expectedIds = [manager.appendCustomEntry("cold-history", { content: "durable source" })];
+		await manager.ensureOnDisk();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		// Valid JSONL with noncanonical whitespace exposes any full-prefix rewrite.
+		const rawPrefix = (await storage.readText(sessionFile)).replaceAll("\n", " \t\n");
+		storage.writeTextSync(sessionFile, rawPrefix);
+		expectedIds.push(manager.appendCustomEntry("before-batch"));
+		armed = true;
+		const batch = manager.appendEntriesAtomically(() => {
+			expectedIds.push(manager.appendCustomEntry("batch-first"));
+			expectedIds.push(manager.appendCustomEntry("batch-second"));
+			return "batch-result";
+		});
+		await flushing.promise;
+		expectedIds.push(manager.appendCustomEntry("during-flush"));
+		allowFlush.resolve();
+		await closing.promise;
+		expectedIds.push(manager.appendCustomEntry("during-close"));
+		const beforePublication = await storage.readText(sessionFile);
+		allowClose.resolve();
+		await staging.promise;
+		expectedIds.push(manager.appendCustomEntry("during-copy"));
+		expect(await storage.readText(sessionFile)).toBe(beforePublication);
+		allowCommit.resolve();
+		await committed.promise;
+		const publishedBatch = await storage.readText(sessionFile);
+		expect(publishedBatch).toContain("batch-first");
+		expect(publishedBatch).toContain("batch-second");
+		expect(publishedBatch).not.toContain("during-copy");
+		expectedIds.push(manager.appendCustomEntry("during-acknowledgement"));
+		allowAcknowledgement.resolve();
+		expect(await batch).toBe("batch-result");
+		await manager.close();
+		const content = await storage.readText(sessionFile);
+		expect(content.slice(0, rawPrefix.length)).toBe(rawPrefix);
+		const persistedIds = content
+			.trim()
+			.split("\n")
+			.map(line => JSON.parse(line))
+			.filter(entry => entry.type === "custom")
+			.map(entry => entry.id);
+		expect(persistedIds).toEqual(expectedIds);
+		const reopened = await SessionManager.open(sessionFile, "/sessions", storage, { suppressBreadcrumb: true });
+		expect(reopened.getBranch().map(entry => entry.id)).toEqual(expectedIds);
+		await reopened.close();
+	});
+
 	it("restores the exact active branch when an atomic batch publish fails", async () => {
 		const storage = new GatedAtomicFailureStorage();
 		const manager = SessionManager.create("/cwd", "/sessions", storage);

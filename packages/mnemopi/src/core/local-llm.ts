@@ -172,9 +172,12 @@ export async function callConfiguredCompletion(
 	temperature: number,
 	opts: MnemopiLlmCompleteOptions = {},
 ): Promise<string | null> {
+	const signal = opts.signal ?? getMnemopiRuntimeOptions()?.signal;
+	signal?.throwIfAborted();
 	const completion = activeCustomCompletion();
 	if (completion !== undefined) {
 		const raw = await completion(prompt, {
+			signal,
 			maxTokens: opts.maxTokens ?? llmMaxTokens(),
 			temperature,
 			timeout: opts.timeout,
@@ -182,6 +185,7 @@ export async function callConfiguredCompletion(
 			model: opts.model,
 			task: opts.task,
 		});
+		signal?.throwIfAborted();
 		return typeof raw === "string" ? raw : null;
 	}
 	const model = activePiAiModel();
@@ -197,6 +201,7 @@ export async function callConfiguredCompletion(
 				},
 				{
 					apiKey: llmApiKey() || undefined,
+					signal,
 					maxTokens: opts.maxTokens ?? llmMaxTokens(),
 					temperature,
 				},
@@ -359,7 +364,10 @@ export async function callRemoteLlm(
 				method: "POST",
 				headers,
 				body,
-				signal: AbortSignal.timeout(60000),
+				signal: AbortSignal.any([
+					AbortSignal.timeout(60000),
+					...(getMnemopiRuntimeOptions()?.signal ? [getMnemopiRuntimeOptions()!.signal!] : []),
+				]),
 				fetch: fetchImpl,
 			});
 			if (res.status === 401) {

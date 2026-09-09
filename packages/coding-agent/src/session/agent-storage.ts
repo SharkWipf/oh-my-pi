@@ -19,6 +19,28 @@ import {
 	postmortem,
 } from "@oh-my-pi/pi-utils";
 import type { RawSettings as Settings } from "../config/settings";
+import {
+	createEmptyRequirementsCoverageSummary,
+	createEmptyRequirementsSnapshot,
+	type RequirementsBackend,
+	RequirementsStore,
+} from "../requirements/store";
+import type {
+	RequirementsAuthority,
+	RequirementsBatch,
+	RequirementsConsumptionContext,
+	RequirementsConsumptionSnapshot,
+	RequirementsCoverageSummary,
+	RequirementsObservation,
+	RequirementsRestoreReceipt,
+	RequirementsRelation,
+	RequirementsRevision,
+	RequirementsScope,
+	RequirementsSnapshot,
+	RequirementsSource,
+	RequirementsSourceMetadata,
+	RequirementsSourceState,
+} from "../requirements/types";
 
 /** Row shape for settings table queries */
 type SettingsRow = {
@@ -125,7 +147,7 @@ function normalizeModelPerfSample(modelKey: string, sample: ModelPerfSample): Mo
 }
 
 /** Current agent.db schema version; bump when schema changes require migration. */
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 10;
 const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
 
 /** Singleton instances per database path */
@@ -156,6 +178,8 @@ export class AgentStorage {
 	/** Coalesces per-turn perf samples into one deferred transaction off the turn's hot path. */
 	#perfDrain = new AsyncDrain<ModelPerfInsert>(MODEL_PERF_FLUSH_DELAY_MS);
 	#closing = false;
+	#requirements!: RequirementsStore;
+	#requirementsReady?: Promise<void>;
 
 	private constructor(dbPath: string) {
 		this.#autoPerfBackfill = dbPath === getAgentDbPath();
@@ -174,6 +198,7 @@ export class AgentStorage {
 		}
 
 		this.#initializeSchema();
+		this.#requirements = new RequirementsStore(this.#requirementsBackend());
 		this.#hardenPermissions(dbPath);
 
 		// Create AuthCredentialStore with our open database
@@ -341,6 +366,77 @@ CREATE TABLE settings (
 			this.#db.run("DELETE FROM model_perf");
 			this.#db.prepare("DELETE FROM meta WHERE key = ?").run(MODEL_PERF_BACKFILL_KEY);
 		}
+		if (fromVersion < 7) {
+			this.#db.run(`
+CREATE TABLE IF NOT EXISTS requirements_sources (id TEXT PRIMARY KEY, body TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS requirements_batches (id TEXT PRIMARY KEY, source_key TEXT NOT NULL, source_integrity TEXT NOT NULL, extraction_version TEXT NOT NULL, review_revision TEXT NOT NULL, body TEXT NOT NULL, UNIQUE(source_key, source_integrity, extraction_version, review_revision));
+CREATE TABLE IF NOT EXISTS requirements_revisions (id TEXT PRIMARY KEY, body TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS requirements_state (id INTEGER PRIMARY KEY CHECK(id = 1), body TEXT NOT NULL);
+`);
+		}
+		if (fromVersion < 8) {
+			this.#db.run(`
+CREATE INDEX IF NOT EXISTS requirements_source_coverage ON requirements_sources(COALESCE(json_extract(body, '$.referenceOnly'), 0), json_extract(body, '$.state'));
+CREATE INDEX IF NOT EXISTS requirements_pending_input ON requirements_sources(id) WHERE COALESCE(json_extract(body, '$.referenceOnly'), 0) = 0 AND json_extract(body, '$.state') != 'complete' AND json_extract(body, '$.origin.kind') IN ('human', 'sdk');
+`);
+		}
+
+		if (fromVersion < 9) {
+			this.#db.run(`
+ALTER TABLE requirements_state RENAME TO requirements_state_legacy;
+CREATE TABLE requirements_state (id INTEGER PRIMARY KEY CHECK(id = 1), publication_revision INTEGER NOT NULL, generation INTEGER NOT NULL);
+INSERT INTO requirements_state VALUES(1, 0, 0);
+UPDATE requirements_state SET publication_revision = COALESCE((SELECT json_extract(body, '$.publicationRevision') FROM requirements_state_legacy WHERE id = 1), 0), generation = COALESCE((SELECT json_extract(body, '$.generation') FROM requirements_state_legacy WHERE id = 1), 0);
+CREATE TABLE requirements_owners (id TEXT PRIMARY KEY, body TEXT NOT NULL);
+CREATE TABLE requirements_restore_receipts (id TEXT PRIMARY KEY, body TEXT NOT NULL);
+CREATE TABLE requirements_restore_reviews (id TEXT PRIMARY KEY, body TEXT NOT NULL);
+CREATE TABLE requirements_tombstones (id TEXT PRIMARY KEY, body TEXT NOT NULL);
+CREATE TABLE requirements_suspensions (id TEXT PRIMARY KEY, body TEXT NOT NULL);
+INSERT INTO requirements_owners SELECT entry.key, entry.value FROM requirements_state_legacy, json_each(body, '$.owners') entry;
+INSERT INTO requirements_restore_receipts SELECT json_extract(entry.value, '$.id'), entry.value FROM requirements_state_legacy, json_each(body, '$.restoreReceipts') entry;
+INSERT INTO requirements_restore_reviews SELECT entry.key, entry.value FROM requirements_state_legacy, json_each(body, '$.restoreReviews') entry;
+INSERT INTO requirements_tombstones SELECT json_array(json_extract(entry.value, '$.scope.kind'), CASE WHEN json_extract(entry.value, '$.scope.kind') = 'project' THEN json_extract(entry.value, '$.scope.projectId') END, CASE WHEN json_extract(entry.value, '$.scope.kind') IN ('session', 'task') THEN json_extract(entry.value, '$.scope.sessionId') END, CASE WHEN json_extract(entry.value, '$.scope.kind') IN ('session', 'task') THEN json_extract(entry.value, '$.scope.epoch') END), entry.value FROM requirements_state_legacy, json_each(body, '$.tombstones') entry;
+DROP TABLE requirements_state_legacy;
+CREATE TABLE requirements_heads (id TEXT PRIMARY KEY, requirement_id TEXT NOT NULL, scope_key TEXT NOT NULL, source_key TEXT NOT NULL);
+CREATE INDEX requirements_heads_requirement ON requirements_heads(requirement_id);
+CREATE INDEX requirements_heads_scope ON requirements_heads(scope_key);
+CREATE TABLE requirements_dependencies (kind TEXT NOT NULL, dependent_id TEXT NOT NULL, source_key TEXT NOT NULL, PRIMARY KEY(kind, dependent_id, source_key));
+CREATE INDEX requirements_dependencies_source ON requirements_dependencies(source_key, kind, dependent_id);
+CREATE TABLE requirements_source_locators (source_key TEXT NOT NULL, journal_path TEXT NOT NULL, PRIMARY KEY(source_key, journal_path));
+CREATE INDEX requirements_locator_journal ON requirements_source_locators(journal_path, source_key);
+CREATE INDEX requirements_batch_source ON requirements_batches(source_key);
+CREATE INDEX requirements_latest_batch ON requirements_batches(source_key, source_integrity);
+CREATE INDEX requirements_revision_batch ON requirements_revisions(json_extract(body, '$.batchId'));
+CREATE INDEX requirements_pending_owner ON requirements_sources(json_extract(body, '$.ownerSessionId'), json_extract(body, '$.epoch')) WHERE COALESCE(json_extract(body, '$.referenceOnly'), 0) = 0 AND json_extract(body, '$.state') != 'complete' AND json_extract(body, '$.origin.kind') IN ('human', 'sdk');
+CREATE TABLE requirements_coverage (reference_only INTEGER NOT NULL, state TEXT NOT NULL, count INTEGER NOT NULL, PRIMARY KEY(reference_only, state));
+INSERT INTO requirements_coverage SELECT COALESCE(json_extract(body, '$.referenceOnly'), 0), json_extract(body, '$.state'), count(*) FROM requirements_sources GROUP BY 1, 2;
+CREATE TRIGGER requirements_source_insert AFTER INSERT ON requirements_sources BEGIN
+ INSERT INTO requirements_coverage VALUES(COALESCE(json_extract(NEW.body, '$.referenceOnly'), 0), json_extract(NEW.body, '$.state'), 1) ON CONFLICT(reference_only, state) DO UPDATE SET count = count + 1;
+END;
+CREATE TRIGGER requirements_source_delete AFTER DELETE ON requirements_sources BEGIN
+ UPDATE requirements_coverage SET count = count - 1 WHERE reference_only = COALESCE(json_extract(OLD.body, '$.referenceOnly'), 0) AND state = json_extract(OLD.body, '$.state');
+END;
+CREATE TRIGGER requirements_source_update AFTER UPDATE OF body ON requirements_sources WHEN COALESCE(json_extract(OLD.body, '$.referenceOnly'), 0) != COALESCE(json_extract(NEW.body, '$.referenceOnly'), 0) OR json_extract(OLD.body, '$.state') != json_extract(NEW.body, '$.state') BEGIN
+ UPDATE requirements_coverage SET count = count - 1 WHERE reference_only = COALESCE(json_extract(OLD.body, '$.referenceOnly'), 0) AND state = json_extract(OLD.body, '$.state');
+ INSERT INTO requirements_coverage VALUES(COALESCE(json_extract(NEW.body, '$.referenceOnly'), 0), json_extract(NEW.body, '$.state'), 1) ON CONFLICT(reference_only, state) DO UPDATE SET count = count + 1;
+END;
+INSERT INTO meta(key, value) VALUES('requirements_normalizing', '0') ON CONFLICT(key) DO NOTHING;
+`);
+		}
+		if (fromVersion < 10) {
+			this.#db.run(`
+CREATE TABLE requirements_relation_edges (revision_id TEXT NOT NULL, position INTEGER NOT NULL, successor_key TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(revision_id, position));
+CREATE INDEX requirements_relations_successor ON requirements_relation_edges(successor_key);
+DROP INDEX requirements_pending_input;
+DROP INDEX requirements_pending_owner;
+CREATE INDEX requirements_pending_input ON requirements_sources(id) WHERE COALESCE(json_extract(body, '$.referenceOnly'), 0) = 0 AND json_extract(body, '$.state') != 'complete' AND json_extract(body, '$.origin.kind') = 'human';
+CREATE INDEX requirements_pending_owner ON requirements_sources(json_extract(body, '$.ownerSessionId'), json_extract(body, '$.epoch')) WHERE COALESCE(json_extract(body, '$.referenceOnly'), 0) = 0 AND json_extract(body, '$.state') != 'complete' AND json_extract(body, '$.origin.kind') = 'human';
+CREATE TABLE requirements_legacy_sdk_sources (id TEXT PRIMARY KEY);
+INSERT INTO requirements_legacy_sdk_sources SELECT id FROM requirements_sources WHERE json_extract(body, '$.origin.kind') = 'sdk';
+UPDATE requirements_sources SET body = json_set(body, '$.origin.kind', 'unknown', '$.state', 'unsupported', '$.integrityAvailable', json('false'), '$.reason', 'Legacy SDK provenance requires operator adoption') WHERE id IN (SELECT id FROM requirements_legacy_sdk_sources);
+`);
+			if (fromVersion >= 9) this.#db.query("INSERT INTO meta(key, value) VALUES('requirements_relations_normalizing', '0') ON CONFLICT(key) DO NOTHING").run();
+		}
 	}
 
 	#migrateSchemaV4ToV5(): void {
@@ -386,7 +482,7 @@ FROM model_usage_legacy
 	 */
 	static async open(dbPath: string = getAgentDbPath()): Promise<AgentStorage> {
 		const existing = instances.get(dbPath);
-		if (existing) return existing;
+		if (existing) { await existing.#requirementsReady; return existing; }
 
 		const maxRetries = 4;
 		const baseDelayMs = 100;
@@ -401,6 +497,8 @@ FROM model_usage_legacy
 				// late registration sees an empty map.
 				cancelExitCleanup ??= postmortem.register("agent-storage", () => AgentStorage.close(), { exitOnly: true });
 				instances.set(dbPath, storage);
+				storage.#requirementsReady = storage.#normalizeRequirements().then(() => storage.#normalizeRequirementsRelations()).then(() => storage.#normalizeLegacyRequirementsSdk());
+				try { await storage.#requirementsReady; } catch (error) { instances.delete(dbPath); storage.#db.close(); throw error; }
 				return storage;
 			} catch (err) {
 				if (!isSqliteBusyError(err)) {
@@ -870,4 +968,331 @@ ON CONFLICT(model_key) DO UPDATE SET
 			logger.warn("AgentStorage failed to chmod db file", { path: dbPath, error: String(error) });
 		}
 	}
+	/** One resumable cooperative pass on a legacy database, before publishing its open handle. */
+	async #normalizeRequirements(): Promise<void> {
+		const marker = this.#db.query("SELECT value FROM meta WHERE key = 'requirements_normalizing'").get() as { value: string } | null;
+		if (!marker) return;
+		let progress: { phase: "sources" | "batches" | "revisions"; cursor: number } = marker.value === "0" ? { phase: "sources", cursor: 0 } : JSON.parse(marker.value);
+		const backend = this.#requirementsBackend();
+		for (;;) {
+			const rows = this.#db.query("SELECT rowid AS cursor, body FROM requirements_" + progress.phase + " WHERE rowid > ? ORDER BY rowid LIMIT 128").all(progress.cursor) as { cursor: number; body: string }[];
+			this.#db.transaction(() => {
+				for (const item of rows) {
+					if (progress.phase === "sources") this.#writeRequirementsLocators(JSON.parse(item.body) as RequirementsSource);
+					else if (progress.phase === "batches") this.#writeRequirementsDependencies(JSON.parse(item.body) as RequirementsBatch);
+					else {
+						const revision = JSON.parse(item.body) as RequirementsRevision;
+						this.#retireLegacyRequirementsAdmission(revision);
+						backend.putRevision(revision);
+						const heads = this.#requirementsHeadIds(undefined, revision.requirementId).map(id => this.getRequirementsRevision(id)!);
+						const remaining: RequirementsRevision[] = [];
+						let superseded = false;
+						for (const head of heads) {
+							if (head.id === revision.id) continue;
+							if (this.#requirementsScopeKey(head.scope) !== this.#requirementsScopeKey(revision.scope)) { remaining.push(head); continue; }
+							if (revision.predecessorRevisionIds.includes(head.id) || this.#legacyRequirementsPrecedes(head.sourceKey, revision.sourceKey, [...(head.relations ?? []), ...(revision.relations ?? [])])) continue;
+							if (head.predecessorRevisionIds.includes(revision.id) || this.#legacyRequirementsPrecedes(revision.sourceKey, head.sourceKey, [...(head.relations ?? []), ...(revision.relations ?? [])])) superseded = true;
+							remaining.push(head);
+						}
+						if (!superseded) remaining.push(revision);
+						this.#setRequirementsHeads(revision.requirementId, remaining);
+					}
+					progress.cursor = item.cursor;
+				}
+				if (!rows.length && progress.phase !== "revisions") progress = { phase: progress.phase === "sources" ? "batches" : "revisions", cursor: 0 };
+				this.#db.query("UPDATE meta SET value = ? WHERE key = 'requirements_normalizing'").run(JSON.stringify(progress));
+			}).immediate();
+			if (!rows.length && progress.phase === "revisions" && progress.cursor !== 0) break;
+			if (!rows.length && progress.phase === "revisions" && !(this.#db.query("SELECT 1 FROM requirements_revisions WHERE rowid > ? LIMIT 1").get(progress.cursor))) break;
+			await Bun.sleep(0);
+		}
+		this.#db.query("DELETE FROM meta WHERE key = 'requirements_normalizing'").run();
+	}
+
+	#legacyRequirementsPrecedes(predecessor: string, successor: string, relations: NonNullable<RequirementsRevision["relations"]>): boolean {
+		const pending = [successor], seen = new Set<string>();
+		while (pending.length) {
+			const key = pending.pop()!;
+			if (seen.has(key)) continue;
+			seen.add(key);
+			const source = this.getRequirementsSource(key);
+			if (!source || source.integrityAvailable === false || source.state === "orphaned") continue;
+			if (key === predecessor) return true;
+			const parent = source.parentKey ? this.getRequirementsSource(source.parentKey) : undefined;
+			if (parent && parent.ownerSessionId === source.ownerSessionId && parent.epoch === source.epoch) pending.push(parent.key);
+			for (const relation of relations) if (relation.successorSourceKey === key) pending.push(relation.predecessorSourceKey);
+		}
+		return false;
+	}
+
+	/** Only explicit inspection materializes the retained ledger. Normal operations use indexed affected rows. */
+	#requirementsBackend(): RequirementsBackend {
+		return {
+			transaction: run => this.#db.transaction(run).immediate(),
+			state: (owner, receipt, revisions, scopes) => this.#readRequirementsState(owner, receipt, revisions, scopes),
+			writeState: (before, after) => this.#writeRequirementsState(before, after),
+			source: key => this.getRequirementsSource(key),
+			batch: id => this.getRequirementsBatch(id),
+			revision: id => this.getRequirementsRevision(id),
+			putSource: source => { this.#putRequirementsRow("sources", source.key, source); this.#writeRequirementsLocators(source); },
+			putBatch: batch => {
+				this.#db.query("INSERT INTO requirements_batches(id, source_key, source_integrity, extraction_version, review_revision, body) VALUES(?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET source_key=excluded.source_key, source_integrity=excluded.source_integrity, extraction_version=excluded.extraction_version, review_revision=excluded.review_revision, body=excluded.body")
+					.run(batch.id, batch.sourceKey, batch.sourceIntegrity, batch.extractionVersion, batch.reviewRevision, JSON.stringify(batch));
+				this.#writeRequirementsDependencies(batch);
+			},
+			putRevision: revision => {
+				const { quarantine, ...row } = revision;
+				this.#putRequirementsRow("revisions", revision.id, row);
+				if (quarantine) this.#putRequirementsRow("suspensions", revision.id, quarantine);
+				else this.#db.query("DELETE FROM requirements_suspensions WHERE id = ?").run(revision.id);
+				this.#writeRequirementsDependencies(revision);
+				this.#writeRequirementsRelations(revision);
+			},
+			deleteBatch: id => {
+				this.#db.query("DELETE FROM requirements_dependencies WHERE kind = 'batch' AND dependent_id = ?").run(id);
+				this.#db.query("DELETE FROM requirements_batches WHERE id = ?").run(id);
+			},
+			batchIdsForSource: key => this.#requirementsIds("SELECT id FROM requirements_batches WHERE source_key = ?", key),
+			revisionIdsForBatch: id => this.#requirementsIds("SELECT id FROM requirements_revisions WHERE json_extract(body, '$.batchId') = ?", id),
+			dependentIds: (key, kind) => this.#requirementsIds("SELECT dependent_id AS id FROM requirements_dependencies WHERE source_key = ? AND kind = ?", key, kind),
+			relationsForSuccessor: key => (this.#db.query("SELECT body FROM requirements_relation_edges WHERE successor_key = ?").all(key) as { body: string }[]).map(row => JSON.parse(row.body) as RequirementsRelation),
+			headIds: (context, requirementId) => this.#requirementsHeadIds(context, requirementId),
+			setHeads: (id, rows) => this.#setRequirementsHeads(id, rows),
+			pending: context => this.getRequirementsPendingSources(context),
+			coverage: keys => this.getRequirementsCoverageSummary(keys),
+			snapshot: () => this.#readRequirementsSnapshot(),
+		};
+	}
+
+	#requirementsIds(sql: string, ...params: string[]): string[] {
+		return (this.#db.query(sql).all(...params) as { id: string }[]).map(row => row.id);
+	}
+
+	#requirementsRow<T>(table: string, id: string): T | undefined {
+		const row = this.#db.query("SELECT body FROM requirements_" + table + " WHERE id = ?").get(id) as { body: string } | null;
+		return row ? JSON.parse(row.body) as T : undefined;
+	}
+
+	#putRequirementsRow(table: string, id: string, row: unknown): void {
+		this.#db.query("INSERT INTO requirements_" + table + "(id, body) VALUES(?, ?) ON CONFLICT(id) DO UPDATE SET body = excluded.body").run(id, JSON.stringify(row));
+	}
+
+	#requirementsScopeKey(scope: RequirementsScope): string {
+		return JSON.stringify([scope.kind, scope.kind === "project" ? scope.projectId ?? null : null, scope.kind === "session" || scope.kind === "task" ? scope.sessionId ?? null : null, scope.kind === "session" || scope.kind === "task" ? scope.epoch ?? null : null]);
+	}
+
+	#readRequirementsState(owner?: string, receipt?: string, revisions: readonly string[] = [], scopes: readonly RequirementsScope[] = []): RequirementsSnapshot["state"] {
+		const scalar = this.#db.query("SELECT publication_revision AS publicationRevision, generation FROM requirements_state WHERE id = 1").get() as { publicationRevision: number; generation: number };
+		const state: RequirementsSnapshot["state"] = { ...scalar, owners: {}, restoreReceipts: [], restoreReviews: {}, tombstones: [] };
+		if (owner) { const row = this.#requirementsRow<RequirementsAuthority>("owners", owner); if (row) state.owners[owner] = row; }
+		if (receipt) { const row = this.#requirementsRow<RequirementsRestoreReceipt>("restore_receipts", receipt); if (row) state.restoreReceipts.push(row); }
+		for (const id of revisions) { const row = this.#requirementsRow<RequirementsSnapshot["state"]["restoreReviews"][string]>("restore_reviews", id); if (row) state.restoreReviews[id] = row; }
+		for (const scope of scopes) { const row = this.#requirementsRow<NonNullable<RequirementsSnapshot["state"]["tombstones"]>[number]>("tombstones", this.#requirementsScopeKey(scope)); if (row) state.tombstones!.push(row); }
+		return state;
+	}
+
+	#writeRequirementsState(before: RequirementsSnapshot["state"], after: RequirementsSnapshot["state"]): void {
+		if (before.publicationRevision !== after.publicationRevision || before.generation !== after.generation)
+			this.#db.query("UPDATE requirements_state SET publication_revision = ?, generation = ? WHERE id = 1").run(after.publicationRevision, after.generation);
+		for (const id of Object.keys(before.owners)) if (!after.owners[id]) this.#db.query("DELETE FROM requirements_owners WHERE id = ?").run(id);
+		for (const [id, row] of Object.entries(after.owners)) if (JSON.stringify(row) !== JSON.stringify(before.owners[id])) this.#putRequirementsRow("owners", id, row);
+		const receipts = new Set(before.restoreReceipts.map(row => row.id));
+		for (const row of after.restoreReceipts) if (!receipts.has(row.id)) this.#putRequirementsRow("restore_receipts", row.id, row);
+		for (const [id, row] of Object.entries(after.restoreReviews)) if (JSON.stringify(row) !== JSON.stringify(before.restoreReviews[id])) this.#putRequirementsRow("restore_reviews", id, row);
+		const old = new Map((before.tombstones ?? []).map(row => [this.#requirementsScopeKey(row.scope), JSON.stringify(row)]));
+		for (const row of after.tombstones ?? []) {
+			const id = this.#requirementsScopeKey(row.scope);
+			if (old.get(id) !== JSON.stringify(row)) this.#putRequirementsRow("tombstones", id, row);
+			old.delete(id);
+		}
+		for (const id of old.keys()) this.#db.query("DELETE FROM requirements_tombstones WHERE id = ?").run(id);
+	}
+	/** Accepted relation history remains authoritative after its revision ceases to be a head. */
+	#writeRequirementsRelations(revision: RequirementsRevision): void {
+		this.#db.query("DELETE FROM requirements_relation_edges WHERE revision_id = ?").run(revision.id);
+		if (revision.lifecycle !== "accepted" || (revision.availability && revision.availability !== "available")) return;
+		const put = this.#db.query("INSERT INTO requirements_relation_edges(revision_id, position, successor_key, body) VALUES(?, ?, ?, ?)");
+		for (const [position, relation] of (revision.relations ?? []).entries()) put.run(revision.id, position, relation.successorSourceKey, JSON.stringify(relation));
+	}
+	/** Old slice citations and aggregate verdicts are history, never upgraded into whole-unit admission. */
+	#retireLegacyRequirementsAdmission(revision: RequirementsRevision, force = false): boolean {
+		if (revision.lifecycle === "historical") return false;
+		const batch = this.getRequirementsBatch(revision.batchId);
+		const evidence = [...revision.evidence, ...(revision.referents ?? []), ...(revision.relations ?? []).flatMap(relation => relation.evidence)];
+		const ids = batch?.operationIds;
+		const hasCandidateMap = (review: RequirementsBatch["review"]["sanity"]): boolean =>
+			Array.isArray(ids) && Array.isArray(review?.candidates) && review.candidates.length === ids.length &&
+			new Set(review.candidates.map(candidate => candidate.id)).size === ids.length && review.candidates.every(candidate => ids.includes(candidate.id));
+		const legacy = force || evidence.some(unit => "start" in unit || "end" in unit) || !batch ||
+			!Array.isArray(ids) || ids.length !== batch.operations.length || new Set(ids).size !== ids.length ||
+			!hasCandidateMap(batch.review.sanity) || (!batch.review.literalAcceptance &&
+				(!hasCandidateMap(batch.review.evidence) || !Array.isArray(batch.review.evidence?.obligations) ||
+					batch.review.evidence.obligations.some(obligation => !Array.isArray(obligation.operationIds) || !Array.isArray(obligation.applicableRevisionIds))));
+		if (!legacy) return false;
+		const reason = "Legacy requirements admission needs fresh whole-unit extraction and independent review";
+		revision.lifecycle = "historical";
+		revision.availability = "changed";
+		if (batch && batch.status !== "stale") {
+			batch.status = "stale"; batch.reason = reason;
+			this.#db.query("UPDATE requirements_batches SET body = ? WHERE id = ?").run(JSON.stringify(batch), batch.id);
+		}
+		const source = this.getRequirementsSource(revision.sourceKey);
+		if (source && source.origin.kind === "human") { source.state = "pending"; source.reason = reason; this.#putRequirementsRow("sources", source.key, source); }
+		return true;
+	}
+
+
+	async #normalizeRequirementsRelations(): Promise<void> {
+		const marker = this.#db.query("SELECT value FROM meta WHERE key = 'requirements_relations_normalizing'").get() as { value: string } | null;
+		if (!marker) return;
+		let cursor = Number(marker.value);
+		for (;;) {
+			const rows = this.#db.query("SELECT rowid AS cursor, body FROM requirements_revisions WHERE rowid > ? ORDER BY rowid LIMIT 128").all(cursor) as { cursor: number; body: string }[];
+			if (!rows.length) break;
+			this.#db.transaction(() => {
+				for (const row of rows) {
+					const revision = JSON.parse(row.body) as RequirementsRevision;
+					revision.quarantine = this.#requirementsRow("suspensions", revision.id);
+					if (this.#retireLegacyRequirementsAdmission(revision)) this.#requirementsBackend().putRevision(revision);
+					else this.#writeRequirementsRelations(revision);
+					cursor = row.cursor;
+				}
+				this.#db.query("UPDATE meta SET value = ? WHERE key = 'requirements_relations_normalizing'").run(String(cursor));
+			}).immediate();
+			await Bun.sleep(0);
+		}
+		this.#db.query("DELETE FROM meta WHERE key = 'requirements_relations_normalizing'").run();
+	}
+	async #normalizeLegacyRequirementsSdk(): Promise<void> {
+		if (!this.#db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'requirements_legacy_sdk_sources'").get()) return;
+		const backend = this.#requirementsBackend();
+		for (;;) {
+			const rows = this.#db.query("SELECT id FROM requirements_legacy_sdk_sources LIMIT 128").all() as { id: string }[];
+			if (!rows.length) break;
+			this.#db.transaction(() => {
+				const ids = new Set<string>();
+				for (const row of rows) for (const id of backend.dependentIds(row.id, "revision")) ids.add(id);
+				for (const id of ids) { const revision = this.getRequirementsRevision(id)!; this.#retireLegacyRequirementsAdmission(revision, true); revision.availability = "unavailable"; backend.putRevision(revision); }
+				for (const row of rows) this.#db.query("DELETE FROM requirements_legacy_sdk_sources WHERE id = ?").run(row.id);
+			}).immediate();
+			await Bun.sleep(0);
+		}
+		this.#db.run("DROP TABLE requirements_legacy_sdk_sources");
+	}
+
+	#writeRequirementsDependencies(row: RequirementsBatch | RequirementsRevision): void {
+		const batch = "operations" in row;
+		const kind = batch ? "batch" : "revision";
+		const keys = new Set([row.sourceKey]);
+		if (batch) for (const key of Object.keys(row.readSourceIntegrities)) keys.add(key);
+		for (const operation of batch ? row.operations : [row]) {
+			for (const evidence of operation.evidence) keys.add(evidence.sourceKey);
+			for (const evidence of operation.referents ?? []) keys.add(evidence.sourceKey);
+			for (const relation of operation.relations ?? []) {
+				keys.add(relation.predecessorSourceKey); keys.add(relation.successorSourceKey);
+				for (const evidence of relation.evidence) keys.add(evidence.sourceKey);
+			}
+		}
+		this.#db.query("DELETE FROM requirements_dependencies WHERE kind = ? AND dependent_id = ?").run(kind, row.id);
+		const insert = this.#db.query("INSERT INTO requirements_dependencies(kind, dependent_id, source_key) VALUES(?, ?, ?)");
+		for (const key of keys) insert.run(kind, row.id, key);
+	}
+
+	#requirementsHeadIds(context?: RequirementsConsumptionContext, requirementId?: string): string[] {
+		if (requirementId !== undefined) return this.#requirementsIds("SELECT id FROM requirements_heads WHERE requirement_id = ?", requirementId);
+		if (!context) return this.#requirementsIds("SELECT id FROM requirements_heads");
+		const scopes: RequirementsScope[] = [{ kind: "global" }, { kind: "session", sessionId: context.sessionId, epoch: context.epoch }, { kind: "task", sessionId: context.sessionId, epoch: context.epoch }];
+		if (context.projectId) scopes.push({ kind: "project", projectId: context.projectId });
+		const read = this.#db.query("SELECT id, source_key FROM requirements_heads WHERE scope_key = ?");
+		return scopes.flatMap(scope => (read.all(this.#requirementsScopeKey(scope)) as { id: string; source_key: string }[])
+			.filter(row => scope.kind === "global" || scope.kind === "project" || !context.sourceKeys || context.sourceKeys.has(row.source_key)).map(row => row.id));
+	}
+
+	#setRequirementsHeads(id: string, revisions: RequirementsRevision[]): void {
+		const old = new Set(this.#requirementsIds("SELECT id FROM requirements_heads WHERE requirement_id = ?", id));
+		const put = this.#db.query("INSERT INTO requirements_heads(id, requirement_id, scope_key, source_key) VALUES(?, ?, ?, ?) ON CONFLICT(id) DO NOTHING");
+		for (const row of revisions) { if (!old.delete(row.id)) put.run(row.id, id, this.#requirementsScopeKey(row.scope), row.sourceKey); }
+		for (const revisionId of old) this.#db.query("DELETE FROM requirements_heads WHERE id = ?").run(revisionId);
+	}
+
+	getRequirementsSourceMetadata(key: string): RequirementsSourceMetadata | undefined {
+		const row = this.#db.query("SELECT id AS key, json_extract(body, '$.integrity') AS integrity, json_extract(body, '$.integrityAvailable') AS integrityAvailable, json_extract(body, '$.state') AS state, json_extract(body, '$.locators') AS locators FROM requirements_sources WHERE id = ?").get(key) as { key: string; integrity: string; integrityAvailable: number | null; state: RequirementsSourceState; locators: string } | null;
+		return row ? { key: row.key, integrity: row.integrity, integrityAvailable: row.integrityAvailable === null ? undefined : row.integrityAvailable !== 0, state: row.state, locators: JSON.parse(row.locators) } : undefined;
+	}
+	#writeRequirementsLocators(source: RequirementsSource): void {
+		this.#db.query("DELETE FROM requirements_source_locators WHERE source_key = ?").run(source.key);
+		const put = this.#db.query("INSERT OR IGNORE INTO requirements_source_locators(source_key, journal_path) VALUES(?, ?)");
+		for (const locator of source.locators) if (locator.journalPath) put.run(source.key, locator.journalPath);
+	}
+
+	getRequirementsJournalDependents(journalPath: string): { sources: RequirementsSource[]; revisions: RequirementsRevision[] } {
+		return this.#db.transaction(() => {
+			const edges = this.#db.query("SELECT DISTINCT d.source_key, h.id FROM requirements_source_locators l INDEXED BY requirements_locator_journal CROSS JOIN requirements_dependencies d INDEXED BY requirements_dependencies_source ON d.source_key = l.source_key AND d.kind = 'revision' CROSS JOIN requirements_heads h ON h.id = d.dependent_id CROSS JOIN requirements_revisions r ON r.id = h.id WHERE l.journal_path = ? AND json_extract(r.body, '$.lifecycle') != 'historical'").all(journalPath) as { source_key: string; id: string }[];
+			return { sources: [...new Set(edges.map(row => row.source_key))].map(key => this.getRequirementsSource(key)!), revisions: [...new Set(edges.map(row => row.id))].map(id => this.getRequirementsRevision(id)!) };
+		})();
+	}
+
+
+	getRequirementsSource(key: string): RequirementsSource | undefined { return this.#requirementsRow("sources", key); }
+	getRequirementsBatch(id: string): RequirementsBatch | undefined { return this.#requirementsRow("batches", id); }
+	getRequirementsRevision(id: string): RequirementsRevision | undefined {
+		const row = this.#requirementsRow<RequirementsRevision>("revisions", id);
+		if (row) row.quarantine = this.#requirementsRow("suspensions", id);
+		return row;
+	}
+	getRequirementsLatestBatch(key: string, integrity?: string): RequirementsBatch | undefined {
+		const row = (integrity === undefined
+			? this.#db.query("SELECT body FROM requirements_batches WHERE source_key = ? ORDER BY rowid DESC LIMIT 1").get(key)
+			: this.#db.query("SELECT body FROM requirements_batches WHERE source_key = ? AND source_integrity = ? ORDER BY rowid DESC LIMIT 1").get(key, integrity)) as { body: string } | null;
+		return row ? JSON.parse(row.body) : undefined;
+	}
+	getRequirementsState() { return this.#requirements.getRequirementsState(); }
+	getRequirementsPendingSources(context?: RequirementsConsumptionContext): RequirementsSource[] {
+		const predicate = "COALESCE(json_extract(body, '$.referenceOnly'), 0) = 0 AND json_extract(body, '$.state') != 'complete' AND json_extract(body, '$.origin.kind') = 'human'";
+		const rows = (context
+			? this.#db.query("SELECT body FROM requirements_sources INDEXED BY requirements_pending_owner WHERE " + predicate + " AND json_extract(body, '$.ownerSessionId') = ? AND json_extract(body, '$.epoch') = ? ORDER BY rowid").all(context.sessionId, context.epoch)
+			: this.#db.query("SELECT body FROM requirements_sources INDEXED BY requirements_pending_input WHERE " + predicate + " ORDER BY rowid").all()) as { body: string }[];
+		return rows.map(row => JSON.parse(row.body) as RequirementsSource).filter(row => !context?.sourceKeys || context.sourceKeys.has(row.key));
+	}
+	getRequirementsCoverageSummary(keys?: ReadonlySet<string>): RequirementsCoverageSummary {
+		const summary = createEmptyRequirementsCoverageSummary();
+		if (keys) {
+			const read = this.#db.query("SELECT COALESCE(json_extract(body, '$.referenceOnly'), 0) AS reference_only, json_extract(body, '$.state') AS state FROM requirements_sources WHERE id = ?");
+			for (const key of keys) { const row = read.get(key) as { reference_only: number; state: RequirementsSourceState } | null; if (row) { summary.total++; if (row.reference_only) summary.referenceOnly++; else summary.byState[row.state]++; } }
+		} else for (const row of this.#db.query("SELECT reference_only, state, count FROM requirements_coverage").all() as { reference_only: number; state: RequirementsSourceState; count: number }[]) {
+			summary.total += row.count; if (row.reference_only) summary.referenceOnly += row.count; else summary.byState[row.state] += row.count;
+		}
+		return summary;
+	}
+	getRequirementsConsumptionSnapshot(context: RequirementsConsumptionContext): RequirementsConsumptionSnapshot { return this.#requirements.getRequirementsConsumptionSnapshot(context); }
+	getRequirementsSnapshot(): RequirementsSnapshot { return this.#requirements.getRequirementsSnapshot(); }
+	#readRequirementsSnapshot(): RequirementsSnapshot {
+		const snapshot = createEmptyRequirementsSnapshot();
+		snapshot.state = this.#readRequirementsState();
+		snapshot.state.tombstones = (this.#db.query("SELECT body FROM requirements_tombstones").all() as { body: string }[]).map(row => JSON.parse(row.body));
+		for (const table of ["owners", "restore_reviews"] as const) {
+			const values = Object.fromEntries((this.#db.query("SELECT id, body FROM requirements_" + table).all() as { id: string; body: string }[]).map(row => [row.id, JSON.parse(row.body)]));
+			if (table === "owners") snapshot.state.owners = values; else snapshot.state.restoreReviews = values;
+		}
+		snapshot.state.restoreReceipts = (this.#db.query("SELECT body FROM requirements_restore_receipts").all() as { body: string }[]).map(row => JSON.parse(row.body));
+		for (const table of ["sources", "batches", "revisions"] as const) Object.assign(snapshot, { [table]: (this.#db.query("SELECT body FROM requirements_" + table).all() as { body: string }[]).map(row => JSON.parse(row.body)) });
+		for (const revision of snapshot.revisions) revision.quarantine = this.#requirementsRow("suspensions", revision.id);
+		return snapshot;
+	}
+	authorizeRequirementsOwner(authority: RequirementsAuthority): void { this.#requirements.authorizeRequirementsOwner(authority); }
+	invalidateRequirementsOwner(ownerSessionId: string): void { this.#requirements.invalidateRequirementsOwner(ownerSessionId); }
+	intakeRequirementsSource(source: RequirementsSource): void { this.intakeRequirementsSources([source]); }
+	intakeRequirementsSources(sources: readonly RequirementsSource[]): void {
+		for (const source of sources) if (!source.durable) throw new Error("Volatile source cannot be recorded as restart-durable requirements");
+		if (sources.length) this.#requirements.intakeRequirementsSources(sources);
+	}
+	setRequirementsSourceDisposition(key: string, integrity: string, state: Exclude<RequirementsSourceState, "complete" | "gap">, reason: string): void { this.#requirements.setRequirementsSourceDisposition(key, integrity, state, reason); }
+	recordRequirementsGap(key: string, integrity: string, actor: string, reason: string): void { this.#requirements.recordRequirementsGap(key, integrity, actor, reason); }
+	saveRequirementsBatch(batch: RequirementsBatch): string { return this.#requirements.saveRequirementsBatch(batch); }
+	publishRequirementsBatch(batchId: string, authority: RequirementsAuthority, verifiedIntegrities: Record<string, string>) { return this.#requirements.publishRequirementsBatch(batchId, authority, verifiedIntegrities); }
+	reconcileRequirementsSources(observations: RequirementsObservation[]): void { this.#requirements.reconcileRequirementsSources(observations); }
+	quarantineRequirements(revisionIds: string[], actor: string, reason: string): number { return this.#requirements.quarantineRequirements(revisionIds, actor, reason); }
+	restoreRequirements(receipt: RequirementsRestoreReceipt): boolean { return this.#requirements.restoreRequirements(receipt); }
+	withdrawRequirements(revisionIds: string[], actor: string, reason: string): number { return this.#requirements.withdrawRequirements(revisionIds, actor, reason); }
+	clearRequirements(scope: RequirementsScope, actor: string, reason: string): number { return this.#requirements.clearRequirements(scope, actor, reason); }
 }

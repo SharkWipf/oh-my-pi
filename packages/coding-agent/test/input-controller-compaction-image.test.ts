@@ -39,7 +39,10 @@ function makeCtx(initialQueue: CompactionQueuedMessage[] = []) {
 	const steerCalls: Array<{ text: string; images?: ImageContent[] }> = [];
 	const followUpCalls: Array<{ text: string; images?: ImageContent[] }> = [];
 
+	let ownership = {};
 	const session = {
+		getPreservedMessagesOwnership: () => ownership,
+		isDisposed: false,
 		isStreaming: false,
 		isCompacting: false,
 		extensionRunner: undefined,
@@ -61,6 +64,10 @@ function makeCtx(initialQueue: CompactionQueuedMessage[] = []) {
 
 	const ctx = {
 		session,
+		sessionManager: {
+			captureRequirementsInput: async () => "captured-input",
+			requireRequirementsCapture: () => {},
+		},
 		compactionQueuedMessages: [...initialQueue],
 		pendingMessagesContainer: { clear: () => {}, addChild: () => {}, removeChild: () => {} },
 		editor: {
@@ -82,6 +89,7 @@ function makeCtx(initialQueue: CompactionQueuedMessage[] = []) {
 			imageLinks: undefined as (string | undefined)[] | undefined,
 			pendingImages: [] as ImageContent[],
 			pendingImageLinks: [] as (string | undefined)[],
+			pendingTexts: [],
 		},
 		keybindings: { getDisplayString: () => "Alt+Up" },
 		fileSlashCommands: new Set<string>(),
@@ -96,34 +104,44 @@ function makeCtx(initialQueue: CompactionQueuedMessage[] = []) {
 		showStatus: () => {},
 	} as unknown as InteractiveModeContext;
 
-	return { ctx, session, promptCalls, steerCalls, followUpCalls };
+	return {
+		ctx, session, promptCalls, steerCalls, followUpCalls,
+		changeOwnership: () => {
+			ownership = {};
+		},
+	};
 }
 
 const img = (data: string): ImageContent => ({ type: "image", mimeType: "image/png", data });
 
 describe("compaction queue image forwarding", () => {
-	test("queueCompactionMessage stores images and consumes pending-image state", () => {
+	test("native queue accepts and restores a rich original without a requirements capture service", async () => {
 		const image = img("aGVsbG8=");
 		const { ctx } = makeCtx();
+
+		const originalSubmission = { text: "/once /skill:inspect [Image #1]", images: [image], imageLinks: ["clipboard"], compactionOverride: "exclude" as const };
+		ctx.editor.pendingImages = [image];
+		ctx.editor.pendingImageLinks = ["clipboard"];
+		await new UiHelpers(ctx).queueCompactionMessage("expanded skill", "steer", [], [], "exclude", originalSubmission);
+		expect(ctx.editor.pendingImages).toEqual([]);
+		new InputController(ctx).restoreQueuedMessagesToEditor();
+		expect(ctx.editor.getText()).toBe("/once /skill:inspect [Image #1]");
+		expect(ctx.editor.pendingImages).toEqual([image]);
+		expect(ctx.editor.pendingImageLinks).toEqual(["clipboard"]);
+	});
+
+	test("a closed session keeps the full directive and image draft unaccepted", async () => {
+		const image = img("aGVsbG8=");
+		const { ctx, session } = makeCtx();
+		session.isDisposed = true;
 		ctx.editor.pendingImages = [image];
 		ctx.editor.pendingImageLinks = ["clipboard"];
 		ctx.editor.imageLinks = ["clipboard"];
-
-		new UiHelpers(ctx).queueCompactionMessage("look at this screenshot", "steer", [image]);
-
-		expect(ctx.compactionQueuedMessages).toEqual([
-			{ text: "look at this screenshot", mode: "steer", images: [image] },
-		]);
-		// Pending state is consumed so the next message does not resend the image.
-		expect(ctx.editor.pendingImages).toEqual([]);
-		expect(ctx.editor.pendingImageLinks).toEqual([]);
-		expect(ctx.editor.imageLinks).toBeUndefined();
-	});
-
-	test("empty image list is normalized to undefined on the queued entry", () => {
-		const { ctx } = makeCtx();
-		new UiHelpers(ctx).queueCompactionMessage("no images here", "followUp", []);
-		expect(ctx.compactionQueuedMessages).toEqual([{ text: "no images here", mode: "followUp", images: undefined }]);
+		await new UiHelpers(ctx).queueCompactionMessage("/once /keep screenshot [Image #1]", "followUp", [image], ["clipboard"]);
+		expect(ctx.compactionQueuedMessages).toEqual([]);
+		expect(ctx.editor.getText()).toBe("/once /keep screenshot [Image #1]");
+		expect(ctx.editor.pendingImages).toEqual([image]);
+		expect(ctx.editor.pendingImageLinks).toEqual(["clipboard"]);
 	});
 
 	test("flush forwards the first queued prompt's images via session.prompt", async () => {

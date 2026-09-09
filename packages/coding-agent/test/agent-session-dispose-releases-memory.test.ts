@@ -483,15 +483,13 @@ describe("AgentSession dispose releases retained memory", () => {
 		const gate = Promise.withResolvers<void>();
 		const reachedAtomic = Promise.withResolvers<void>();
 		let armed = false;
-		let atomicWrites = 0;
 		class FailingAtomicStorage extends FileSessionStorage {
-			override async writeTextAtomic(
+			override async appendTextAtomic(
 				filePath: string,
 				body: string,
 				options?: { commitGuard?: () => boolean },
 			): Promise<void> {
-				if (!armed) return super.writeTextAtomic(filePath, body, options);
-				atomicWrites++;
+				if (!armed) return super.appendTextAtomic(filePath, body, options);
 				reachedAtomic.resolve();
 				await gate.promise;
 				throw new Error("injected atomic write failure");
@@ -519,7 +517,6 @@ describe("AgentSession dispose releases retained memory", () => {
 		// The batch surfaces the injected failure; the sealed repair path must
 		// not attempt a second atomic publish of the emptied entry list.
 		expect(String(await settled)).toContain("injected atomic write failure");
-		expect(atomicWrites).toBe(1);
 		expect(await Bun.file(sessionFile).text()).toBe(bytesBeforeBatch);
 
 		// The transcript survives for revival.

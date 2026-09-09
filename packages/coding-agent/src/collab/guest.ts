@@ -378,9 +378,20 @@ export class CollabGuestLink {
 		await this.#restoreLocalSession();
 	}
 
-	sendPrompt(text: string, images?: ImageContent[]): void {
+	sendPrompt(
+		text: string,
+		images?: ImageContent[],
+		imageLinks?: (string | undefined)[],
+		compactionOverride?: "keep" | "exclude",
+	): void {
 		if (this.#rejectReadOnly()) return;
-		this.#socket?.send({ t: "prompt", text, images: images && images.length > 0 ? images : undefined });
+		this.#socket?.send({
+			t: "prompt",
+			text,
+			images: images && images.length > 0 ? images : undefined,
+			imageLinks,
+			compactionOverride,
+		});
 	}
 
 	sendAbort(): void {

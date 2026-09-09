@@ -3,6 +3,7 @@
  */
 
 import type { ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type { SourceRewrite } from "@oh-my-pi/pi-ai/compaction-source";
 import type { Tokenizer } from "../tokenizer";
 import type { AgentMessage, AgentToolCall } from "../types";
 import type { SessionEntry, SessionMessageEntry } from "./entries";
@@ -16,6 +17,8 @@ import {
 import { splitReadSelector } from "./utils";
 
 export interface PruneConfig {
+	/** Current policy-admitted source members, including complete assistant/tool atoms. */
+	protectedSourceEntryIds?: Pick<ReadonlySet<string>, "has">;
 	/** Keep the most recent tool output tokens intact. */
 	protectTokens: number;
 	/** Only prune if total savings meets this threshold. */
@@ -79,6 +82,8 @@ export const USELESS_NOTICE = "[Uneventful result elided]";
 export type SupersedeKeyFn = (toolName: string, args: Record<string, unknown>) => string | undefined;
 
 export interface SupersedePruneConfig {
+	/** Current policy-admitted source members, including complete assistant/tool atoms. */
+	protectedSourceEntryIds?: Pick<ReadonlySet<string>, "has">;
 	/** Supersede key function; results sharing a key supersede older ones. */
 	supersedeKey?: SupersedeKeyFn;
 	/** Also prune results flagged useless by their tool. Default false. */
@@ -253,7 +258,22 @@ export function pruneSupersededToolResults(
 	entries: SessionEntry[],
 	tokenizer: Tokenizer,
 	config: SupersedePruneConfig,
-): PruneResult {
+	rewrite?: (maps: readonly SourceRewrite[], apply: () => void) => void,
+): PruneResult;
+export function pruneSupersededToolResults(
+	entries: SessionEntry[],
+	tokenizer: Tokenizer,
+	config: SupersedePruneConfig,
+	rewrite: ((maps: readonly SourceRewrite[], apply: () => void) => void) | undefined,
+	prepareProtection: () => Promise<Pick<ReadonlySet<string>, "has">>,
+): PruneResult | Promise<PruneResult>;
+export function pruneSupersededToolResults(
+	entries: SessionEntry[],
+	tokenizer: Tokenizer,
+	config: SupersedePruneConfig,
+	rewrite?: (maps: readonly SourceRewrite[], apply: () => void) => void,
+	prepareProtection?: () => Promise<Pick<ReadonlySet<string>, "has">>,
+): PruneResult | Promise<PruneResult> {
 	const toolCallsById = collectToolCallsById(entries);
 	const candidates = config.supersedeKey
 		? collectSupersededResults(entries, tokenizer, toolCallsById, config.supersedeKey, config.protectedTools)
@@ -284,7 +304,9 @@ export function pruneSupersededToolResults(
 		// Provider cache is cold (idle exceeds the retention TTL), so re-writing
 		// the sent region costs nothing. Entries before the compaction boundary
 		// are summarized away and never sent — skip them to avoid pointless churn.
-		toPrune = candidates.filter(candidate => candidate.index >= boundaryIndex);
+		toPrune = candidates.filter(
+			candidate => candidate.index >= boundaryIndex && !config.protectedSourceEntryIds?.has(candidate.entry.id),
+		);
 	} else {
 		const suffixTokenLimit = config.suffixTokenLimit ?? DEFAULT_SUFFIX_TOKEN_LIMIT;
 		// suffixTokens[i] = estimated tokens of all messages strictly after entry i.
@@ -293,27 +315,65 @@ export function pruneSupersededToolResults(
 		// at/after the compaction boundary.
 		const suffixTokens = computeMessageSuffixTokens(entries, tokenizer);
 		toPrune = candidates.filter(
-			candidate => candidate.index >= boundaryIndex && suffixTokens[candidate.index] <= suffixTokenLimit,
+			candidate =>
+				candidate.index >= boundaryIndex &&
+				suffixTokens[candidate.index] <= suffixTokenLimit &&
+				!config.protectedSourceEntryIds?.has(candidate.entry.id),
 		);
 	}
 	if (toPrune.length === 0) return { prunedCount: 0, tokensSaved: 0 };
 
-	const prunedAt = Date.now();
-	let tokensSaved = 0;
-	for (const candidate of toPrune) {
-		candidate.message.content = [{ type: "text", text: candidate.notice }];
-		candidate.message.prunedAt = prunedAt;
-		invalidateMessageCache(candidate.message as AgentMessage);
-		tokensSaved += estimatePrunedSavings(candidate.tokens, candidate.notice);
-	}
-	return { prunedCount: toPrune.length, tokensSaved };
+	const finish = (protectedIds?: Pick<ReadonlySet<string>, "has">): PruneResult => {
+		if (protectedIds) {
+			let retained = 0;
+			for (const candidate of toPrune) {
+				if (!protectedIds.has(candidate.entry.id)) toPrune[retained++] = candidate;
+			}
+			toPrune.length = retained;
+		}
+		if (toPrune.length === 0) return { prunedCount: 0, tokensSaved: 0 };
+		const prunedAt = Date.now();
+		let tokensSaved = 0;
+		const apply = () => {
+			for (const candidate of toPrune) {
+				candidate.message.content = [{ type: "text", text: candidate.notice }];
+				candidate.message.prunedAt = prunedAt;
+				invalidateMessageCache(candidate.message as AgentMessage);
+				tokensSaved += estimatePrunedSavings(candidate.tokens, candidate.notice);
+			}
+		};
+		if (rewrite) {
+			rewrite(toPrune.map(candidate => ({
+				entryId: candidate.entry.id,
+				blocks: candidate.message.content.map((_, oldBlockIndex) => ({ oldBlockIndex, newBlockIndex: null })),
+			})), apply);
+		} else apply();
+		return { prunedCount: toPrune.length, tokensSaved };
+	};
+	// Ordinary turns without a real victim never prepare the source policy index.
+	return prepareProtection ? prepareProtection().then(finish) : finish();
 }
 
 export function pruneToolOutputs(
 	entries: SessionEntry[],
 	tokenizer: Tokenizer,
+	config?: PruneConfig,
+	rewrite?: (maps: readonly SourceRewrite[], apply: () => void) => void,
+): PruneResult;
+export function pruneToolOutputs(
+	entries: SessionEntry[],
+	tokenizer: Tokenizer,
+	config: PruneConfig,
+	rewrite: ((maps: readonly SourceRewrite[], apply: () => void) => void) | undefined,
+	prepareProtection: () => Promise<Pick<ReadonlySet<string>, "has">>,
+): PruneResult | Promise<PruneResult>;
+export function pruneToolOutputs(
+	entries: SessionEntry[],
+	tokenizer: Tokenizer,
 	config: PruneConfig = DEFAULT_PRUNE_CONFIG,
-): PruneResult {
+	rewrite?: (maps: readonly SourceRewrite[], apply: () => void) => void,
+	prepareProtection?: () => Promise<Pick<ReadonlySet<string>, "has">>,
+): PruneResult | Promise<PruneResult> {
 	let accumulatedTokens = 0;
 	let tokensSaved = 0;
 	let prunedCount = 0;
@@ -367,7 +427,7 @@ export function pruneToolOutputs(
 		// still-cached copy; compaction/shake reclaim those when they rebuild.
 		const inWarmPrefix =
 			messageSuffix !== undefined && cacheWarmSuffixTokens !== undefined && messageSuffix[i] > cacheWarmSuffixTokens;
-		if (inWarmPrefix || i < boundaryIndex) {
+		if (inWarmPrefix || i < boundaryIndex || config.protectedSourceEntryIds?.has(entry.id)) {
 			accumulatedTokens += tokens;
 			continue;
 		}
@@ -403,21 +463,49 @@ export function pruneToolOutputs(
 		return { prunedCount: 0, tokensSaved: 0 };
 	}
 
-	const prunedAt = Date.now();
-	for (const candidate of candidates) {
-		const message = candidate.entry.message as ToolResultMessage;
-		const notice = candidate.superseded
-			? SUPERSEDED_NOTICE
-			: candidate.useless
-				? USELESS_NOTICE
-				: createPrunedNotice(candidate.tokens);
-		message.content = [{ type: "text", text: notice }];
-		message.prunedAt = prunedAt;
-		invalidateMessageCache(message as AgentMessage);
-		prunedCount++;
-	}
-
-	return { prunedCount, tokensSaved };
+	const finish = (protectedIds?: Pick<ReadonlySet<string>, "has">): PruneResult => {
+		if (protectedIds) {
+			let retained = 0;
+			for (const candidate of candidates) {
+				if (protectedIds.has(candidate.entry.id)) {
+					tokensSaved -= estimatePrunedSavings(
+						candidate.tokens,
+						candidate.superseded
+							? SUPERSEDED_NOTICE
+							: candidate.useless
+								? USELESS_NOTICE
+								: createPrunedNotice(candidate.tokens),
+					);
+				} else candidates[retained++] = candidate;
+			}
+			candidates.length = retained;
+			if (tokensSaved < config.minimumSavings || retained === 0) return { prunedCount: 0, tokensSaved: 0 };
+		}
+		const prunedAt = Date.now();
+		const apply = () => {
+			for (const candidate of candidates) {
+				const message = candidate.entry.message as ToolResultMessage;
+				const notice = candidate.superseded
+					? SUPERSEDED_NOTICE
+					: candidate.useless
+						? USELESS_NOTICE
+						: createPrunedNotice(candidate.tokens);
+				message.content = [{ type: "text", text: notice }];
+				message.prunedAt = prunedAt;
+				invalidateMessageCache(message as AgentMessage);
+				prunedCount++;
+			}
+		};
+		if (rewrite) {
+			rewrite(candidates.map(candidate => ({
+				entryId: candidate.entry.id,
+				blocks: (candidate.entry.message as ToolResultMessage).content.map((_, oldBlockIndex) => ({ oldBlockIndex, newBlockIndex: null })),
+			})), apply);
+		} else apply();
+	
+		return { prunedCount, tokensSaved };
+	};
+	return prepareProtection ? prepareProtection().then(finish) : finish();
 }
 
 /**

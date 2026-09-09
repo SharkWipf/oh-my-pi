@@ -1,5 +1,5 @@
 import { scheduler } from "node:timers/promises";
-import { $flag, logger, structuredCloneJSON } from "@oh-my-pi/pi-utils";
+import { $flag, logger } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { getEnvApiKey } from "../stream";
 import type {
@@ -22,6 +22,7 @@ import {
 	resolveCacheRetention,
 	sanitizeOpenAIResponsesAssistantHistoryItemsForReplay,
 } from "../utils";
+import { cloneWithSourceOrigins, invalidateSourceOrigins } from "../utils/source-origin";
 import { createAbortSourceTracker } from "../utils/abort";
 import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
@@ -528,6 +529,10 @@ const streamOpenAIResponsesOnce = (
 				const replacementPayload = await options?.onPayload?.(requestParams, model);
 				const payload =
 					replacementPayload !== undefined ? (replacementPayload as OpenAIResponsesSamplingParams) : requestParams;
+				if (options?.onPayload) {
+					invalidateSourceOrigins(requestParams);
+					invalidateSourceOrigins(payload, replacementPayload !== undefined ? "externally-replaced" : "externally-mutated");
+				}
 				applyReasoningEffortFallbackForRequest(payload);
 				return payload;
 			};
@@ -732,6 +737,7 @@ const streamOpenAIResponsesOnce = (
 			stream.push({ type: "start", partial: output });
 
 			const nativeOutputItems: Array<Record<string, unknown>> = [];
+			const contentBlocks: Array<{ itemIndex: number; contentIndex: number }> = [];
 			let transientStreamRetryAttempt = 0;
 			while (true) {
 				let sawReplayUnsafeOutput = false;
@@ -743,6 +749,7 @@ const streamOpenAIResponsesOnce = (
 					attemptStream.queue.length = 0;
 				};
 				nativeOutputItems.length = 0;
+				contentBlocks.length = 0;
 				const timedOpenaiStream = iterateWithIdleTimeout(openaiStream, {
 					idleTimeoutMs,
 					firstItemTimeoutMs: firstEventTimeoutMs,
@@ -772,9 +779,10 @@ const streamOpenAIResponsesOnce = (
 						onFirstToken: () => {
 							if (!firstTokenTime) firstTokenTime = performance.now();
 						},
-						onOutputItemDone: item => {
+						onOutputItemDone: (item, contentIndex) => {
 							// `processResponsesStream` hands over a private clone already; no
 							// second deep copy needed (reasoning items carry multi-KB blobs).
+							if (contentIndex !== undefined) contentBlocks.push({ itemIndex: nativeOutputItems.length, contentIndex });
 							nativeOutputItems.push(item as unknown as Record<string, unknown>);
 						},
 						onCompleted: () => {
@@ -851,14 +859,14 @@ const streamOpenAIResponsesOnce = (
 				}
 			}
 
-			output.providerPayload = createOpenAIResponsesHistoryPayload(model.provider, nativeOutputItems);
+			output.providerPayload = createOpenAIResponsesHistoryPayload(model.provider, nativeOutputItems, true, contentBlocks);
 			const replayableResponseItems = sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(
-				structuredCloneJSON(nativeOutputItems),
+				cloneWithSourceOrigins(nativeOutputItems),
 			);
 			if (replayableResponseItems) {
 				if (providerSessionState) providerSessionState.nativeHistoryReplayWarmed = true;
 				if (chainState) {
-					chainState.lastParams = structuredCloneJSON(
+					chainState.lastParams = cloneWithSourceOrigins(
 						activeTrailingScaffoldingItems > 0 && Array.isArray(activeParams.input)
 							? {
 									...activeParams,
@@ -887,7 +895,7 @@ const streamOpenAIResponsesOnce = (
 				// baseline, but `lastParams` still records the successful wire controls
 				// without re-enabling `previous_response_id` chaining.
 				chainState.canAppend = false;
-				chainState.lastParams = structuredCloneJSON(
+				chainState.lastParams = cloneWithSourceOrigins(
 					activeTrailingScaffoldingItems > 0 && Array.isArray(activeParams.input)
 						? {
 								...activeParams,

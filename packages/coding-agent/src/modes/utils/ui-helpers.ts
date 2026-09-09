@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ImageContent, Message, Usage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, OriginalSubmission, Message, Usage } from "@oh-my-pi/pi-ai";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { type Component, Spacer, Text, TruncatedText } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -55,6 +55,10 @@ import {
 	type SkillPromptDetails,
 } from "../../session/messages";
 import type { SessionContext, StrippedToolCallsMarker } from "../../session/session-context";
+import {
+	parseCompactionOverridePrompt,
+	restoreCompactionOverridePrompt,
+} from "../../session/preserved-message-settings";
 import { replaceTabs } from "../../tools/render-utils";
 import { buildSkillCommandPrompt, invokeSkillCommandFromText, isKnownSkillCommand } from "../skill-command";
 import {
@@ -1101,14 +1105,37 @@ export class UiHelpers {
 		this.ctx.ui.requestComponentRender(this.ctx.pendingMessagesContainer);
 	}
 
-	queueCompactionMessage(text: string, mode: "steer" | "followUp", images?: ImageContent[]): void {
-		const queuedImages = images && images.length > 0 ? images : undefined;
-		this.ctx.compactionQueuedMessages.push({ text, mode, images: queuedImages } as CompactionQueuedMessage);
-		this.ctx.editor.clearDraft(text);
+	async queueCompactionMessage(
+		text: string,
+		mode: "steer" | "followUp",
+		images?: ImageContent[],
+		imageLinks?: (string | undefined)[],
+		compactionOverride?: "keep" | "exclude",
+		originalSubmission?: OriginalSubmission,
+	): Promise<void> {
+		if (compactionOverride === undefined) {
+			const directive = parseCompactionOverridePrompt(text);
+			if (directive) {
+				text = directive.text;
+				compactionOverride = directive.compactionOverride;
+			}
+		}
+		if (compactionOverride && !text) {
+			this.ctx.showWarning(`Usage: /${compactionOverride === "keep" ? "keep" : "once"} <message>`);
+			return;
+		}
+		const editor = this.ctx.editor;
+		const historyText = restoreCompactionOverridePrompt(text, compactionOverride);
+		if (this.ctx.isShuttingDown || this.ctx.session.isDisposed) {
+			if (!editor.getText()) editor.setCollapsedText(originalSubmission?.text ?? historyText);
+			this.ctx.showError("Session closed before queue acceptance");
+			return;
+		}
+		// This is the native ephemeral queue. Original publication belongs to actual delivery.
+		this.ctx.compactionQueuedMessages.push({ text, mode, images, imageLinks, compactionOverride, originalSubmission });
+		editor.clearDraft(historyText);
 		this.ctx.updatePendingMessagesDisplay();
-		this.ctx.showStatus(
-			queuedImages ? "Queued message with image for after compaction" : "Queued message for after compaction",
-		);
+		this.ctx.showStatus(images?.length ? "Queued message with image for after compaction" : "Queued message for after compaction");
 	}
 
 	/**
@@ -1122,16 +1149,24 @@ export class UiHelpers {
 
 	async #deliverQueuedMessage(message: CompactionQueuedMessage): Promise<void> {
 		if (
-			await invokeSkillCommandFromText(this.ctx, message.text, message.mode, {
+			!message.compactionOverride &&
+			(await invokeSkillCommandFromText(this.ctx, message.text, message.mode, {
 				propagateErrors: true,
 				queueOnly: true,
 				images: message.images,
-			})
+				imageLinks: message.imageLinks,
+				originalSubmission: message.originalSubmission,
+			}))
 		) {
 			return;
 		}
-		if (this.ctx.isKnownSlashCommand(message.text)) {
-			const forwarded = await this.ctx.session.prompt(message.text);
+		if (!message.compactionOverride && this.ctx.isKnownSlashCommand(message.text)) {
+			const forwarded = await this.ctx.session.prompt(message.text, {
+				images: message.images,
+				imageLinks: message.imageLinks,
+				compactionOverride: message.compactionOverride,
+				originalSubmission: message.originalSubmission,
+			});
 			this.#parkLoopOnLocalConsume(message.text, forwarded);
 			return;
 		}
@@ -1139,8 +1174,16 @@ export class UiHelpers {
 			message.text,
 			() =>
 				message.mode === "followUp"
-					? this.ctx.session.followUp(message.text, message.images)
-					: this.ctx.session.steer(message.text, message.images),
+					? this.ctx.session.followUp(message.text, message.images, {
+							imageLinks: message.imageLinks,
+							compactionOverride: message.compactionOverride,
+							originalSubmission: message.originalSubmission,
+						})
+					: this.ctx.session.steer(message.text, message.images, {
+							imageLinks: message.imageLinks,
+							compactionOverride: message.compactionOverride,
+							originalSubmission: message.originalSubmission,
+						}),
 			{ imageCount: message.images?.length ?? 0 },
 		);
 	}
@@ -1165,6 +1208,7 @@ export class UiHelpers {
 	}
 
 	async flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void> {
+		// Queue acceptance is synchronous; durable original publication happens at delivery.
 		if (this.ctx.compactionQueuedMessages.length === 0) {
 			return;
 		}
@@ -1195,14 +1239,19 @@ export class UiHelpers {
 
 			let firstPromptIndex = -1;
 			for (let i = 0; i < queuedMessages.length; i++) {
-				if (!this.ctx.isKnownSlashCommand(queuedMessages[i].text)) {
+				if (queuedMessages[i].compactionOverride || !this.ctx.isKnownSlashCommand(queuedMessages[i].text)) {
 					firstPromptIndex = i;
 					break;
 				}
 			}
 			if (firstPromptIndex === -1) {
 				for (const message of queuedMessages) {
-					const forwarded = await this.ctx.session.prompt(message.text);
+					const forwarded = await this.ctx.session.prompt(message.text, {
+						images: message.images,
+						imageLinks: message.imageLinks,
+						compactionOverride: message.compactionOverride,
+						originalSubmission: message.originalSubmission,
+					});
 					this.#parkLoopOnLocalConsume(message.text, forwarded);
 				}
 				return;
@@ -1225,12 +1274,14 @@ export class UiHelpers {
 			// are rebuilt as user-attributed custom messages so queued `/skill:` text
 			// is not sent as a literal prompt after compaction.
 			let promptPromise: Promise<unknown>;
-			if (isKnownSkillCommand(this.ctx, firstPrompt.text)) {
+			if (!firstPrompt.compactionOverride && isKnownSkillCommand(this.ctx, firstPrompt.text)) {
 				const built = await buildSkillCommandPrompt(
 					this.ctx,
 					firstPrompt.text,
 					firstPrompt.mode,
 					firstPrompt.images,
+					firstPrompt.originalSubmission,
+					firstPrompt.imageLinks,
 				);
 				promptPromise = built
 					? this.ctx.session.promptCustomMessage(built.message, built.options).catch(restoreQueue)
@@ -1244,6 +1295,9 @@ export class UiHelpers {
 					.prompt(firstPrompt.text, {
 						streamingBehavior: firstPrompt.mode === "followUp" ? "followUp" : "steer",
 						images: firstPrompt.images,
+						imageLinks: firstPrompt.imageLinks,
+						compactionOverride: firstPrompt.compactionOverride,
+						originalSubmission: firstPrompt.originalSubmission,
 					})
 					.catch((error: unknown) => {
 						disposeFirstPrompt();

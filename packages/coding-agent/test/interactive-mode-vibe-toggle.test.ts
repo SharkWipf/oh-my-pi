@@ -72,12 +72,12 @@ class ExitFaultStorage extends FileSessionStorage {
 		return super.readText(filePath);
 	}
 
-	override async writeTextAtomic(filePath: string, content: string, options?: WriteTextAtomicOptions): Promise<void> {
+	override async appendTextAtomic(filePath: string, content: string, options?: WriteTextAtomicOptions): Promise<void> {
 		if (this.failNextAtomicWrite) {
 			this.failNextAtomicWrite = false;
 			throw Object.assign(new Error("journal atomic publish failed"), { code: "ENOSPC" });
 		}
-		await super.writeTextAtomic(filePath, content, options);
+		await super.appendTextAtomic(filePath, content, options);
 	}
 }
 

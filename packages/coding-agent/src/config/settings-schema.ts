@@ -14,6 +14,12 @@ import {
 	type CompactionMethod,
 	DEFAULT_COMPACTION_METHOD_ORDER,
 } from "../session/compaction-methods";
+import {
+	DEFAULT_MAX_TOKENS_PER_USER_MESSAGE,
+	PRESERVED_USER_MESSAGE_FILTER_KEEP_CAPS,
+	PRUNE_LONG_USER_MESSAGE_MODES,
+	type PreservedUserMessageRegexRule,
+} from "../session/preserved-message-settings";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS, STT_MODEL_VALUES } from "../stt/models";
 import { STT_SUBMIT_TRIGGER_OPTIONS, STT_SUBMIT_TRIGGER_VALUES } from "../stt/submit-trigger";
 import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "../thinking";
@@ -216,8 +222,16 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Agent",
 		"Git",
 	],
-	context: ["General", "Compaction", "Rules (TTSR)", "Experimental"],
-	memory: ["General", "Auto-Learn", "Mnemopi", "Hindsight", "Sharpshooter"],
+	context: [
+		"General",
+		"Compaction",
+		"User Message Preservation",
+		"User Message Preservation Filtering",
+		"User Message Classifier (LLM)",
+		"Rules (TTSR)",
+		"Experimental",
+	],
+	memory: ["General", "Requirements", "Auto-Learn", "Mnemopi", "Hindsight", "Sharpshooter"],
 	files: ["Editing", "Reading", "Read Summaries", "LSP"],
 	shell: ["Bash", "Eval & Runtimes"],
 	tools: [
@@ -402,6 +416,7 @@ export interface ModelTagsSettings {
 const EMPTY_STRING_ARRAY: string[] = [];
 const EMPTY_STRING_RECORD: Record<string, string> = {};
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
+const EMPTY_PRESERVATION_REGEX_RULES: Record<string, PreservedUserMessageRegexRule> = {};
 const DEFAULT_CYCLE_ORDER: string[] = ["smol", "default", "slow"];
 const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["hub"];
 const EMPTY_MODEL_TAGS_RECORD: ModelTagsSettings = {};
@@ -552,6 +567,18 @@ export const SETTINGS_SCHEMA = {
 			label: "Enable Prewalk",
 			description:
 				"Start on the active model, then switch to a fast/cheap model (default the 'smol' role) at the first edit/write after the plan nudge's todo list exists — the strong model plans, commits the todos, and starts the implementation before handing off. Overridable per session with --prewalk / --no-prewalk.",
+		},
+	},
+	"advisor.compactBeforeGuidance": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Advisor",
+			label: "Compact Before Guidance",
+			description:
+				"Run ordinary context maintenance before advisor review, respecting speculative compaction and its grace period.",
+			condition: "advisorEnabled",
 		},
 	},
 	"advisor.syncBacklog": {
@@ -2766,6 +2793,304 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"compaction.keepUserMessages": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "context",
+			group: "User Message Preservation",
+			label: "Remember User Messages",
+			description: "Automatic selection only. Manual Always and its cap remain active when disabled.",
+		},
+	},
+
+	"compaction.keepFirstLimit": {
+		type: "string",
+		default: "all",
+		ui: {
+			tab: "context",
+			group: "User Message Preservation",
+			label: "Keep First Limit",
+			description:
+				"Off / All / positive messages / nonnegative tokens / 0–100% maximum model context. Linked Always cap remains editable when automatic selection is off.",
+		},
+	},
+
+	"compaction.keepLastLimit": {
+		type: "string",
+		default: "all",
+		ui: {
+			tab: "context",
+			group: "User Message Preservation",
+			label: "Keep Recent Limit",
+			description:
+				"Off / All / positive messages / nonnegative tokens / 0–100% maximum model context. Linked Always cap remains editable when automatic selection is off.",
+		},
+	},
+
+	"compaction.keepRecentUserMessagesLimit": {
+		type: "string",
+		default: "off",
+		ui: {
+			tab: "context",
+			group: "User Message Preservation",
+			label: "Protect Most-Recent Limit",
+			description:
+				"Off / All / messages / tokens / % maximum context. Newest real users bypass stored Never and all pruning.",
+		},
+	},
+
+	"compaction.pruneLongUserMessages": {
+		type: "enum",
+		values: PRUNE_LONG_USER_MESSAGE_MODES,
+		default: "no",
+		ui: {
+			tab: "context",
+			group: "User Message Preservation",
+			label: "Prune Kept Long Messages",
+			description:
+				"Automatic/inferred Keep only. Manual Always and hard-most-recent bypass every mode. Images are never dropped.",
+		},
+	},
+
+	"compaction.maxTokensPerUserMessage": {
+		type: "number",
+		default: DEFAULT_MAX_TOKENS_PER_USER_MESSAGE,
+		ui: {
+			tab: "context",
+			group: "User Message Preservation",
+			label: "Max Tokens Per Message",
+			description:
+				"Positive integer text-plus-image pruning threshold; not a manual Always or hard-most-recent ceiling.",
+		},
+	},
+
+	"compaction.keepUserMessagesFilterKeepCap": {
+		type: "enum",
+		values: PRESERVED_USER_MESSAGE_FILTER_KEEP_CAPS,
+		default: "keep-last",
+		ui: {
+			tab: "context",
+			group: "User Message Preservation Filtering",
+			label: "Always-Keep Limit",
+			description:
+				"Uniform mixed-role cap including /keep. Linked First/Recent Off or All is uncapped; tokens 0 and 0% remain finite zero.",
+		},
+	},
+
+	"compaction.keepUserMessagesHeuristic": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "context",
+			group: "User Message Preservation Filtering",
+			label: "Use Heuristics Filter",
+			description: "Remove or fall through only; never Keep. Saved settings survive disabling.",
+		},
+	},
+
+	"compaction.keepUserMessagesRegex": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "context",
+			group: "User Message Preservation Filtering",
+			label: "Use Custom Regex Filters",
+			description:
+				"Ordinary RE2 before classifier policy; Final after it. Keep wins same-stage conflicts; Auto is neutral.",
+		},
+	},
+
+	"compaction.keepUserMessagesClassifierFilter": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "context",
+			group: "User Message Preservation Filtering",
+			label: "Use Classifier Filter",
+			description: "Apply stored categories without scheduling requests, independently of live classification.",
+		},
+	},
+
+	"compaction.keepUserMessagesRegexRules": {
+		type: "record",
+		default: EMPTY_PRESERVATION_REGEX_RULES,
+		ui: {
+			tab: "context",
+			group: "User Message Preservation Filtering",
+			label: "Custom Regex Rules",
+			description:
+				"RE2 Condition, Auto (disabled) / Keep / Never, case-insensitivity, Final (default off). Validate before save.",
+		},
+	},
+
+	"compaction.keepUserMessagesLlmLongTermRule": {
+		type: "enum",
+		values: ["auto", "keep", "exclude"] as const,
+		default: "keep",
+		ui: {
+			tab: "context",
+			group: "User Message Preservation Filtering",
+			label: "Long-term rule / specification",
+			description:
+				"Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
+		},
+	},
+
+	"compaction.keepUserMessagesLlmLongTermGoal": {
+		type: "enum",
+		values: ["auto", "keep", "exclude"] as const,
+		default: "keep",
+		ui: {
+			tab: "context",
+			group: "User Message Preservation Filtering",
+			label: "Long-term goal / feature",
+			description:
+				"Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
+		},
+	},
+
+	"compaction.keepUserMessagesLlmLastingSolution": {
+		type: "enum",
+		values: ["auto", "keep", "exclude"] as const,
+		default: "keep",
+		ui: {
+			tab: "context",
+			group: "User Message Preservation Filtering",
+			label: "Lasting solution / guidance",
+			description:
+				"Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
+		},
+	},
+
+	"compaction.keepUserMessagesLlmShortTermTask": {
+		type: "enum",
+		values: ["auto", "keep", "exclude"] as const,
+		default: "auto",
+		ui: {
+			tab: "context",
+			group: "User Message Preservation Filtering",
+			label: "Short-term task / improvement",
+			description:
+				"Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
+		},
+	},
+
+	"compaction.keepUserMessagesLlmShortTermContext": {
+		type: "enum",
+		values: ["auto", "keep", "exclude"] as const,
+		default: "auto",
+		ui: {
+			tab: "context",
+			group: "User Message Preservation Filtering",
+			label: "Short-term context / instruction",
+			description:
+				"Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
+		},
+	},
+
+	"compaction.keepUserMessagesLlmVenting": {
+		type: "enum",
+		values: ["auto", "keep", "exclude"] as const,
+		default: "exclude",
+		ui: {
+			tab: "context",
+			group: "User Message Preservation Filtering",
+			label: "Venting after a failure",
+			description:
+				"Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
+		},
+	},
+
+	"compaction.keepUserMessagesLlmRestorationGuidance": {
+		type: "enum",
+		values: ["auto", "keep", "exclude"] as const,
+		default: "auto",
+		ui: {
+			tab: "context",
+			group: "User Message Preservation Filtering",
+			label: "Restoration guidance",
+			description:
+				"Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
+		},
+	},
+
+	"compaction.keepUserMessagesLlmPreventionGuidance": {
+		type: "enum",
+		values: ["auto", "keep", "exclude"] as const,
+		default: "auto",
+		ui: {
+			tab: "context",
+			group: "User Message Preservation Filtering",
+			label: "Prevention guidance",
+			description:
+				"Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
+		},
+	},
+
+	"compaction.keepUserMessagesLlmContextFreeInstruction": {
+		type: "enum",
+		values: ["auto", "keep", "exclude"] as const,
+		default: "auto",
+		ui: {
+			tab: "context",
+			group: "User Message Preservation Filtering",
+			label: "Context-free instruction",
+			description:
+				"Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
+		},
+	},
+
+	"compaction.keepUserMessagesLlmBanter": {
+		type: "enum",
+		values: ["auto", "keep", "exclude"] as const,
+		default: "exclude",
+		ui: {
+			tab: "context",
+			group: "User Message Preservation Filtering",
+			label: "Banter / no lasting information",
+			description:
+				"Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
+		},
+	},
+
+	"compaction.keepUserMessagesLlmQuestion": {
+		type: "enum",
+		values: ["auto", "keep", "exclude"] as const,
+		default: "auto",
+		ui: {
+			tab: "context",
+			group: "User Message Preservation Filtering",
+			label: "Question",
+			description:
+				"Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
+		},
+	},
+
+	"compaction.keepUserMessagesLlm": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "context",
+			group: "User Message Classifier (LLM)",
+			label: "Auto-Classify New User Messages",
+			description:
+				"Launch background tagging only while Remember User Messages is enabled. Can consume substantial tokens; explicit classification and stored tags are independent.",
+		},
+	},
+
+	"compaction.keepUserMessagesLlmModel": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "context",
+			group: "User Message Classifier (LLM)",
+			label: "Model",
+			description:
+				"Registered role/model for live and explicit classification. Automatic uses @tiny; unavailable models are explained before requests.",
+		},
+	},
+
 	// Experimental: snapcompact inline imaging (transient, per-request; never persisted)
 	"snapcompact.systemPrompt": {
 		type: "enum",
@@ -3025,7 +3350,7 @@ export const SETTINGS_SCHEMA = {
 			label: "Memory Backend",
 			description: "Off, local summary pipeline, Mnemopi SQLite, Hindsight remote memory, or Sharpshooter",
 			options: [
-				{ value: "off", label: "Off", description: "No memory subsystem runs" },
+				{ value: "off", label: "Off", description: "No ordinary memory backend; requirements are independent" },
 				{ value: "local", label: "Local", description: "Local rollout summarisation pipeline (memory_summary.md)" },
 				{ value: "hindsight", label: "Hindsight", description: "Vectorize Hindsight remote memory service" },
 				{
@@ -3040,6 +3365,17 @@ export const SETTINGS_SCHEMA = {
 						"Friction-gated project decision files (architecture/product/style), consolidated in the background",
 				},
 			],
+		},
+	},
+	"requirements.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "memory",
+			group: "Requirements",
+			label: "Living Requirements",
+			description:
+				"Independent source-backed requirements; inspect with /memory requirements; configure its three models in /model",
 		},
 	},
 	"sharpshooter.model": {
@@ -4871,6 +5207,17 @@ export const SETTINGS_SCHEMA = {
 			group: "Modes",
 			label: "Goal Mode",
 			description: "Enable per-session goal mode and the hidden goal tool",
+		},
+	},
+
+	"goal.injectAsUserMessage": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Goal Objective as User Message",
+			description: "Queue the objective of each goal tool create as an ordinary user follow-up",
 		},
 	},
 

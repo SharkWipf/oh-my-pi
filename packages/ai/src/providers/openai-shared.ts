@@ -27,7 +27,6 @@ import {
 	extractHttpStatusFromError,
 	isRecord,
 	logger,
-	parseImageMetadata,
 	parseStreamingJson,
 	parseStreamingJsonThrottled,
 	stringifyJson,
@@ -63,6 +62,7 @@ import {
 export type { OpenAIPromptCacheOptions } from "../types";
 
 import {
+	openAIResponsesImageContent,
 	getOpenAIResponsesHistoryItems,
 	getOpenAIResponsesHistoryPayload,
 	normalizeResponsesToolCallId,
@@ -111,13 +111,33 @@ import type {
 	ResponseOutputItem,
 	ResponseOutputMessage,
 	ResponseReasoningItem,
+	Tool as ResponsesTool,
 	ResponseStatus,
 	ResponseStreamEvent,
 } from "./openai-responses-wire";
 import { applyInferenceHeaders, setHeaderIfAbsent } from "./inference-headers";
 import { transformMessages } from "./transform-messages";
 import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER, partitionVisionContent } from "./vision-guard";
+import {
+	cloneWithSourceOrigins,
+	combineContentSourceOrigins,
+	combineSourceOrigins,
+	getSourceOrigin,
+	type NativeItemOrigin,
+	type NativeSourcePart,
+	setSourceOrigin,
+	transferSourceOrigin,
+	transferTransformedSourceOrigin,
+} from "../utils/source-origin";
 
+function responsesTextOrigin<T extends object>(source: object, item: T, original: string, emitted: string): T {
+	return original === emitted ? transferSourceOrigin(source, item) : transferTransformedSourceOrigin(source, item);
+}
+
+function responsesContentOrigin<T extends object>(content: readonly object[], item: T): T {
+	const origin = combineContentSourceOrigins(content);
+	return setSourceOrigin(item, origin);
+}
 /**
  * Keyless-provider sentinel. Custom providers configured with `auth: none`
  * (models.yml) have no credential, so the coding-agent resolves their API key
@@ -1522,11 +1542,11 @@ export function repairOrphanResponsesToolOutputs(input: ResponseInput): Response
 		}
 		const ORPHAN_OUTPUT_LIMIT = 16_000;
 		if (text.length > ORPHAN_OUTPUT_LIMIT) text = `${text.slice(0, ORPHAN_OUTPUT_LIMIT)}\n...[truncated]`;
-		repaired.push({
+		repaired.push(transferTransformedSourceOrigin(item, {
 			type: "message",
 			role: "assistant",
 			content: `[Orphan ${toolName} result; call_id=${callId}]: ${text}`,
-		} as ResponseInput[number]);
+		} as ResponseInput[number], "derived"));
 	}
 	return repaired ?? input;
 }
@@ -1577,19 +1597,19 @@ export function repairOrphanResponsesToolCalls(input: ResponseInput): ResponseIn
 			continue;
 		}
 		if (kind === "computer") {
-			repaired.push({
+			repaired.push(setSourceOrigin({
 				type: "message",
 				role: "assistant",
 				content: `[Computer call interrupted before a screenshot was recorded; call_id=${callId}]`,
-			} as ResponseInput[number]);
+			} as ResponseInput[number], { kind: "synthetic", reason: "interrupted-computer-call" }));
 			continue;
 		}
 		repaired.push(item);
-		repaired.push({
+		repaired.push(setSourceOrigin({
 			type: kind === "custom" ? "custom_tool_call_output" : "function_call_output",
 			call_id: callId,
 			output: ORPHAN_TOOL_CALL_PLACEHOLDER,
-		} as ResponseInput[number]);
+		} as ResponseInput[number], { kind: "synthetic", reason: "interrupted-tool-output" }));
 	}
 	return repaired;
 }
@@ -1682,13 +1702,13 @@ function clampResponsesImageDetail(
 function convertResponsesInputImage(image: ImageContent, supportsImageDetailOriginal: boolean): ResponseInputImage {
 	const detail = clampResponsesImageDetail(image.detail, supportsImageDetailOriginal);
 	if (image.providerFile?.provider === "openai" && image.providerFile.id) {
-		return { type: "input_image", detail, file_id: image.providerFile.id };
+		return transferSourceOrigin(image, { type: "input_image", detail, file_id: image.providerFile.id });
 	}
-	return {
+	return transferSourceOrigin(image, {
 		type: "input_image",
 		detail,
 		image_url: image.url ?? `data:${image.mimeType};base64,${image.data}`,
-	};
+	});
 }
 
 export function convertResponsesInputContent(
@@ -1714,19 +1734,19 @@ export function convertResponsesInputContent(
 		const raw = item.text.toWellFormed();
 		const text = escapeControlTokens ? escapeHarmonyControlTokens(raw) : raw;
 		if (text.trim().length === 0) continue;
-		normalizedContent.push({
+		normalizedContent.push(responsesTextOrigin(item, {
 			type: "input_text",
 			text,
-		} satisfies ResponseInputText);
+		} satisfies ResponseInputText, item.text, text));
 	}
 	for (const item of imageBlocks) {
 		normalizedContent.push(convertResponsesInputImage(item, supportsImageDetailOriginal));
 	}
 	if (omittedImages) {
-		normalizedContent.push({
+		normalizedContent.push(setSourceOrigin({
 			type: "input_text",
 			text: NON_VISION_IMAGE_PLACEHOLDER,
-		} satisfies ResponseInputText);
+		} satisfies ResponseInputText, { kind: "synthetic", reason: "omitted-image-placeholder" }));
 	}
 	return normalizedContent.length > 0 ? normalizedContent : undefined;
 }
@@ -1767,33 +1787,33 @@ function adaptResponsesReplayItemsForModel(
 	for (const item of input) {
 		if (!supportsCustomToolCalls && item.type === "custom_tool_call") {
 			changed = true;
-			adapted.push({
+			adapted.push(transferTransformedSourceOrigin(item, {
 				type: "function_call",
 				...(item.id ? { id: item.id } : {}),
 				call_id: item.call_id,
 				name: resolveReplayCustomToolName(item.name, wireNameMap),
 				arguments: JSON.stringify({ input: item.input }),
 				...(item.namespace ? { namespace: item.namespace } : {}),
-			});
+			}));
 			continue;
 		}
 		if (!supportsCustomToolCalls && item.type === "custom_tool_call_output") {
 			changed = true;
-			adapted.push({
+			adapted.push(transferSourceOrigin(item, {
 				type: "function_call_output",
 				call_id: item.call_id,
 				output: item.output,
-			});
+			}));
 			continue;
 		}
 		if (!supportsComputerUse && (item.type === "computer_call" || item.type === "computer_call_output")) {
 			changed = true;
 			const callId = responseInputCallId(item) ?? "unknown";
-			adapted.push({
+			adapted.push(transferTransformedSourceOrigin(item, {
 				type: "message",
 				role: "assistant",
 				content: `[Previous computer ${item.type === "computer_call" ? "call" : "result"}; call_id=${callId}]: ${stringifyJson(item) ?? ""}`,
-			} as ResponseInput[number]);
+			} as ResponseInput[number]));
 			continue;
 		}
 		adapted.push(item);
@@ -1838,9 +1858,9 @@ export interface BuildResponsesInputOptions<TApi extends Api> {
  * previous_response_id, provider fallback) feeds those bytes back as input,
  * which gpt-5.x reject with invalid_prompt / "Request blocked", permanently
  * poisoning the session. `arguments` is a JSON document, so it uses
- * {@link escapeHarmonyControlTokensInJson} to stay parseable. Reasoning items
- * are left untouched: `encrypted_content` is opaque and plaintext summaries
- * are never rendered back into the prompt.
+ * {@link escapeHarmonyControlTokensInJson} to stay parseable. Typed visible native
+ * text is escaped too; encrypted reasoning, signatures, protocol identifiers,
+ * tool schemas and image bytes remain opaque and byte-identical.
  *
  * Native history replay pushes stored `providerPayload` items straight onto the
  * wire, bypassing {@link convertResponsesInputContent}; without this a stored
@@ -1849,68 +1869,92 @@ export interface BuildResponsesInputOptions<TApi extends Api> {
  */
 export function escapeReplayedControlTokens(items: ResponseInput): ResponseInput {
 	return items.map(item => {
-		if (item.type === "function_call_output") {
-			return typeof item.output === "string"
-				? { ...item, output: escapeHarmonyControlTokens(item.output) }
-				: {
-						...item,
-						output: item.output.map(part =>
-							part.type === "input_text" ? { ...part, text: escapeHarmonyControlTokens(part.text) } : part,
-						),
-					};
-		}
-		if (item.type === "custom_tool_call_output") {
-			return typeof item.output === "string"
-				? { ...item, output: escapeHarmonyControlTokens(item.output) }
-				: {
-						...item,
-						output: item.output.map(part =>
-							part.type === "input_text" ? { ...part, text: escapeHarmonyControlTokens(part.text) } : part,
-						),
-					};
-		}
-		if (item.type === "function_call") {
-			return typeof item.arguments === "string"
-				? { ...item, arguments: escapeHarmonyControlTokensInJson(item.arguments) }
-				: item;
-		}
-		if (item.type === "custom_tool_call") {
-			return typeof item.input === "string" ? { ...item, input: escapeHarmonyControlTokens(item.input) } : item;
-		}
-		// EasyInputMessage may omit `type` (`{ role, content }`); the responses
-		// server persists it verbatim, so treat missing type as a message too.
-		const isTypedMessage = item.type === "message" || item.type === undefined;
-		if (!isTypedMessage || !("role" in item) || !("content" in item)) return item;
-		if (item.role === "assistant") {
-			// Assistant output text is model-owned but equally capable of carrying
-			// control tokens as data. `status` discriminates ResponseOutputMessage.
-			if ("status" in item && Array.isArray(item.content)) {
-				return {
-					...item,
-					content: item.content.map(part =>
-						part.type === "output_text"
-							? { ...part, text: escapeHarmonyControlTokens(part.text) }
-							: part.type === "refusal"
-								? { ...part, refusal: escapeHarmonyControlTokens(part.refusal) }
-								: part,
-					),
-				};
+		let changed = false;
+		const text = (value: string, json = false): string => {
+			const next = json ? escapeHarmonyControlTokensInJson(value) : escapeHarmonyControlTokens(value);
+			changed ||= next !== value;
+			return next;
+		};
+		const optionalText = <T extends string | null | undefined>(value: T): T => (typeof value === "string" ? text(value) : value) as T;
+		const part = <T extends { text: string }>(value: T): T => {
+			const next = text(value.text);
+			return next === value.text ? value : transferTransformedSourceOrigin(value, { ...value, text: next });
+		};
+		const safetyCheck = <T extends { message?: string | null }>(check: T): T => {
+			const message = optionalText(check.message);
+			return message === check.message ? check : transferTransformedSourceOrigin(check, { ...check, message });
+		};
+		const toolDescription = <T extends { description?: string | null }>(tool: T): T => {
+			const description = optionalText(tool.description);
+			return description === tool.description ? tool : { ...tool, description };
+		};
+		const definition = (tool: ResponsesTool): ResponsesTool => {
+			if (tool.type === "namespace") return { ...toolDescription(tool), tools: tool.tools.map(toolDescription) };
+			return "description" in tool ? toolDescription(tool) : tool;
+		};
+		const escaped: ResponseInput[number] = (() => {
+			switch (item.type) {
+				case "function_call_output":
+					return { ...item, output: typeof item.output === "string" ? text(item.output) : item.output.map(value => value.type === "input_text" ? part(value) : value) };
+				case "custom_tool_call_output":
+					return { ...item, output: typeof item.output === "string" ? text(item.output) : item.output.map(value => value.type === "input_text" ? part(value) : value) };
+				case "function_call": return { ...item, arguments: text(item.arguments, true) };
+				case "custom_tool_call": return { ...item, input: text(item.input) };
+				case "computer_call": {
+					const action = item.action?.type === "type" ? { ...item.action, text: text(item.action.text) } : item.action;
+					const actions = item.actions?.map(action => action.type === "type" ? { ...action, text: text(action.text) } : action);
+					return { ...item, ...(action !== undefined ? { action } : {}), ...(actions !== undefined ? { actions } : {}), pending_safety_checks: item.pending_safety_checks.map(safetyCheck) };
+				}
+				case "computer_call_output": return { ...item, ...(item.acknowledged_safety_checks ? { acknowledged_safety_checks: item.acknowledged_safety_checks.map(safetyCheck) } : {}) };
+				case "web_search_call": {
+					const action = item.action;
+					if (action.type === "search") return { ...item, action: { ...action, ...(action.query !== undefined ? { query: text(action.query) } : {}), ...(action.queries ? { queries: action.queries.map(query => text(query)) } : {}), ...(action.sources ? { sources: action.sources.map(source => ({ ...source, url: text(source.url) })) } : {}) } };
+					if (action.type === "find_in_page") return { ...item, action: { ...action, url: text(action.url), pattern: text(action.pattern) } };
+					return { ...item, action: { ...action, url: optionalText(action.url) } };
+				}
+				case "file_search_call": return { ...item, queries: item.queries.map(query => text(query)), ...(item.results ? { results: item.results.map(result => ({ ...result, filename: optionalText(result.filename), text: optionalText(result.text) })) } : {}) };
+				case "reasoning": return { ...item, summary: item.summary.map(part), ...(item.content ? { content: item.content.map(part) } : {}) };
+				case "code_interpreter_call": return { ...item, code: optionalText(item.code), ...(item.outputs ? { outputs: item.outputs.map(output => output.type === "logs" ? { ...output, logs: text(output.logs) } : output) } : {}) };
+				case "mcp_call": return { ...item, arguments: text(item.arguments, true), ...(item.output !== undefined ? { output: optionalText(item.output) } : {}), ...(item.error !== undefined ? { error: optionalText(item.error) } : {}) };
+				case "mcp_list_tools": return { ...item, tools: item.tools.map(toolDescription), ...(item.error !== undefined ? { error: optionalText(item.error) } : {}) };
+				case "mcp_approval_request": return { ...item, arguments: text(item.arguments, true) };
+				case "mcp_approval_response": return { ...item, ...(item.reason !== undefined ? { reason: optionalText(item.reason) } : {}) };
+				case "shell_call": return { ...item, action: { ...item.action, commands: item.action.commands.map(command => text(command)) } };
+				case "shell_call_output": return { ...item, output: item.output.map(output => ({ ...output, stdout: text(output.stdout), stderr: text(output.stderr) })) };
+				case "local_shell_call": return { ...item, action: { ...item.action, command: item.action.command.map(command => text(command)), env: Object.fromEntries(Object.entries(item.action.env).map(([key, value]) => [key, text(value)])), ...(item.action.working_directory !== undefined ? { working_directory: optionalText(item.action.working_directory) } : {}) } };
+				case "local_shell_call_output": return { ...item, output: text(item.output, true) };
+				case "apply_patch_call": {
+					const operation = item.operation;
+					return { ...item, operation: operation.type === "delete_file" ? { ...operation, path: text(operation.path) } : { ...operation, path: text(operation.path), diff: text(operation.diff) } };
+				}
+				case "apply_patch_call_output": return { ...item, ...(item.output !== undefined ? { output: optionalText(item.output) } : {}) };
+				case "tool_search_call": {
+					// This field is model-authored arguments, not an unknown metadata tree.
+					const serialized = stringifyJson(item.arguments);
+					if (serialized === undefined) return item;
+					const escaped = text(serialized, true);
+					return escaped === serialized ? item : { ...item, arguments: JSON.parse(escaped) };
+				}
+				case "tool_search_output": case "additional_tools": return { ...item, tools: item.tools.map(definition) };
 			}
-			return item;
+			// EasyInputMessage may omit type; protocol-only and unknown items are not walked.
+			if ((item.type !== "message" && item.type !== undefined) || !("content" in item) || !("role" in item)) return item;
+			if (item.role === "assistant") {
+				if (!("status" in item) || !Array.isArray(item.content)) return item;
+				return { ...item, content: item.content.map(value => value.type === "output_text" ? part(value) : value.type === "refusal" ? { ...value, refusal: text(value.refusal) } : value) };
+			}
+			return { ...item, content: typeof item.content === "string" ? text(item.content) : item.content.map(value => value.type === "input_text" ? part(value) : value) };
+		})();
+		if (!changed) return item;
+		transferTransformedSourceOrigin(item, escaped);
+		const original = getSourceOrigin(item);
+		const transformed = getSourceOrigin(escaped);
+		if (original?.kind === "source" && transformed?.kind === "source" && original.parts.some(part => part.representation === "original-image")) {
+			setSourceOrigin(escaped, { kind: "source", parts: transformed.parts.map((part, index) => original.parts[index]!.representation === "original-image" ? original.parts[index]! : part) });
 		}
-		const content = item.content;
-		if (typeof content === "string") {
-			return { ...item, content: escapeHarmonyControlTokens(content) };
-		}
-		if (Array.isArray(content)) {
-			return {
-				...item,
-				content: content.map(part =>
-					part.type === "input_text" ? { ...part, text: escapeHarmonyControlTokens(part.text) } : part,
-				),
-			};
-		}
-		return item;
+		if ("content" in escaped && Array.isArray(escaped.content)) responsesContentOrigin(escaped.content, escaped);
+		if ("output" in escaped && Array.isArray(escaped.output)) responsesContentOrigin(escaped.output, escaped);
+		return escaped;
 	});
 }
 
@@ -1918,7 +1962,7 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 	const messages: ResponseInput = [];
 	const systemPrompts = options.systemRole ? normalizeSystemPrompts(options.context.systemPrompt) : [];
 	for (const systemPrompt of systemPrompts) {
-		messages.push({ role: options.systemRole as "system" | "developer", content: systemPrompt });
+		messages.push(setSourceOrigin({ role: options.systemRole as "system" | "developer", content: systemPrompt }, { kind: "synthetic", reason: "system-prefix" }));
 	}
 
 	// Compat is resolved by the catalog (e.g. Copilot / xai-oauth reject
@@ -1987,11 +2031,14 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 				escapeControlTokens,
 			);
 			if (!content) continue;
+			if (typeof msg.content === "string" && content[0].type === "input_text") {
+				responsesTextOrigin(msg, content[0], msg.content, content[0].text);
+			}
 			const developerText =
 				options.developerStringContent && msg.role === "developer" && typeof msg.content === "string"
 					? msg.content.toWellFormed()
 					: undefined;
-			messages.push({
+			messages.push(responsesContentOrigin(content, {
 				role: "user",
 				content:
 					developerText !== undefined
@@ -1999,7 +2046,7 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 							? escapeHarmonyControlTokens(developerText)
 							: developerText
 						: content,
-			});
+			}));
 		} else if (msg.role === "assistant") {
 			const assistantMsg = msg as AssistantMessage;
 			// Providers replay stale native items even when the current request has
@@ -2176,7 +2223,7 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 			}
 			const reasoningItem = parseResponseReasoningReplayItem(block.thinkingSignature);
 			if (reasoningItem) {
-				outputItems.push(reasoningItem);
+				outputItems.push(transferSourceOrigin(block, reasoningItem));
 				reasoningItemEmitted = true;
 			}
 			continue;
@@ -2209,7 +2256,8 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 				...(msgId ? { id: msgId } : {}),
 				...(parsedSignature?.phase ? { phase: parsedSignature.phase } : {}),
 			};
-			outputItems.push(messageItem as ResponseInput[number]);
+			responsesTextOrigin(block, messageItem.content[0], block.text, block.text.toWellFormed());
+			outputItems.push(responsesContentOrigin(messageItem.content, messageItem as ResponseInput[number]));
 			continue;
 		}
 
@@ -2220,24 +2268,24 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 		if (block.providerMetadata?.type === "computer") {
 			if (model.supportsComputerUse !== true) {
 				const callId = normalizeResponsesToolCallId(block.id, "ctc").callId;
-				outputItems.push({
+				outputItems.push(transferTransformedSourceOrigin(block, {
 					type: "message",
 					role: "assistant",
 					content: `[Previous computer call; call_id=${callId}]: ${stringifyJson(block.providerMetadata.actions) ?? ""}`,
-				} as ResponseInput[number]);
+				} as ResponseInput[number], "derived"));
 				continue;
 			}
 			const normalized = normalizeResponsesToolCallId(block.id, "ctc");
 			knownCallIds.add(normalized.callId);
 			computerCallIds?.add(normalized.callId);
-			outputItems.push({
+			outputItems.push(transferSourceOrigin(block, {
 				type: "computer_call",
 				id: block.providerMetadata.providerItemId,
 				call_id: normalized.callId,
 				actions: structuredCloneJSON(block.providerMetadata.actions),
 				pending_safety_checks: structuredCloneJSON(block.providerMetadata.pendingSafetyChecks),
 				status: "completed",
-			} as ResponseInput[number]);
+			} as ResponseInput[number]));
 			continue;
 		}
 		const normalized = normalizeResponsesToolCallId(block.id, block.customWireName ? "ctc" : "fc");
@@ -2257,26 +2305,26 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 		if (block.customWireName && supportsCustomToolCalls) {
 			const rawInput = typeof block.arguments?.input === "string" ? block.arguments.input : "";
 			customCallIds?.add(normalized.callId);
-			outputItems.push({
+			outputItems.push(transferSourceOrigin(block, {
 				type: "custom_tool_call",
 				...(itemId ? { id: itemId } : {}),
 				call_id: normalized.callId,
 				name: block.customWireName,
 				input: rawInput,
-			} as ResponseInput[number]);
+			} as ResponseInput[number]));
 			continue;
 		}
 		const functionName =
 			block.customWireName && !supportsCustomToolCalls
 				? resolveReplayCustomToolName(block.customWireName, customToolWireNameMap)
 				: block.name;
-		outputItems.push({
+		outputItems.push(transferSourceOrigin(block, {
 			type: "function_call",
 			...(itemId ? { id: itemId } : {}),
 			call_id: normalized.callId,
 			name: functionName,
 			arguments: stringifyJson(block.arguments) ?? "null",
-		});
+		}));
 	}
 
 	if (requiresReasoningItem && !reasoningItemEmitted && outputItems.length > 0) {
@@ -2299,6 +2347,12 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 			summary: [],
 			content: [{ type: "reasoning_text", text: reasoningText }],
 		};
+		if (carriedReasoningText.length > 0) {
+			setSourceOrigin(reasoningItem, combineSourceOrigins(assistantMsg.content.filter(block => block.type === "thinking" && block.thinking.trim().length > 0)));
+			transferTransformedSourceOrigin(reasoningItem, reasoningItem);
+		} else {
+			setSourceOrigin(reasoningItem, { kind: "synthetic", reason: "reasoning-replay-placeholder" });
+		}
 		outputItems.unshift(reasoningItem);
 	}
 
@@ -2354,13 +2408,43 @@ export function encodeResponsesToolResultOutput<TApi extends Api>(
 			? toolResult.content.map((block): ResponseInputContent => {
 					if (block.type === "image") return convertResponsesInputImage(block, supportsImageDetailOriginal);
 					const text = block.text.toWellFormed();
-					return {
+					const emitted = escapeControlTokens ? escapeHarmonyControlTokens(text) : text;
+					return responsesTextOrigin(block, {
 						type: "input_text",
-						text: escapeControlTokens ? escapeHarmonyControlTokens(text) : text,
-					};
+						text: emitted,
+					}, block.text, emitted);
 				})
 			: outputText;
 	return { output, outputText };
+}
+
+function responsesToolTextOrigin(toolResult: ToolResultMessage, model: Model<Api>): NativeItemOrigin {
+	const parts: NativeSourcePart[] = [];
+	let offset = 0;
+	let first = true;
+	for (const block of toolResult.content) {
+		if (block.type !== "text") continue;
+		if (!first) offset++;
+		first = false;
+		const origin = getSourceOrigin(block);
+		if (origin?.kind !== "source") return origin ?? { kind: "unknown", reason: "unmapped-tool-text" };
+		const wellFormed = block.text.toWellFormed();
+		const emitted = isHarmonyDialectModel(model) ? escapeHarmonyControlTokens(wellFormed) : wellFormed;
+		for (const part of origin.parts) {
+			const { transportBlockIndex: _index, ...sourcePart } = part;
+			if (block.text === emitted) {
+				parts.push({ ...sourcePart, transportSpan: {
+					start: offset + (part.transportSpan?.start ?? 0),
+					end: offset + (part.transportSpan?.end ?? emitted.length),
+				} });
+			} else {
+				const { sourceSpan: _span, ...transformedPart } = sourcePart;
+				parts.push({ ...transformedPart, representation: "transformed-text", transportSpan: { start: offset, end: offset + emitted.length } });
+			}
+		}
+		offset += emitted.length;
+	}
+	return parts.length ? { kind: "source", parts } : { kind: "synthetic", reason: "empty-tool-output" };
 }
 
 /** Appends one Responses tool result. */
@@ -2376,40 +2460,53 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 	computerCallIds?: ReadonlySet<string>,
 ): void {
 	const { output, outputText } = encodeResponsesToolResultOutput(toolResult, model, supportsImageDetailOriginal);
+	const outputOrigin = Array.isArray(output)
+		? combineContentSourceOrigins(output)
+		: responsesToolTextOrigin(toolResult, model);
+	const emitOutput = (item: ResponseInput[number], derived = false): void => {
+		setSourceOrigin(item, outputOrigin);
+		if (derived) transferTransformedSourceOrigin(item, item, "derived");
+
+		messages.push(item);
+	};
 	const normalized = normalizeResponsesToolCallId(toolResult.toolCallId);
 	if (toolResult.providerMetadata?.type === "computer" && model.supportsComputerUse !== true) {
-		messages.push({
+		messages.push(transferTransformedSourceOrigin(toolResult.providerMetadata.screenshot, {
 			type: "message",
 			role: "assistant",
 			content: `[Previous computer result; call_id=${normalized.callId}]: ${stringifyJson(toolResult.providerMetadata.screenshot) ?? ""}`,
-		} as ResponseInput[number]);
+		} as ResponseInput[number], "derived"));
 		return;
 	}
 	if (computerCallIds?.has(normalized.callId)) {
 		if (toolResult.providerMetadata?.type !== "computer") {
 			const limit = 16_000;
 			const noteText = outputText.length > limit ? `${outputText.slice(0, limit)}\n...[truncated]` : outputText;
-			messages.push({
+			emitOutput({
 				type: "message",
 				role: "assistant",
 				content: `[Computer tool failed before a screenshot was produced; call_id=${normalized.callId}]: ${noteText}`,
-			} as ResponseInput[number]);
+			} as ResponseInput[number], true);
 			return;
 		}
 		if (strictResponsesPairing && !knownCallIds.has(normalized.callId)) {
-			messages.push({
+			messages.push(setSourceOrigin({
 				type: "message",
 				role: "assistant",
 				content: `[Orphan computer result; call_id=${normalized.callId}]`,
-			} as ResponseInput[number]);
+			} as ResponseInput[number], { kind: "synthetic", reason: "orphan-computer-result" }));
 			return;
 		}
-		messages.push({
+		const screenshot = cloneWithSourceOrigins(toolResult.providerMetadata.screenshot);
+		setSourceOrigin(screenshot, combineContentSourceOrigins([screenshot]));
+		const safetyChecks = cloneWithSourceOrigins(toolResult.providerMetadata.acknowledgedSafetyChecks);
+		const item = setSourceOrigin({
 			type: "computer_call_output",
 			call_id: normalized.callId,
-			output: structuredCloneJSON(toolResult.providerMetadata.screenshot),
-			acknowledged_safety_checks: structuredCloneJSON(toolResult.providerMetadata.acknowledgedSafetyChecks),
-		} as ResponseInput[number]);
+			output: screenshot,
+			acknowledged_safety_checks: safetyChecks,
+		} as ResponseInput[number], combineSourceOrigins([screenshot, ...(safetyChecks ?? [])]));
+		messages.push(isHarmonyDialectModel(model) ? escapeReplayedControlTokens([item])[0] : item);
 		return;
 	}
 	if (strictResponsesPairing && !knownCallIds.has(normalized.callId)) {
@@ -2418,21 +2515,21 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 		// into an assistant note instead (same shape as repairOrphanResponsesToolOutputs).
 		const limit = 16_000;
 		const noteText = outputText.length > limit ? `${outputText.slice(0, limit)}\n...[truncated]` : outputText;
-		messages.push({
+		emitOutput({
 			type: "message",
 			role: "assistant",
 			content: `[Orphan ${toolResult.toolName || "tool"} result; call_id=${normalized.callId}]: ${noteText}`,
-		} as ResponseInput[number]);
+		} as ResponseInput[number], true);
 		return;
 	}
 	if (supportsCustomToolCalls && customCallIds?.has(normalized.callId)) {
-		messages.push({
+		emitOutput({
 			type: "custom_tool_call_output",
 			call_id: normalized.callId,
 			output,
 		} as ResponseInput[number]);
 	} else {
-		messages.push({
+		emitOutput({
 			type: "function_call_output",
 			call_id: normalized.callId,
 			output,
@@ -2505,17 +2602,33 @@ function foldReasoningSummary(parts: ResponseReasoningItem["summary"] | undefine
 	return canonical;
 }
 
-/** Chooses final reasoning text without making sequential-cutoff results disagree with emitted deltas. */
+/** Completes append-only display separately from the authoritative replay signature. */
 export function finalizeReasoningThinking(
 	item: ResponseReasoningItem,
-	streamedThinking: string,
+	block: ThinkingContent,
+	stream: AssistantMessageEventStream,
+	output: AssistantMessage,
+	contentIndex: number,
 	cutoff?: SequentialCutoffSummaryState,
-): string {
-	if (cutoff) return finalizeCutoffReasoningThinking(item, streamedThinking, cutoff);
-	const summaryThinking = item.summary?.map(part => part.text).join("\n\n") ?? "";
-	if (summaryThinking) return summaryThinking;
+	rawThinking = "",
+): void {
+	const summaryThinking = cutoff
+		? finalizeCutoffReasoningThinking(item, block.thinking, cutoff)
+		: (item.summary?.map(part => part.text).join("\n\n") ?? "");
 	const contentThinking = item.content?.[0]?.type === "reasoning_text" ? (item.content[0].text ?? "") : "";
-	return contentThinking || streamedThinking || "";
+	const finalThinking =
+		summaryThinking ||
+		(cutoff && item.summary?.some(part => part.text) ? "" : contentThinking || rawThinking);
+	// Delta consumers cannot retract earlier text; replay retains the authoritative item.
+	if (finalThinking.startsWith(block.thinking)) {
+		const delta = finalThinking.slice(block.thinking.length);
+		if (delta) {
+			block.thinking = finalThinking;
+			stream.push({ type: "thinking_delta", contentIndex, delta, partial: output });
+		}
+	}
+	block.thinkingSignature = JSON.stringify(item);
+	stream.push({ type: "thinking_end", contentIndex, content: block.thinking, partial: output });
 }
 
 function finalizeCutoffReasoningThinking(
@@ -2523,23 +2636,21 @@ function finalizeCutoffReasoningThinking(
 	streamedThinking: string,
 	cutoff: SequentialCutoffSummaryState,
 ): string {
-	// The block's streamed deltas are authoritative: final text must never
-	// disagree with what delta consumers already rendered.
-	if (streamedThinking) return streamedThinking;
 	const summaryThinking = foldReasoningSummary(item.summary);
 	if (summaryThinking) {
 		// The done payload carries the response-cumulative summary. Emit only
 		// what no earlier block already emitted; replay-only items finalize empty.
-		if (cutoff.emitted.startsWith(summaryThinking)) return "";
+		if (cutoff.emitted.startsWith(summaryThinking)) return streamedThinking;
 		if (!cutoff.emitted || summaryThinking.startsWith(cutoff.emitted)) {
-			const suffix = summaryThinking.slice(cutoff.emitted.length).replace(/^\n+/, "");
+			let suffix = summaryThinking.slice(cutoff.emitted.length);
+			if (!streamedThinking) suffix = suffix.replace(/^\n+/, "");
 			// Adopt the payload as canonical so later items cannot replay this text.
 			cutoff.summary = item.summary?.map(part => ({ ...part })) ?? [];
 			cutoff.emitted = summaryThinking;
-			return suffix;
+			return streamedThinking + suffix;
 		}
 		// Diverged from streamed text — the deltas already shown win.
-		return "";
+		return streamedThinking;
 	}
 	return item.content?.[0]?.type === "reasoning_text" ? (item.content[0].text ?? "") : "";
 }
@@ -2755,7 +2866,7 @@ function getOpenAIResponsesTerminalEvent(event: ResponseStreamEvent): OpenAIResp
 
 export interface ProcessResponsesStreamOptions {
 	onFirstToken?: () => void;
-	onOutputItemDone?: (item: ResponseOutputItem) => void;
+	onOutputItemDone?: (item: ResponseOutputItem, contentIndex?: number) => void;
 	/**
 	 * Called when a terminal `response.completed`, `response.incomplete`, or
 	 * `response.done` event is successfully processed. Only invoked on the
@@ -2787,12 +2898,8 @@ export function appendResponsesImageResult(
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
 	result: string,
-): void {
-	const image: ImageContent = {
-		type: "image",
-		data: result,
-		mimeType: parseImageMetadata(Buffer.from(result, "base64"))?.mimeType ?? "image/png",
-	};
+): number {
+	const image = openAIResponsesImageContent(result);
 	output.content.push(image);
 	stream.push({
 		type: "image_end",
@@ -2800,6 +2907,7 @@ export function appendResponsesImageResult(
 		content: image,
 		partial: output,
 	});
+	return output.content.length - 1;
 }
 
 export async function processResponsesStream<TApi extends Api>(
@@ -2822,8 +2930,8 @@ export async function processResponsesStream<TApi extends Api>(
 			| ResponseCustomToolCall
 			| ResponseComputerToolCall;
 		block: ThinkingContent | TextContent | StreamingToolCallBlock;
+		rawThinking?: string;
 	}
-
 	// Multiple items (parallel function_calls in particular) can be open at the same
 	// time. OpenAI's spec routes every per-item event by `output_index`/`item_id`;
 	// see https://github.com/can1357/oh-my-pi/issues/1880 — llama.cpp emits parallel
@@ -3146,17 +3254,10 @@ export async function processResponsesStream<TApi extends Api>(
 				appendReasoningSummaryPartDone(entry.item, entry.block, stream, output, contentIndexOf(entry.block));
 			}
 		} else if (event.type === "response.reasoning_text.delta") {
-			// Raw reasoning text delta from local providers that stream thinking
-			// directly rather than via the OpenAI summary tracking protocol.
+			// Buffer raw text until completion: a later readable summary takes precedence.
 			const entry = lookupOpenItem(event);
 			if (entry?.item.type === "reasoning" && entry.block.type === "thinking") {
-				entry.block.thinking += event.delta;
-				stream.push({
-					type: "thinking_delta",
-					contentIndex: contentIndexOf(entry.block),
-					delta: event.delta,
-					partial: output,
-				});
+				entry.rawThinking = (entry.rawThinking ?? "") + event.delta;
 			}
 		} else if (event.type === "response.content_part.added") {
 			const entry = lookupOpenItem(event);
@@ -3211,7 +3312,7 @@ export async function processResponsesStream<TApi extends Api>(
 			}
 		} else if (event.type === "response.output_item.done") {
 			const item = structuredCloneJSON(event.item);
-			options?.onOutputItemDone?.(item);
+			let normalizedContentIndex: number | undefined;
 			const entry =
 				item.type === "function_call" || item.type === "custom_tool_call"
 					? lookupOpenItem({ output_index: event.output_index, item_id: item.id ?? item.call_id })
@@ -3227,14 +3328,10 @@ export async function processResponsesStream<TApi extends Api>(
 								| ThinkingContent
 								| undefined);
 				if (reasoningBlock) {
-					reasoningBlock.thinking = finalizeReasoningThinking(item, reasoningBlock.thinking);
-					reasoningBlock.thinkingSignature = JSON.stringify(item);
-					stream.push({
-						type: "thinking_end",
-						contentIndex: contentIndexOf(reasoningBlock),
-						content: reasoningBlock.thinking,
-						partial: output,
-					});
+					finalizeReasoningThinking(
+						item, reasoningBlock, stream, output, contentIndexOf(reasoningBlock), undefined, entry?.rawThinking,
+					);
+					normalizedContentIndex = contentIndexOf(reasoningBlock);
 				}
 				closeOpenItem(event.output_index, item.id, entry);
 			} else if (item.type === "message") {
@@ -3253,6 +3350,7 @@ export async function processResponsesStream<TApi extends Api>(
 					output.content.push(synthesized);
 					contentIndex = output.content.length - 1;
 				}
+				normalizedContentIndex = contentIndex;
 				stream.push({ type: "text_end", contentIndex, content: text, partial: output });
 				closeOpenItem(event.output_index, item.id, entry);
 			} else if (item.type === "function_call") {
@@ -3286,6 +3384,7 @@ export async function processResponsesStream<TApi extends Api>(
 					output.content.push(toolCall);
 					contentIndex = output.content.length - 1;
 				}
+				normalizedContentIndex = contentIndex;
 				closeOpenItem(event.output_index, item.id, entry, item.call_id, prefixedFunctionCallItemKey(item.call_id));
 				stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
 			} else if (item.type === "computer_call") {
@@ -3307,6 +3406,7 @@ export async function processResponsesStream<TApi extends Api>(
 					output.content.push(toolCall);
 					contentIndex = output.content.length - 1;
 				}
+				normalizedContentIndex = contentIndex;
 				closeOpenItem(event.output_index, item.id, entry, item.call_id);
 				stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
 			} else if (item.type === "custom_tool_call") {
@@ -3330,6 +3430,7 @@ export async function processResponsesStream<TApi extends Api>(
 					output.content.push(toolCall);
 					contentIndex = output.content.length - 1;
 				}
+				normalizedContentIndex = contentIndex;
 				closeOpenItem(event.output_index, item.id, entry, item.call_id, prefixedFunctionCallItemKey(item.call_id));
 				stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
 			} else if (item.type === "web_search_call" && (item.status === undefined || item.status === "completed")) {
@@ -3337,10 +3438,24 @@ export async function processResponsesStream<TApi extends Api>(
 				// the model never surfaced an answer; the agent loop continues from it.
 				sawCompletedWebSearchCall = true;
 			} else if (item.type === "image_generation_call" && item.status === "completed" && item.result) {
-				appendResponsesImageResult(output, stream, item.result);
+				normalizedContentIndex = appendResponsesImageResult(output, stream, item.result);
 			}
+			options?.onOutputItemDone?.(item, normalizedContentIndex);
 		} else if (terminalEvent) {
 			const response = terminalEvent.response;
+			// Some transports omit item.done; complete still-open reasoning from the
+			// terminal snapshot, or the accumulated item when no snapshot was supplied.
+			for (const entry of openItemsInOrder) {
+				if (entry.item.type !== "reasoning" || entry.block.type !== "thinking") continue;
+				const finalItem = entry.item.id
+					? response?.output?.find(item => item.type === "reasoning" && item.id === entry.item.id)
+					: undefined;
+				const item = finalItem?.type === "reasoning" ? structuredCloneJSON(finalItem) : entry.item;
+				if (finalItem) options?.onOutputItemDone?.(item);
+				finalizeReasoningThinking(
+					item, entry.block, stream, output, contentIndexOf(entry.block), undefined, entry.rawThinking,
+				);
+			}
 			const shouldPromoteIncompleteToolUse =
 				response?.status === "incomplete" &&
 				response.incomplete_details?.reason === "max_output_tokens" &&

@@ -1,7 +1,9 @@
-import { Box, type Component, Markdown } from "@oh-my-pi/pi-tui";
+import { Box, type Component, getKeybindings, Markdown, truncateToWidth } from "@oh-my-pi/pi-tui";
 import { formatNumber } from "@oh-my-pi/pi-utils";
+import { formatKeyHints } from "../../config/keybindings";
 import { getMarkdownTheme, theme } from "../../modes/theme/theme";
 import type { BranchSummaryMessage, CompactionSummaryMessage, CustomMessage } from "../../session/messages";
+import { renderCompactionDiagnosticsSummary } from "../utils/context-usage";
 
 /** Divider labels per compaction method; unknown/legacy methods fall back to "compacted". */
 const COMPACTION_METHOD_LABELS: Record<string, string> = {
@@ -21,6 +23,7 @@ function compactionAmount(message: CompactionSummaryMessage): string | undefined
 interface SummaryDividerOptions {
 	label: () => string;
 	detailMarkdown: () => string;
+	annotation?: () => string | undefined;
 }
 
 class SummaryDividerComponent implements Component {
@@ -47,9 +50,11 @@ class SummaryDividerComponent implements Component {
 		if (this.#cache?.width === width) {
 			return this.#cache.lines;
 		}
-		const lines = this.#expanded
-			? ["", this.#divider(width), "", ...this.#detailBox().render(width)]
-			: ["", this.#divider(width), ""];
+		const annotation = this.options.annotation?.();
+		const lines = ["", this.#divider(width)];
+		if (annotation) lines.push(theme.fg("muted", truncateToWidth(annotation, width)));
+		lines.push("");
+		if (this.#expanded) lines.push(...this.#detailBox().render(width));
 		this.#cache = { width, lines };
 		return lines;
 	}
@@ -57,14 +62,14 @@ class SummaryDividerComponent implements Component {
 	#divider(width: number): string {
 		const rule = theme.tree.horizontal;
 		const label = this.options.label();
-		// sep.dot ships pre-padded (" · "); trim so the hint joins with single spaces.
-		const hint = `${theme.sep.dot.trim()} ctrl+o`;
+		const expandHint = formatKeyHints(getKeybindings().getKeys("app.tools.expand"));
+		const hint = expandHint ? `${theme.sep.dot.trim()} ${expandHint}` : "";
 		const plainWidth = Bun.stringWidth(`${label} ${hint}`, { countAnsiEscapeCodes: false });
 		// ` label hint ` framed by rules on both sides.
 		const remaining = width - plainWidth - 2;
 		if (remaining < 4) {
 			// Too narrow for a framed rule — emit the bare label.
-			return theme.fg("muted", label);
+			return theme.fg("muted", truncateToWidth(label, width));
 		}
 		const left = Math.floor(remaining / 2);
 		const right = remaining - left;
@@ -103,20 +108,23 @@ class SummaryDividerComponent implements Component {
  */
 export class CompactionSummaryMessageComponent implements Component {
 	#divider: SummaryDividerComponent;
+	readonly #diagnosticLines: string[] | undefined;
 
 	constructor(private readonly message: CompactionSummaryMessage) {
+		this.#diagnosticLines = message.diagnostics ? renderCompactionDiagnosticsSummary(message.diagnostics).split("\n") : undefined;
 		this.#divider = new SummaryDividerComponent({
 			// A dead-end warning stamped by the progress guard badges the bar;
 			// the full text lives in the ctrl+o detail block below.
 			label: () => this.#label(),
 			detailMarkdown: () => this.#detailMarkdown(),
+			annotation: () => this.#diagnosticLines?.[1],
 		});
 	}
 
 	#label(): string {
 		const name = (this.message.method && COMPACTION_METHOD_LABELS[this.message.method]) || "compacted";
 		let label = `${theme.icon.camera} ${name}`;
-		const amount = compactionAmount(this.message);
+		const amount = this.#diagnosticLines?.[0] ?? compactionAmount(this.message);
 		if (amount) label += `${theme.sep.dot}${amount}`;
 		if (this.message.warning) label += ` ${theme.fg("warning", theme.icon.warning)}`;
 		return label;
@@ -147,7 +155,8 @@ export class CompactionSummaryMessageComponent implements Component {
 		const frameNote =
 			frameCount > 0 ? `\n\n_${frameCount} snapcompact frame${frameCount === 1 ? "" : "s"} attached_` : "";
 		const warningNote = this.message.warning ? `\n\n${theme.icon.warning} **Warning:** ${this.message.warning}` : "";
-		return `**${tokenLine}**${warningNote}\n\n${this.message.summary}${frameNote}`;
+		const diagnosticNote = this.#diagnosticLines ? `\n\n${this.#diagnosticLines.join("\n\n")}\n\nUse /context details for ordered inventory and measurement basis.` : "";
+		return `**${tokenLine}**${warningNote}${diagnosticNote}\n\n${this.message.summary}${frameNote}`;
 	}
 }
 

@@ -205,16 +205,21 @@ describe("AgentSession branch title metadata", () => {
 });
 
 describe("AgentSession historical image prompts", () => {
-	it("returns the selected images when branching from a user prompt", async () => {
+	it("branches with the accepted original draft and disposition instead of transformed delivery", async () => {
 		const ctx = await createTestSession({ inMemory: true });
 		try {
 			const text = "Inspect [Image #1, 1x1]";
-			const entryId = ctx.sessionManager.appendMessage(historicalImagePrompt(text));
+			const entryId = ctx.sessionManager.appendMessage({
+				...historicalImagePrompt("Transformed delivery"),
+				content: "Transformed delivery",
+				originalSubmission: { text: `/keep ${text}`, images: [HISTORICAL_IMAGE], compactionOverride: "keep" },
+				compactionOverride: "keep",
+			});
 
 			const result = await ctx.session.branch(entryId);
 
-			expect(result).toEqual({
-				selectedText: text,
+			expect(result).toMatchObject({
+				selectedText: `/keep ${text}`,
 				selectedImages: [HISTORICAL_IMAGE],
 				cancelled: false,
 			});
@@ -223,17 +228,22 @@ describe("AgentSession historical image prompts", () => {
 		}
 	});
 
-	it("returns the target images when navigating to a user prompt", async () => {
+	it("navigates with original images and once disposition instead of normalized delivery", async () => {
 		const ctx = await createTestSession({ inMemory: true });
 		try {
 			const text = "Compare [Image #1, 1x1]";
-			const entryId = ctx.sessionManager.appendMessage(historicalImagePrompt(text));
+			const entryId = ctx.sessionManager.appendMessage({
+				...historicalImagePrompt("Transformed delivery"),
+				content: "Transformed delivery",
+				originalSubmission: { text: `/once ${text}`, images: [HISTORICAL_IMAGE], compactionOverride: "exclude" },
+				compactionOverride: "exclude",
+			});
 			ctx.sessionManager.appendMessage(assistantMsg("Compared."));
 
 			const result = await ctx.session.navigateTree(entryId);
 
 			expect(result).toMatchObject({
-				editorText: text,
+				editorText: `/once ${text}`,
 				editorImages: [HISTORICAL_IMAGE],
 				cancelled: false,
 			});

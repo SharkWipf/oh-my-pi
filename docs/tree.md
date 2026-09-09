@@ -28,7 +28,7 @@ Any of the following opens the same selector:
 - `/tree`
 - configured keybinding for the `app.session.tree` action
 
-Double-escape on an empty editor opens the fullscreen transcript rewind selector instead (see `doubleEscapeAction`): it replays the transcript, outlines the block the rewind would land on, and rewinds via `branch()` for user prompts or `navigateTree()` for anything else.
+Double-escape on an empty editor opens the fullscreen transcript rewind selector instead (see `doubleEscapeAction`): it replays the transcript, outlines the selected block, and rewinds within the current session via `navigateTree()`.
 
 ## Tree UI model
 
@@ -132,7 +132,9 @@ Assistant messages that contain only tool calls (no canonical text) are hidden i
 
 - New leaf becomes the selected entry’s `parentId`
 - Root user message resets leaf to root
-- Text and image attachments are reconstructed as an editable draft
+- Original captured text and image bytes are reconstructed as an editable draft, retaining the submitted `/keep` or `/once` disposition and positional image links rather than provider-normalized images
+- An unchanged restored draft reuses its source capture; editing it produces a new capture on submission
+- A referenced original that is unavailable prevents navigation; older messages without captures restore their stored text and images normally
 - The selector only writes that draft when the editor is currently empty
 
 ### Selecting `custom_message`

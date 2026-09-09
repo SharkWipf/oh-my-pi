@@ -297,14 +297,27 @@ export async function loadEntriesFromFile(
 }
 
 /**
- * Visit session entries, using bounded streaming for large file-backed journals.
- * Small files and non-file backends keep the existing full-load path.
+ * Visit session entries. Selected IDs use the journal-owned byte index and fresh whole-line reads;
+ * unfiltered scans retain bounded streaming for large files and the existing backend load path.
  */
 export async function visitEntriesFromFile(
 	filePath: string,
 	visit: (entry: FileEntry) => void | boolean,
 	storage: SessionStorage = new FileSessionStorage(),
+	entryIds?: ReadonlySet<string>,
 ): Promise<void> {
+	if (entryIds && storage instanceof FileSessionStorage && storage.readText === FileSessionStorage.prototype.readText) {
+		const selected = await storage.readJsonlLinesById(filePath, entryIds);
+		const prefix = parseSessionContent(selected.prefix);
+		if (prefix.invalidHeader || !prefix.entries.length) return;
+		for (const entry of prefix.entries) if (visit(entry) === false) return;
+		for (const line of selected.lines) {
+			for (const entry of parseJsonlLenient<FileEntry>(line)) {
+				if (entryIds.has(entry.id) && visit(entry) === false) return;
+			}
+		}
+		return;
+	}
 	const size = storage.statSync(filePath).size;
 	if (shouldStreamEntries(storage, size)) {
 		let sawFirstEntry = false;
@@ -313,13 +326,13 @@ export async function visitEntriesFromFile(
 				sawFirstEntry = true;
 				if (!isValidSessionHeader(entry)) return false;
 			}
-			return visit(entry);
+			if (!entryIds || entry.type === "session" || entryIds.has(entry.id)) return visit(entry);
 		});
 		return;
 	}
 
 	for (const entry of (await loadWithKnownSize(filePath, storage, size)).entries) {
-		if (visit(entry) === false) return;
+		if ((!entryIds || entry.type === "session" || entryIds.has(entry.id)) && visit(entry) === false) return;
 	}
 }
 

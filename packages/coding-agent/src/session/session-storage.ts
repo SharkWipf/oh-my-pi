@@ -1,8 +1,8 @@
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
-import { hasFsCode, isEnoent, logger, peekFileEnds, Snowflake, toError } from "@oh-my-pi/pi-utils";
-import { overlayTitleSlotContent, type SessionTitleUpdate, serializeTitleSlot } from "./session-title-slot";
+import { hasFsCode, isEnoent, logger, parseJsonlLenient, peekFileEnds, readLines, Snowflake, toError } from "@oh-my-pi/pi-utils";
+import { overlayTitleSlotContent, parseTitleSlotLine, type SessionTitleUpdate, serializeTitleSlot } from "./session-title-slot";
 
 const utf8Decoder = new TextDecoder("utf-8");
 
@@ -10,6 +10,11 @@ export interface SessionStorageStat {
 	size: number;
 	mtimeMs: number;
 	mtime: Date;
+	/** Physical filesystem identity, only when the backend actually provides it. */
+	dev?: number;
+	ino?: number;
+	ctimeMs?: number;
+	mode?: number;
 }
 
 export interface SessionStorageWriter {
@@ -44,7 +49,7 @@ export interface SessionStorageWriter {
 }
 
 /**
- * Optional guard applied by {@link SessionStorage.writeTextAtomic}. The
+ * Optional guard applied by atomic writes and appends. The
  * backend MUST call `commitGuard()` synchronously immediately before it makes
  * the staged content visible at `path`. If it returns `false`, the staged
  * write is discarded and the target is left untouched. Backends MUST NOT
@@ -76,6 +81,8 @@ export interface SessionStorage {
 	readTextSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]>;
 	writeText(path: string, content: string): Promise<void>;
 	writeTextAtomic(path: string, content: string, options?: WriteTextAtomicOptions): Promise<void>;
+	/** Append a complete suffix atomically to an existing prefix, using the same commit guard as writeTextAtomic. */
+	appendTextAtomic(path: string, suffix: string, options?: WriteTextAtomicOptions): Promise<void>;
 	rename(path: string, nextPath: string): Promise<void>;
 	unlink(path: string): Promise<void>;
 	deleteSessionWithArtifacts(sessionPath: string): Promise<void>;
@@ -100,14 +107,88 @@ const writerRegistry = new FinalizationRegistry<number>(fd => {
 	}
 });
 
+interface JsonlLocation {
+	start: number;
+	end: number;
+	next?: JsonlLocation;
+}
+interface JournalLocatorIndex {
+	stat: SessionStorageStat;
+	locations: Map<string, JsonlLocation>;
+	prefixEnd: number;
+	terminated?: boolean;
+	ready?: Promise<void>;
+}
+
+function sameJournalVersion(left: SessionStorageStat, right: SessionStorageStat): boolean {
+	return left.dev === right.dev && left.ino === right.ino && left.size === right.size &&
+		left.mtimeMs === right.mtimeMs && left.ctimeMs === right.ctimeMs;
+}
+
+/** Index only top-level identity tokens; source bodies are parsed only on actual reads. */
+function jsonlRecordId(bytes: Uint8Array): string | undefined {
+	const line = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	let depth = 0;
+	let id: string | undefined;
+	for (let position = 0; position < line.length; position++) {
+		const byte = line[position];
+		if (byte === 0x7b || byte === 0x5b) { depth++; continue; }
+		if (byte === 0x7d || byte === 0x5d) { depth--; continue; }
+		if (byte !== 0x22) continue;
+		let end = line.indexOf(0x22, position + 1);
+		while (end !== -1) {
+			let slash = end - 1;
+			while (slash > position && line[slash] === 0x5c) slash--;
+			if ((end - slash) % 2 === 1) break;
+			end = line.indexOf(0x22, end + 1);
+		}
+		if (end === -1) return undefined;
+		let next = end + 1;
+		while (line[next] === 0x20 || line[next] === 0x09 || line[next] === 0x0d) next++;
+		if (depth === 1 && line[next] === 0x3a) {
+			let key: string | undefined;
+			if (end === position + 3 && line[position + 1] === 0x69 && line[position + 2] === 0x64) key = "id";
+			else {
+				let escaped = false;
+				for (let cursor = position + 1; cursor < end; cursor++) if (line[cursor] === 0x5c) { escaped = true; break; }
+				if (escaped) {
+					try { key = JSON.parse(line.toString("utf8", position, end + 1)); } catch { return undefined; }
+				}
+			}
+			if (key === "id") {
+				next++;
+				while (line[next] === 0x20 || line[next] === 0x09 || line[next] === 0x0d) next++;
+				id = undefined;
+				if (line[next] === 0x22) {
+					let finish = line.indexOf(0x22, next + 1);
+					while (finish !== -1) {
+						let slash = finish - 1;
+						while (slash > next && line[slash] === 0x5c) slash--;
+						if ((finish - slash) % 2 === 1) break;
+						finish = line.indexOf(0x22, finish + 1);
+					}
+					if (finish === -1) return undefined;
+					try { id = JSON.parse(line.toString("utf8", next, finish + 1)); } catch { return undefined; }
+					end = finish;
+				}
+			}
+		}
+		position = end;
+	}
+	return id;
+}
+
 class FileSessionStorageWriter implements SessionStorageWriter {
 	#fd: number;
 	#closed = false;
 	#error: Error | undefined;
 	#onError: ((err: Error) => void) | undefined;
 
-	constructor(fpath: string, options?: { flags?: "a" | "w"; onError?: (err: Error) => void }) {
+	#onAppend: ((before: fs.Stats, bytes: Buffer) => void) | undefined;
+	constructor(fpath: string, options?: { flags?: "a" | "w"; onError?: (err: Error) => void },
+		onAppend?: (before: fs.Stats, bytes: Buffer) => void) {
 		this.#onError = options?.onError;
+		this.#onAppend = onAppend;
 		const flags = options?.flags ?? "a";
 		// Ensure parent directory exists
 		const dir = path.dirname(fpath);
@@ -128,7 +209,8 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 	}
 
 	#writeNow(line: string): void {
-		const originalSize = fs.fstatSync(this.#fd).size;
+		const before = fs.fstatSync(this.#fd);
+		const originalSize = before.size;
 		const buf = Buffer.from(line, "utf-8");
 		let offset = 0;
 		try {
@@ -150,6 +232,7 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 			}
 			throw writeError;
 		}
+		this.#onAppend?.(before, buf);
 	}
 
 	appendSync(line: string): void {
@@ -201,6 +284,96 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 }
 
 export class FileSessionStorage implements SessionStorage {
+	#journalIndexes?: Map<string, JournalLocatorIndex>;
+
+	#indexJournalLine(index: JournalLocatorIndex, line: Uint8Array, start: number, end: number): void {
+		if (!index.prefixEnd || end < index.prefixEnd) {
+			const text = utf8Decoder.decode(line);
+			if ((start !== 0 || !parseTitleSlotLine(text)) && parseJsonlLenient(text).length) index.prefixEnd = end;
+		}
+		const id = jsonlRecordId(line);
+		if (id !== undefined) index.locations.set(id, { start, end, next: index.locations.get(id) });
+	}
+
+	async #journalIndex(filePath: string): Promise<JournalLocatorIndex> {
+		const stat = this.statSync(filePath);
+		let index = this.#journalIndexes?.get(filePath);
+		if (index && sameJournalVersion(index.stat, stat)) {
+			await index.ready;
+			return index;
+		}
+		index = { stat, locations: new Map(), prefixEnd: 0 };
+		(this.#journalIndexes ??= new Map()).set(filePath, index);
+		const building = index;
+		building.ready = (async () => {
+			let start = 0, records = 0;
+			for await (const line of readLines(Bun.file(filePath).slice(0, stat.size).stream())) {
+				this.#indexJournalLine(building, line, start, Math.min(start + line.length + 1, stat.size));
+				start += line.length + 1;
+				if ((++records & 8191) === 0) await Bun.sleep(0);
+			}
+			const terminated = start === stat.size;
+			// Appending to an unterminated old record changes its physical bounds.
+			if ((!terminated && building.stat.size !== stat.size) || !sameJournalVersion(building.stat, this.statSync(filePath))) {
+				if (this.#journalIndexes?.get(filePath) === building) this.#journalIndexes.delete(filePath);
+			} else if (building.stat.size === stat.size) building.terminated = terminated;
+		})();
+		try { await building.ready; }
+		catch (error) {
+			if (this.#journalIndexes?.get(filePath) === building) this.#journalIndexes.delete(filePath);
+			throw error;
+		} finally { building.ready = undefined; }
+		return building;
+	}
+
+	#recordJournalAppend(filePath: string, before: fs.Stats, bytes: Buffer): void {
+		const index = this.#journalIndexes?.get(filePath);
+		if (!index) return;
+		try {
+			const after = this.statSync(filePath);
+			if (!sameJournalVersion(index.stat, before) || index.terminated === false ||
+				after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size + bytes.length) {
+				this.#journalIndexes!.delete(filePath);
+				return;
+			}
+			let start = 0;
+			while (start < bytes.length) {
+				const newline = bytes.indexOf(0x0a, start);
+				const end = newline === -1 ? bytes.length : newline + 1;
+				this.#indexJournalLine(index, bytes.subarray(start, newline === -1 ? end : newline), before.size + start, before.size + end);
+				start = end;
+			}
+			index.stat = after;
+			index.terminated = bytes.length === 0 ? index.terminated : bytes[bytes.length - 1] === 0x0a;
+		} catch {
+			// Locator maintenance cannot turn a completed physical append into a failed append.
+			this.#journalIndexes!.delete(filePath);
+		}
+	}
+
+	/** Journal-owned coordinates only. Every selected whole record and its header are read afresh. */
+	async readJsonlLinesById(filePath: string, entryIds: ReadonlySet<string>): Promise<{ prefix: string; lines: string[] }> {
+		const index = await this.#journalIndex(filePath);
+		const locations: JsonlLocation[] = [];
+		for (const id of entryIds) {
+			for (let location = index.locations.get(id); location; location = location.next) locations.push(location);
+		}
+		locations.sort((left, right) => left.start - right.start);
+		const file = Bun.file(filePath);
+		const prefix = await file.slice(0, index.prefixEnd).text();
+		const lines: string[] = [];
+		for (const location of locations) {
+			let line = await file.slice(Math.max(0, location.start - 1), location.end).text();
+			if (location.start > 0) {
+				if (!line.startsWith("\n")) continue;
+				line = line.slice(1);
+			}
+			if (!line.endsWith("\n") && location.end !== this.statSync(filePath).size) continue;
+			lines.push(line);
+		}
+		return { prefix, lines };
+	}
+
 	ensureDirSync(dir: string): void {
 		if (!fs.existsSync(dir)) {
 			fs.mkdirSync(dir, { recursive: true });
@@ -239,6 +412,8 @@ export class FileSessionStorage implements SessionStorage {
 
 	async updateSessionTitle(fpath: string, update: SessionTitleUpdate): Promise<void> {
 		const fd = fs.openSync(fpath, "r+");
+		const index = this.#journalIndexes?.get(fpath);
+		const before = index ? fs.fstatSync(fd) : undefined;
 		try {
 			const buf = Buffer.from(serializeTitleSlot(update), "utf-8");
 			let offset = 0;
@@ -249,6 +424,11 @@ export class FileSessionStorage implements SessionStorage {
 				}
 				offset += written;
 			}
+			if (index && before) {
+				const after = this.statSync(fpath);
+				if (sameJournalVersion(index.stat, before) && after.dev === before.dev && after.ino === before.ino && after.size === before.size) index.stat = after;
+				else this.#journalIndexes?.delete(fpath);
+			}
 		} catch (err) {
 			throw toError(err);
 		} finally {
@@ -258,7 +438,15 @@ export class FileSessionStorage implements SessionStorage {
 
 	statSync(path: string): SessionStorageStat {
 		const stats = fs.statSync(path);
-		return { size: stats.size, mtimeMs: stats.mtimeMs, mtime: stats.mtime };
+		return {
+			size: stats.size,
+			mtimeMs: stats.mtimeMs,
+			mtime: stats.mtime,
+			dev: stats.dev,
+			ino: stats.ino,
+			ctimeMs: stats.ctimeMs,
+			mode: stats.mode,
+		};
 	}
 
 	listFilesSync(dir: string, pattern: string): string[] {
@@ -304,6 +492,24 @@ export class FileSessionStorage implements SessionStorage {
 			this.#discardTemp(tempPath, fpath);
 			throw toError(err);
 		}
+		this.#publishAtomic(tempPath, fpath, options);
+	}
+
+	async appendTextAtomic(fpath: string, suffix: string, options?: WriteTextAtomicOptions): Promise<void> {
+		const dir = path.resolve(fpath, "..");
+		const tempPath = path.join(dir, `.${path.basename(fpath)}.${Snowflake.next()}.tmp`);
+		try {
+			// Clone when supported; copyFile falls back to a native copy without decoding the prefix.
+			await fsp.copyFile(fpath, tempPath, fs.constants.COPYFILE_FICLONE);
+			await fsp.appendFile(tempPath, suffix);
+		} catch (err) {
+			this.#discardTemp(tempPath, fpath);
+			throw toError(err);
+		}
+		this.#publishAtomic(tempPath, fpath, options);
+	}
+
+	#publishAtomic(tempPath: string, fpath: string, options?: WriteTextAtomicOptions): void {
 		// Guard-check + rename MUST NOT be separated by an await. A concurrent
 		// synchronous rewrite (flushSync -> #rewriteSynchronously) can otherwise
 		// publish a fresh body between the check and the rename, and this stale
@@ -330,7 +536,7 @@ export class FileSessionStorage implements SessionStorage {
 	}
 
 	/**
-	 * Sync rename hook. Split from `rename` so `writeTextAtomic` can perform its
+	 * Sync rename hook. Split from `rename` so atomic writes and appends can perform their
 	 * guard-then-publish step without a yield, and so tests can inject
 	 * Windows-style EPERM at the sync layer used by the atomic path.
 	 */
@@ -374,37 +580,35 @@ export class FileSessionStorage implements SessionStorage {
 			throw toError(renameError);
 		}
 		if (commitGuard && !commitGuard()) {
-			// A concurrent synchronous rewrite published a fresh body between the
-			// move-aside and this point. Restore the moved-aside file so we do
-			// not overwrite it with our staged (stale) body, and drop the temp
-			// so `writeTextAtomic`'s "discard on abandon" contract holds.
+			// Restore only if no fresh target took over while the guard rejected us.
 			try {
-				this.renameSync(backupPath, targetPath);
+				if (!this.existsSync(targetPath)) this.renameSync(backupPath, targetPath);
 			} catch (restoreErr) {
-				logger.warn("Failed to restore backup after commitGuard rejection", {
-					sessionFile: targetPath,
-					backupPath,
-					error: toError(restoreErr).message,
-				});
-			}
-			this.#discardTemp(tempPath, targetPath);
-			return;
-		}
-		try {
-			this.renameSync(tempPath, targetPath);
-		} catch (replaceError) {
-			try {
-				this.renameSync(backupPath, targetPath);
-			} catch (rollbackErr) {
-				const rollbackError = toError(rollbackErr);
 				throw new Error(
-					`Failed to replace session file after EPERM (original: ${toError(renameError).message}; retry: ${
-						toError(replaceError).message
-					}; rollback: ${rollbackError.message})`,
+					`Failed to restore session file after EPERM commitGuard rejection (original: ${
+						toError(renameError).message
+					}; rollback: ${toError(restoreErr).message})`,
 					{ cause: toError(renameError) },
 				);
 			}
-			throw toError(replaceError);
+			this.#discardTemp(tempPath, targetPath);
+		} else {
+			try {
+				this.renameSync(tempPath, targetPath);
+			} catch (replaceError) {
+				try {
+					this.renameSync(backupPath, targetPath);
+				} catch (rollbackErr) {
+					const rollbackError = toError(rollbackErr);
+					throw new Error(
+						`Failed to replace session file after EPERM (original: ${toError(renameError).message}; retry: ${
+							toError(replaceError).message
+						}; rollback: ${rollbackError.message})`,
+						{ cause: toError(renameError) },
+					);
+				}
+				throw toError(replaceError);
+			}
 		}
 		try {
 			fs.unlinkSync(backupPath);
@@ -428,6 +632,7 @@ export class FileSessionStorage implements SessionStorage {
 	}
 
 	unlink(path: string): Promise<void> {
+		this.#journalIndexes?.delete(path);
 		return fs.promises.unlink(path);
 	}
 
@@ -438,7 +643,7 @@ export class FileSessionStorage implements SessionStorage {
 	}
 
 	openWriter(path: string, options?: { flags?: "a" | "w"; onError?: (err: Error) => void }): SessionStorageWriter {
-		return new FileSessionStorageWriter(path, options);
+		return new FileSessionStorageWriter(path, options, (before, bytes) => this.#recordJournalAppend(path, before, bytes));
 	}
 
 	/**
@@ -758,6 +963,13 @@ export class MemorySessionStorage implements SessionStorage {
 		if (options?.commitGuard && !options.commitGuard()) return Promise.resolve();
 		this.writeTextSync(path, content);
 		return Promise.resolve();
+	}
+
+	async appendTextAtomic(path: string, suffix: string, options?: WriteTextAtomicOptions): Promise<void> {
+		const entry = this.#requireEntry(path);
+		if (options?.commitGuard && !options.commitGuard()) return;
+		appendMemoryChunk(entry, suffix);
+		entry.mtimeMs = Date.now();
 	}
 
 	rename(path: string, nextPath: string): Promise<void> {

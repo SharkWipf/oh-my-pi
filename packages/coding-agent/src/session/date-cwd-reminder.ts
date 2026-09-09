@@ -11,6 +11,7 @@
  * for the lifetime of a session/day and refresh automatically at midnight.
  */
 import type { Context, Message, UserMessage } from "@oh-my-pi/pi-ai";
+import { combineContentSourceOrigins, getSourceOrigin, setSourceOrigin, transferTransformedSourceOrigin } from "@oh-my-pi/pi-ai/utils/source-origin";
 import { prompt } from "@oh-my-pi/pi-utils";
 import dateCwdReminderTemplate from "../prompts/system/date-cwd-reminder.md" with { type: "text" };
 
@@ -25,11 +26,22 @@ function messageStartsWithReminder(message: UserMessage, reminder: string): bool
 }
 
 function injectReminder(message: UserMessage, reminder: string): UserMessage {
-	const content: UserMessage["content"] =
-		typeof message.content === "string"
-			? `${reminder}\n\n${message.content}`
-			: [{ type: "text", text: reminder }, ...message.content];
-	return { ...message, content };
+	if (typeof message.content !== "string") {
+		const control = setSourceOrigin({ type: "text" as const, text: reminder }, { kind: "synthetic", reason: "provider-control" });
+		const content = [control, ...message.content];
+		return setSourceOrigin({ ...message, content }, combineContentSourceOrigins(content));
+	}
+	const prefix = `${reminder}\n\n`;
+	const injected = { ...message, content: `${prefix}${message.content}` };
+	const origin = getSourceOrigin(message);
+	if (origin?.kind !== "source") return transferTransformedSourceOrigin(message, injected);
+	return setSourceOrigin(injected, {
+		kind: "source",
+		parts: origin.parts.map(part => ({
+			...part,
+			...(part.transportSpan ? { transportSpan: { start: part.transportSpan.start + prefix.length, end: part.transportSpan.end + prefix.length } } : {}),
+		})),
+	});
 }
 
 /**
@@ -81,12 +93,12 @@ export class DateCwdReminderInjector {
 				const anchor = messages.at(-1)!;
 				this.#controls.push({
 					anchor,
-					message: {
+					message: setSourceOrigin({
 						role: "developer",
 						content: reminder,
 						synthetic: true,
 						timestamp: Date.now(),
-					},
+					}, { kind: "synthetic", reason: "provider-control" }),
 				});
 			}
 			this.#currentReminder = reminder;

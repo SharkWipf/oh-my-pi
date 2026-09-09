@@ -2,6 +2,7 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { requireSupportedEffort } from "@oh-my-pi/pi-catalog/model-thinking";
 import { $env } from "@oh-my-pi/pi-utils";
 import type { Model } from "../../types";
+import { setSourceOrigin, transferSourceOrigin, transferTransformedSourceOrigin } from "../../utils/source-origin";
 import { mapOpenAIReasoningEffort } from "../openai-shared";
 
 /** Reasoning replay scope for the Codex Responses API (`reasoning.context`). */
@@ -176,7 +177,7 @@ function filterInput(input: InputItem[] | undefined): InputItem[] | undefined {
 			if (item.type === "computer_call") return item;
 			if (item.id != null) {
 				const { id: _id, ...rest } = item;
-				return rest as InputItem;
+				return transferSourceOrigin(item, rest as InputItem);
 			}
 			return item;
 		});
@@ -197,14 +198,15 @@ function orphanFunctionOutputToMessage(item: InputItem, callId: string): InputIt
 	} catch {
 		text = String(itemRecord.output ?? "");
 	}
-	if (text.length > CODEX_ORPHAN_OUTPUT_LIMIT) {
+	const truncated = text.length > CODEX_ORPHAN_OUTPUT_LIMIT;
+	if (truncated) {
 		text = `${text.slice(0, CODEX_ORPHAN_OUTPUT_LIMIT)}\n...[truncated]`;
 	}
-	return {
+	return transferTransformedSourceOrigin(item, {
 		type: "message",
 		role: "assistant",
 		content: `[Previous ${toolName} result; call_id=${callId}]: ${text}`,
-	} as InputItem;
+	} as InputItem, truncated ? "partial" : "full");
 }
 
 type ToolCallKind = "function" | "custom" | "computer";
@@ -261,18 +263,18 @@ function repairToolCallPairs(input: InputItem[]): InputItem[] {
 		}
 		if (callKind && callId !== undefined && outputKinds.get(callId) !== callKind) {
 			if (callKind === "computer") {
-				repaired.push({
+				repaired.push(setSourceOrigin({
 					type: "message",
 					role: "assistant",
 					content: `[Computer call interrupted before a screenshot was recorded; call_id=${callId}]`,
-				});
+				}, { kind: "synthetic", reason: "interrupted-tool-output" }));
 				continue;
 			}
-			repaired.push(item, {
+			repaired.push(item, setSourceOrigin({
 				type: callKind === "custom" ? "custom_tool_call_output" : "function_call_output",
 				call_id: callId,
 				output: CODEX_INTERRUPTED_TOOL_OUTPUT,
-			});
+			}, { kind: "synthetic", reason: "interrupted-tool-output" }));
 			continue;
 		}
 		repaired.push(item);
@@ -354,13 +356,13 @@ export function applyCodexResponsesLiteShape(body: CodexLiteShapedBody): void {
 			body.tool_choice = "required";
 		}
 	}
-	const prefix: InputItem[] = [{ type: "additional_tools", role: "developer", tools: additionalTools }];
+	const prefix: InputItem[] = [setSourceOrigin({ type: "additional_tools", role: "developer", tools: additionalTools }, { kind: "synthetic", reason: "provider-control" })];
 	if (typeof body.instructions === "string" && body.instructions.length > 0) {
-		prefix.push({
+		prefix.push(setSourceOrigin({
 			type: "message",
 			role: "developer",
 			content: [{ type: "input_text", text: body.instructions }],
-		});
+		}, { kind: "synthetic", reason: "prefix" }));
 	}
 	body.input = [...prefix, ...input];
 	if (body.tool_choice !== "none" && body.tool_choice !== "required") {
@@ -387,11 +389,11 @@ export async function transformRequestBody(
 	}
 
 	if (prompt?.developerMessages && prompt.developerMessages.length > 0) {
-		const developerMessages: InputItem[] = prompt.developerMessages.map(text => ({
+		const developerMessages: InputItem[] = prompt.developerMessages.map(text => setSourceOrigin({
 			type: "message",
 			role: "developer",
 			content: [{ type: "input_text", text }],
-		}));
+		}, { kind: "synthetic", reason: "prefix" }));
 		const input = Array.isArray(body.input) ? body.input : [];
 		body.input = [...developerMessages, ...input];
 	}
@@ -434,11 +436,11 @@ export async function transformRequestBody(
 		if (!hasVisibleInput) {
 			body.input = [
 				...input,
-				{
+				setSourceOrigin({
 					type: "message",
 					role: "user",
 					content: [{ type: "input_text", text: finalInstruction }],
-				},
+				}, { kind: "synthetic", reason: "prefix" }),
 			];
 		}
 	}

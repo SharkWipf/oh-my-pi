@@ -51,10 +51,10 @@ Metrics depend on the progress or persisted usage data available for that agent.
 | `Tab`                       | Toggle the inspector on narrow terminals.                                    |
 | `PageUp` / `PageDown`       | Scroll an open inspector.                                                    |
 | `r`                         | Revive the selected parked agent.                                            |
-| `x`                         | Abort a running turn if necessary, then kill and release the selected agent. |
+| `x`                         | Kill the selected agent, cancelling its assignment and active requests.       |
 | `Esc`                       | Close the inspector first on narrow terminals, then close the Hub.           |
 
-Only `parked` agents can be revived. `x` is immediate; use it only when you intend to discard that agent instance.
+Only `parked` agents can be revived. `x` is terminal, not a pause: it cancels the assignment, active provider calls, and pending IRC auto-replies before asynchronous cleanup finishes. The aborted row and transcript remain readable, but late callbacks cannot restart the disposed session or deliver replies. Normal turn interruption and idle parking remain resumable.
 
 ## Read and steer a subagent
 

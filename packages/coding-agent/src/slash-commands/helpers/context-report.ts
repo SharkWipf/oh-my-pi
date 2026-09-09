@@ -1,4 +1,9 @@
-import { computeContextBreakdown } from "../../modes/utils/context-usage";
+import {
+	computeContextBreakdown,
+	renderCompactionDiagnosticsDetails,
+	renderCompactionDiagnosticsSummary,
+} from "../../modes/utils/context-usage";
+import { requirementsContextText } from "../../requirements/commands";
 import type { SlashCommandRuntime } from "../types";
 import { renderAsciiBar } from "./format";
 
@@ -7,7 +12,21 @@ import { renderAsciiBar } from "./format";
  * (categories + auto-compact buffer + free slack) and falls back to the
  * minimal "window/used" lines when the breakdown helper throws.
  */
-export function buildContextReportText(runtime: SlashCommandRuntime): string {
+export function buildContextReportText(runtime: Pick<SlashCommandRuntime, "session">, action: "usage" | "details" = "usage"): string {
+	return `${buildUsageReportText(runtime, action)}\n\n${requirementsContextText(runtime.session)}`;
+}
+
+function buildUsageReportText(runtime: Pick<SlashCommandRuntime, "session">, action: "usage" | "details"): string {
+	if (action === "details") {
+		const current = runtime.session.getCompactionDiagnostics("current");
+		const recorded = runtime.session.getCompactionDiagnostics("recorded");
+		const prepared = runtime.session.getPreparedCompactionDiagnostics();
+		const sections: string[] = [];
+		if (current) sections.push(renderCompactionDiagnosticsDetails(current));
+		if (recorded) sections.push(renderCompactionDiagnosticsDetails(recorded));
+		if (prepared) sections.push(renderCompactionDiagnosticsDetails(prepared));
+		return sections.length ? sections.join("\n\n---\n\n") : "Context diagnostics are unavailable. Legacy compactions without recorded facts cannot provide historical settings or source attribution.";
+	}
 	try {
 		const breakdown = computeContextBreakdown(runtime.session, { snapcompactSavings: true });
 		if (breakdown.contextWindow <= 0) {
@@ -57,6 +76,9 @@ export function buildContextReportText(runtime: SlashCommandRuntime): string {
 				}
 			}
 		}
+		if (breakdown.recordedCompaction)
+			lines.push("", "Last compaction (recorded)", renderCompactionDiagnosticsSummary(breakdown.recordedCompaction));
+		lines.push("", "Use /context details for the ordered inventory, settings and measurement basis.");
 		return lines.join("\n");
 	} catch {
 		const fallback = runtime.session.getContextUsage();

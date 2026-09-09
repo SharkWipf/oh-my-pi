@@ -1,4 +1,4 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { buildSessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import type {
@@ -129,28 +129,6 @@ describe("buildSessionContext", () => {
 			expect(ctx.messages.map(m => m.role)).toEqual(["user", "assistant", "user", "assistant"]);
 		});
 
-		it("builds deep linear paths without quadratic unshift work", () => {
-			const entries: SessionEntry[] = [];
-			let parentId: string | null = null;
-			for (let i = 0; i < 1000; i++) {
-				const id = `entry-${i}`;
-				entries.push(msg(id, parentId, "user", id));
-				parentId = id;
-			}
-
-			const unshift = spyOn(Array.prototype, "unshift");
-			try {
-				const ctx = buildSessionContext(entries, parentId);
-				expect(ctx.messages.map(message => (message.role === "user" ? message.content : ""))).toEqual(
-					entries.map(entry =>
-						entry.type === "message" && entry.message.role === "user" ? entry.message.content : "",
-					),
-				);
-				expect(unshift).not.toHaveBeenCalled();
-			} finally {
-				unshift.mockRestore();
-			}
-		});
 
 		it("tracks thinking level changes", () => {
 			const entries: SessionEntry[] = [

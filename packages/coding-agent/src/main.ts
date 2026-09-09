@@ -97,6 +97,7 @@ import {
 	persistForeignSession,
 } from "./session/foreign-session-import";
 import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } from "./session/foreign-session-store";
+import { restoreCompactionOverridePrompt } from "./session/preserved-message-settings";
 import { resolveResumableSession, type SessionInfo } from "./session/session-listing";
 import { SessionManager } from "./session/session-manager";
 import { executeBuiltinSlashCommand } from "./slash-commands/builtin-registry";
@@ -359,7 +360,13 @@ export async function submitInteractiveInput(
 		} else {
 			let forwarded = false;
 			try {
-				forwarded = await session.prompt(input.text, { images: input.images, streamingBehavior });
+				forwarded = await session.prompt(input.text, {
+					images: input.images,
+					imageLinks: input.imageLinks,
+					compactionOverride: input.compactionOverride,
+					originalSubmission: input.originalSubmission,
+					streamingBehavior,
+				});
 			} catch (error: unknown) {
 				mode.showError(error instanceof Error ? error.message : "Unknown error occurred");
 			}
@@ -368,7 +375,9 @@ export async function submitInteractiveInput(
 			// loop rather than resubmitting a failed or local-only body after
 			// every yield. A failed body degrades to idle like any other
 			// submission failure instead of error-looping.
-			if (!forwarded && mode.loopPrompt === input.text) mode.pauseLoop?.();
+			if (!forwarded && mode.loopPrompt === restoreCompactionOverridePrompt(input.text, input.compactionOverride)) {
+				mode.pauseLoop?.();
+			}
 		}
 	} catch (error: unknown) {
 		const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
@@ -1098,6 +1107,7 @@ export async function buildSessionOptions(
 	activeSettings: Settings,
 ): Promise<CreateAgentSessionOptions> {
 	const options: CreateAgentSessionOptions = {
+		startWithoutMemory: parsed.startWithoutMemory,
 		cwd: parsed.cwd ?? getProjectDir(),
 		autoApprove: parsed.autoApprove ?? false,
 	};
@@ -2040,7 +2050,19 @@ export async function runRootCommand(
 				notifs.push({ kind: "error", message: modelRegistryError.message });
 			}
 
-			if (!isInteractive && !session.model) {
+			let requirementsCommandsOnly = false;
+			if (!session.model && !isInteractive && mode !== "rpc" && mode !== "rpc-ui") {
+				const { parseSlashCommand } = await import("./slash-commands/helpers/parse");
+				const inputs =
+					initialMessage === undefined ? initialArgs.messages : [initialMessage, ...initialArgs.messages];
+				requirementsCommandsOnly =
+					inputs.length > 0 &&
+					inputs.every(text => {
+						const command = parseSlashCommand(text);
+						return command?.name === "memory" && /^requirements(?:\s|$)/i.test(command.args.trim());
+					});
+			}
+			if (!isInteractive && !session.model && !requirementsCommandsOnly && mode !== "rpc" && mode !== "rpc-ui") {
 				if (modelRegistryError) {
 					process.stderr.write(`${chalk.red(modelRegistryError.message)}\n\n`);
 				}

@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Added a protected indexed child-removal seam and overridable child-array accessors so transcript containers can track public mutations without rescanning committed history.
 ## [18.1.15] - 2026-09-08
 
 ### Fixed
@@ -12,6 +15,7 @@
 
 ### Fixed
 
+- Keep setting values and warning markers visible beside long labels in narrow terminals, and honor one-row settings viewports when resizing.
 - `extractMarkdownLinks()` now returns one-row visible labels for formatted and multiline links ([#11086](https://github.com/can1357/oh-my-pi/pull/11086) by [@mustafaabidali](https://github.com/mustafaabidali)).
 
 ## [18.1.13] - 2026-09-07

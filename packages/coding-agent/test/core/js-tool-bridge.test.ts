@@ -3,7 +3,9 @@ import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { callSessionTool } from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { type TodoPhase, TodoTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { getLatestTodoPhasesFromEntries } from "@oh-my-pi/pi-coding-agent/tools/todo";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 
 function createTool(name: string, execute: AgentTool["execute"]): AgentTool {
@@ -48,6 +50,41 @@ function createSession(tools: AgentTool[]): ToolSession {
 }
 
 describe("callSessionTool", () => {
+	it("restores bridged todo mutations from the selected branch, including an empty reset", async () => {
+		const manager = SessionManager.inMemory("/tmp/test");
+		let phases: TodoPhase[] = [];
+		const session: ToolSession = {
+			...createSession([]),
+			sessionManager: manager,
+			getTodoPhases: () => phases,
+			setTodoPhases: next => {
+				phases = next;
+			},
+			getToolByName: name => (name === "todo" ? (todo as unknown as AgentTool) : undefined),
+		};
+		const todo = new TodoTool(session);
+		const old = await todo.execute("direct", { op: "init", items: ["old direct task"] });
+		const oldLeaf = manager.appendMessage({
+			role: "toolResult",
+			toolCallId: "direct",
+			toolName: "todo",
+			...old,
+			isError: false,
+			timestamp: 0,
+		});
+		await callSessionTool("todo", { op: "init", items: ["new nested task"] }, { session });
+		const newLeaf = manager.getLeafId()!;
+		expect(getLatestTodoPhasesFromEntries(manager.getBranch())).toEqual(phases);
+		expect(phases[0]?.tasks[0]?.content).toBe("new nested task");
+		manager.branch(oldLeaf);
+		expect(getLatestTodoPhasesFromEntries(manager.getBranch())[0]?.tasks[0]?.content).toBe("old direct task");
+		manager.branch(newLeaf);
+		await callSessionTool("todo", { op: "rm" }, { session });
+		expect(getLatestTodoPhasesFromEntries(manager.getBranch()).flatMap(phase => phase.tasks)).toEqual([]);
+		manager.branch(newLeaf);
+		expect(getLatestTodoPhasesFromEntries(manager.getBranch())[0]?.tasks[0]?.content).toBe("new nested task");
+	});
+
 	it("injects js intent and summarizes text results", async () => {
 		const execute = vi.fn().mockResolvedValue({
 			content: [{ type: "text", text: "hello" }],

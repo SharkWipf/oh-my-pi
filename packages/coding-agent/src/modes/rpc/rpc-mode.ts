@@ -11,6 +11,7 @@
  * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
  */
 import { once } from "node:events";
+import type { OriginalSubmission } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { $env, isRecord, Snowflake } from "@oh-my-pi/pi-utils";
@@ -33,6 +34,7 @@ import { loadSlashCommands } from "../../extensibility/slash-commands";
 import { type Theme, theme } from "../../modes/theme/theme";
 import type { AgentSession } from "../../session/agent-session";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
+import { parseCompactionOverridePrompt } from "../../session/preserved-message-settings";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands } from "../../slash-commands/available-commands";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
@@ -117,7 +119,10 @@ export type RpcSessionChangeResult =
 
 export type RpcSessionChangeSession = Pick<AgentSession, "newSession" | "switchSession" | "branch">;
 
-export type RpcSkillCommandSession = Pick<AgentSession, "promptCustomMessage" | "skills" | "skillsSettings">;
+export type RpcSkillCommandSession = Pick<
+	AgentSession,
+	"promptCustomMessage" | "skills" | "skillsSettings" | "sessionManager"
+>;
 export type RpcSkillCommandResult = { agentInvoked: true };
 
 export interface RpcSkillInvocation {
@@ -151,6 +156,7 @@ export async function runRpcSkillCommand(
 	invocation: RpcSkillInvocation,
 	streamingBehavior: "steer" | "followUp" = "steer",
 	prebuilt?: BuiltSkillPromptMessage,
+	originalSubmission?: OriginalSubmission,
 ): Promise<boolean> {
 	const built = prebuilt ?? (await buildSkillPromptMessage(invocation.skill, invocation.args, "user"));
 	return session.promptCustomMessage(
@@ -161,7 +167,7 @@ export async function runRpcSkillCommand(
 			details: built.details,
 			attribution: "user",
 		},
-		{ streamingBehavior },
+		{ streamingBehavior, producer: { type: "human" }, originalSubmission },
 	);
 }
 
@@ -177,6 +183,7 @@ export async function dispatchRpcSkillPrompt(input: {
 	id: string | undefined;
 	session: RpcSkillCommandSession;
 	message: string;
+	originalSubmission?: OriginalSubmission;
 	streamingBehavior: "steer" | "followUp" | undefined;
 	output: (obj: object) => void;
 	onError: (error: Error) => void;
@@ -189,10 +196,13 @@ export async function dispatchRpcSkillPrompt(input: {
 	// keep that error contract by awaiting it before answering. The expensive
 	// promptCustomMessage pipeline (usage preflight, compaction, provider
 	// calls) is what moves behind the acknowledgement.
+	const originalSubmission =
+		input.originalSubmission ?? { text: input.message };
 	const built = await buildSkillPromptMessage(invocation.skill, invocation.args, "user");
 	watchAndReportLocalOnlyPromptResult({
 		id: input.id,
-		startPrompt: () => runRpcSkillCommand(input.session, invocation, input.streamingBehavior ?? "steer", built),
+		startPrompt: () =>
+			runRpcSkillCommand(input.session, invocation, input.streamingBehavior ?? "steer", built, originalSubmission),
 		output: input.output,
 		onError: input.onError,
 		extensionUserMessageTracker: input.extensionUserMessageTracker,
@@ -207,7 +217,8 @@ export async function tryRunRpcSkillCommand(
 ): Promise<RpcSkillCommandResult | false> {
 	const invocation = resolveRpcSkillInvocation(session, text);
 	if (!invocation) return false;
-	await runRpcSkillCommand(session, invocation, streamingBehavior);
+	const originalSubmission = { text };
+	await runRpcSkillCommand(session, invocation, streamingBehavior, undefined, originalSubmission);
 	return { agentInvoked: true };
 }
 
@@ -1091,10 +1102,12 @@ export async function runRpcMode(
 			// =================================================================
 
 			case "prompt": {
-				const skillResult = await dispatchRpcSkillPrompt({
+				const originalSubmission = { text: command.message, images: command.images, imageLinks: command.imageLinks };
+				const skillResult = command.compactionOverride ? undefined : await dispatchRpcSkillPrompt({
 					id,
 					session,
 					message: command.message,
+					originalSubmission,
 					streamingBehavior: command.streamingBehavior,
 					output,
 					onError: promptError => output(error(id, "prompt", promptError.message)),
@@ -1103,27 +1116,33 @@ export async function runRpcMode(
 				if (skillResult) {
 					return success(id, "prompt", skillResult);
 				}
-				const builtinResult = await executeAcpBuiltinSlashCommand(command.message, {
-					session,
-					sessionManager: session.sessionManager,
-					settings: session.settings,
-					cwd: session.sessionManager.getCwd(),
-					output: text => output({ type: "command_output", text }),
-					refreshCommands: emitAvailableCommandsUpdate,
-					reloadPlugins: reloadPluginState,
-					runCommandInBackground: task => shutdownCoordinator.track(task()),
-					notifyTitleChanged: async () => {
-						output({ type: "session_info_update", title: session.sessionName, sessionId: session.sessionId });
-					},
-					notifyConfigChanged: async () => {
-						output({ type: "config_update", model: session.model, thinkingLevel: session.thinkingLevel });
-					},
-				});
+				const builtinResult = command.compactionOverride
+					? false
+					: await executeAcpBuiltinSlashCommand(command.message, {
+							session,
+							sessionManager: session.sessionManager,
+							settings: session.settings,
+							cwd: session.sessionManager.getCwd(),
+							output: text => output({ type: "command_output", text }),
+							refreshCommands: emitAvailableCommandsUpdate,
+							reloadPlugins: reloadPluginState,
+							runCommandInBackground: task => shutdownCoordinator.track(task()),
+							notifyTitleChanged: async () => {
+								output({
+									type: "session_info_update",
+									title: session.sessionName,
+									sessionId: session.sessionId,
+								});
+							},
+							notifyConfigChanged: async () => {
+								output({ type: "config_update", model: session.model, thinkingLevel: session.thinkingLevel });
+							},
+						});
 				if (builtinResult !== false) {
 					if ("prompt" in builtinResult) {
 						watchAndReportLocalOnlyPromptResult({
 							id,
-							startPrompt: () => session.prompt(builtinResult.prompt, { images: command.images }),
+							startPrompt: () => session.prompt(builtinResult.prompt, { images: command.images, imageLinks: command.imageLinks, compactionOverride: builtinResult.compactionOverride, originalSubmission, streamingBehavior: command.streamingBehavior }),
 							output,
 							onError: promptError => output(error(id, "prompt", promptError.message)),
 							extensionUserMessageTracker,
@@ -1145,6 +1164,9 @@ export async function runRpcMode(
 					startPrompt: () =>
 						session.prompt(command.message, {
 							images: command.images,
+							originalSubmission,
+							imageLinks: command.imageLinks,
+							compactionOverride: command.compactionOverride,
 							streamingBehavior: command.streamingBehavior,
 						}),
 					output,
@@ -1155,12 +1177,18 @@ export async function runRpcMode(
 			}
 
 			case "steer": {
-				await session.steer(command.message, command.images);
+				await session.steer(command.message, command.images, {
+					imageLinks: command.imageLinks,
+					compactionOverride: command.compactionOverride,
+				});
 				return success(id, "steer");
 			}
 
 			case "follow_up": {
-				await session.followUp(command.message, command.images);
+				await session.followUp(command.message, command.images, {
+					imageLinks: command.imageLinks,
+					compactionOverride: command.compactionOverride,
+				});
 				return success(id, "follow_up");
 			}
 
@@ -1172,7 +1200,11 @@ export async function runRpcMode(
 			case "abort_and_prompt": {
 				await session.abort({ reason: USER_INTERRUPT_LABEL });
 				session
-					.prompt(command.message, { images: command.images })
+					.prompt(command.message, {
+						images: command.images,
+						imageLinks: command.imageLinks,
+						compactionOverride: command.compactionOverride,
+					})
 					.catch(e => output(error(id, "abort_and_prompt", e.message)));
 				return success(id, "abort_and_prompt");
 			}

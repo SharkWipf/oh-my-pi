@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "bun:test";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext, SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
-
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 type Attachments = Pick<SubmittedUserInput, "images" | "imageLinks">;
 
 function createHarness(
@@ -57,9 +57,9 @@ function createHarness(
 				getCommand: () => undefined,
 			},
 		},
-		sessionManager: {
+		sessionManager: Object.assign(SessionManager.inMemory(), {
 			putBlob: vi.fn(async () => ({ displayPath: "file:///replacement.png" })),
-		},
+		}),
 		focusedAgentId: undefined,
 		collabGuest: undefined,
 		ui: { requestRender: vi.fn() },

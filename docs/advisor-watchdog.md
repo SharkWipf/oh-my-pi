@@ -43,6 +43,14 @@ Model selectors use normal role/model resolution, including provider-prefixed id
 
 `tier.advisor` controls service tier for all advisors. It defaults to `none` (standard processing); `inherit` follows the primary's live per-family tier, including `/fast` changes. Concrete values (`auto`, `default`, `flex`, `scale`, `priority`) are applied only when the advisor model's provider family supports them.
 
+### Maintenance before guidance
+
+Set `advisor.compactBeforeGuidance: true` (or enable **Compact Before Guidance** in `/settings` → Model → Advisor) to let active advisors review the primary context after its ordinary maintenance boundary. The default is `false`; disabled or inactive advisors retain the ordinary upstream ordering. The setting is sampled at each turn boundary.
+
+Continuing tool turns run ordinary mid-run maintenance before review. A successful final turn is reviewed once after agent-end maintenance, using the current transcript and current advisor roster. Queued follow-ups that the agent loop batches before a single agent-end notification are reviewed together at that final boundary. Abort, clear, branch/session changes, and disposal discard stale pending reviews. Re-enabling an advisor still seeds its cursor as described below rather than replaying old history.
+
+This does not force compaction: existing enablement, thresholds, speculative background work, and grace-period deferral remain authoritative. Below threshold or while speculation is running within grace, review can proceed without an immediate rewrite. Advisor-private history continues to use its own existing maintenance path.
+
 ### Headless runs
 
 Use `--advisor` to enable the advisor for one print-mode process without
@@ -83,7 +91,7 @@ When the primary transcript is rewritten, the advisor runtime is reset:
 - branch/fork style history replacement
 - context-maintenance re-prime when the advisor's own context cannot fit
 
-Reset clears the advisor's private in-memory transcript and rewinds its cursor. The next advisor update replays the current bounded primary transcript instead of continuing from stale pre-rewrite context.
+Reset clears the advisor's private in-memory transcript and rewinds its cursor. The next advisor update replays the current bounded primary transcript instead of continuing from stale pre-rewrite context. If a review is still running, its late prompt state is cleared after it settles: aborted guidance cannot leak into the next review, and an invalidated review does not count as completed. Provider failures and interruptions without a reset retain their normal recovery behavior.
 
 When the advisor is enabled mid-session, the cursor seeds to the current primary transcript length. That avoids replaying the whole old conversation on the first enabled turn.
 

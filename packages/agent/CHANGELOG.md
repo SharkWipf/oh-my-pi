@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserved selected original-submission payloads during compaction preparation instead of replacing them with expanded delivery text; pending protection now retains those original bytes too.
+- Kept ordinarily retained expanded delivery and selected original submissions as adjacent, separately addressed source projections. Repeated compaction resolves the committed original projection through the normal host reader, and delivery rewrites no longer invalidate original-coordinate coverage.
+- Joined pending delivered users into ordinary source selection without moving the normal retained-history cut or resurrecting an intervening history tail. Ordinary unselected preparations no longer manufacture a full source map.
+- Fixed native compaction conflating selected original submissions with their delivered expansions. Both projections retain their own text/image coverage and survive native history reload without changing ordinary allocation.
+- Fixed normalized custom messages counting as zero tokens. Custom text and original images now consume their ordinary local baseline regardless of attribution or display settings.
+- Fixed ordinary source token estimates omitting assistant images and known current native text, code, logs, search context, and computer metadata. Normalized native mirrors are charged once, including after controlled source rewrites and JSON reload.
+- Fixed metadata-only computer screenshots counting as zero before source allocation. Their single image baseline replaces content-image mirrors, matching computer-result serialization.
+- Fixed local token estimates omitting user and developer images; original images now receive the same one-time baseline as tool-result and hook images.
+- Fixed repeated compaction losing messages retained by the previous compaction, including turns received while native compaction was running.
+- Fixed normalized custom messages counting as zero tokens. Custom text and original images now consume their ordinary local baseline regardless of attribution or display settings.
+- Fixed local token estimates omitting user and developer images; original images now receive the same one-time baseline as tool-result and hook images.
+- Fixed repeated compaction losing messages retained by the previous compaction, including turns received while native compaction was running.
+- Added source-addressed compaction coverage with positional rewrite mapping; edited or deleted source intervals no longer claim current coverage in historical artifacts.
+- Fixed native V2 compaction dropping typeless user messages emitted by the bundled Codex serializer and bypassing the retained-token budget for string user content.
+- Native compaction now carries local source provenance through ordinary serializers and preserves selected historical users chronologically without changing the ordinary retained-history allocation. V2 captures complete selected tool-exchange quotes from original logical sources before any conversion, precharges them once before allocation, unions partial text/image coverage in one source slot, and reports its actual target, source charge, and minimum-clamped residual without repricing rendered history.
+- Native V1 sends selected non-user history as attributed input context with original images, leaves the canonical provider output unchanged, and records unknown item attribution rather than guessing source identities. Complete native atoms retain provider-native server-tool fields, metadata-only computer screenshots, and generated images without replaying whole-history snapshots or duplicating executable calls.
+
+### Added
+
+- Added disposable, request-correlated provider-context transforms before or after the configured transform. Side contexts exclude session-owner transforms unless explicitly opted in.
+- Pre-model-call gates now receive the resolved request model and original context identity alongside the actual post-inband provider context, so accounting and admission can correlate transformed requests without preparing them again.
+- Local compaction preserves selected source spans chronologically without refunding selected-user cut costs; complete admitted non-user atoms are charged once before the calibrated ordinary walk. Repeated sparse retention no longer resurrects intervening omitted originals.
+- Authored images interleaved with snap archive frames keep their one-time original-image estimate instead of being priced as rasterized transcript frames.
+
+### Added
+
+- Pre-model-call gates receive the resolved request model alongside the actual post-inband provider context, so accounting and admission use the dispatched representation without preparing it again.
+
 ## [18.1.10] - 2026-09-04
 
 ### Fixed
@@ -754,7 +784,7 @@
 
 ### Added
 
-- Added a non-interrupting "aside" message channel to the agent loop (`AgentLoopConfig.getAsideMessages` / `Agent.setAsideMessageProvider`). Asides are drained at each step boundary (after a tool batch, before the next model call) and at the yield check, so passive notifications (e.g. background-job completions, late LSP diagnostics) reach the model *between requests* without waiting for the agent to stop and without aborting in-flight tools the way steering does.
+- Added a non-interrupting "aside" message channel to the agent loop (`AgentLoopConfig.getAsideMessages` / `Agent.setAsideMessageProvider`). Asides are drained at each step boundary (after a tool batch, before the next model call) and at the yield check, so passive notifications (e.g. background-job completions, late LSP diagnostics) reach the model _between requests_ without waiting for the agent to stop and without aborting in-flight tools the way steering does.
 
 ### Changed
 
@@ -1350,14 +1380,14 @@ Initial release under @oh-my-pi scope. See previous releases at [badlogic/pi-mon
 ### Breaking Changes
 
 - **Queue API replaced with steer/followUp**: The `queueMessage()` method has been split into two methods with different delivery semantics ([#403](https://github.com/badlogic/pi-mono/issues/403)):
-  - `steer(msg)`: Interrupts the agent mid-run. Delivered after current tool execution, skips remaining tools.
-  - `followUp(msg)`: Waits until the agent finishes. Delivered only when there are no more tool calls or steering messages.
+   - `steer(msg)`: Interrupts the agent mid-run. Delivered after current tool execution, skips remaining tools.
+   - `followUp(msg)`: Waits until the agent finishes. Delivered only when there are no more tool calls or steering messages.
 - **Queue mode renamed**: `queueMode` option renamed to `steeringMode`. Added new `followUpMode` option. Both control whether messages are delivered one-at-a-time or all at once.
 - **AgentLoopConfig callbacks renamed**: `getQueuedMessages` split into `getSteeringMessages` and `getFollowUpMessages`.
 - **Agent methods renamed**:
-  - `queueMessage()` → `steer()` and `followUp()`
-  - `clearMessageQueue()` → `clearSteeringQueue()`, `clearFollowUpQueue()`, `clearAllQueues()`
-  - `setQueueMode()`/`getQueueMode()` → `setSteeringMode()`/`getSteeringMode()` and `setFollowUpMode()`/`getFollowUpMode()`
+   - `queueMessage()` → `steer()` and `followUp()`
+   - `clearMessageQueue()` → `clearSteeringQueue()`, `clearFollowUpQueue()`, `clearAllQueues()`
+   - `setQueueMode()`/`getQueueMode()` → `setSteeringMode()`/`getSteeringMode()` and `setFollowUpMode()`/`getFollowUpMode()`
 
 ### Fixed
 
@@ -1369,9 +1399,9 @@ Initial release under @oh-my-pi scope. See previous releases at [badlogic/pi-mon
 
 - **Transport abstraction removed**: `ProviderTransport`, `AppTransport`, and `AgentTransport` interface have been removed. Use the `streamFn` option directly for custom streaming implementations.
 - **Agent options renamed**:
-  - `transport` → removed (use `streamFn` instead)
-  - `messageTransformer` → `convertToLlm`
-  - `preprocessor` → `transformContext`
+   - `transport` → removed (use `streamFn` instead)
+   - `messageTransformer` → `convertToLlm`
+   - `preprocessor` → `transformContext`
 - **`AppMessage` renamed to `AgentMessage`**: All references to `AppMessage` have been renamed to `AgentMessage` for consistency.
 - **`CustomMessages` renamed to `CustomAgentMessages`**: The declaration merging interface has been renamed.
 - **`UserMessageWithAttachments` and `Attachment` types removed**: Attachment handling is now the responsibility of the `convertToLlm` function.

@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
+import type { AssistantMessage, ImageContent, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import { createOpenAIResponsesHistoryPayload } from "@oh-my-pi/pi-ai/utils";
+import { bindMessageSource, remapNativeItemOrigins } from "@oh-my-pi/pi-ai/utils/source-origin";
 import * as natives from "@oh-my-pi/pi-natives";
+import { createCustomMessage } from "../src/compaction/messages";
 import { Tokenizer, tokenizerEncodingForModel } from "../src/tokenizer";
+import type { AgentMessage } from "../src/types";
 
 afterEach(() => {
 	vi.restoreAllMocks();
@@ -28,6 +33,210 @@ describe("tokenizerEncodingForModel", () => {
 });
 
 describe("Tokenizer", () => {
+	test("charges normalized custom source text and images an ordinary baseline", () => {
+		const tokenizer = new Tokenizer();
+		const text = "A durable custom source.";
+		const scalar = createCustomMessage("notice", text, false, undefined, "2026-09-07", "agent");
+		const illustrated = createCustomMessage(
+			"manual",
+			[
+				{ type: "text", text },
+				{ type: "image", data: "cG5n", mimeType: "image/png", detail: "high" },
+			],
+			true,
+			undefined,
+			"2026-09-07",
+			"user",
+		);
+		expect(tokenizer.countMessage(scalar)).toBe(6);
+		expect(tokenizer.countMessage(illustrated)).toBe(1206);
+		expect(tokenizer.countMessage(illustrated, { excludeEncryptedReasoning: true })).toBe(1206);
+		expect(tokenizer.countMessages([scalar, illustrated])).toBe(1212);
+	});
+	test("counts each original image once across user, developer, tool and hook content", () => {
+		const tokenizer = new Tokenizer();
+		const content: (TextContent | ImageContent)[] = [
+			{ type: "text", text: "Inspect these images" },
+			{ type: "image", data: "cG5n", mimeType: "image/png", detail: "low" },
+			{ type: "image", data: "cG5n", mimeType: "image/png", detail: "high" },
+			{ type: "image", data: "cG5n", mimeType: "image/png", detail: "auto" },
+		];
+		const messages: AgentMessage[] = [
+			{ role: "user", content, timestamp: 0 },
+			{ role: "developer", content, timestamp: 0 },
+			{ role: "toolResult", toolCallId: "read_1", toolName: "read", content, isError: false, timestamp: 0 },
+			{ role: "hookMessage", customType: "images", content, display: false, timestamp: 0 },
+		];
+		const expected = tokenizer.countTokens("Inspect these images") + 3 * 1200;
+		for (const message of messages) {
+			expect(tokenizer.countMessage(message)).toBe(expected);
+			expect(tokenizer.countMessage(message, { excludeEncryptedReasoning: true })).toBe(expected);
+		}
+		expect(tokenizer.countMessages(messages)).toBe(4 * expected);
+	});
+
+	test("distinguishes authored images from raster frames in one compaction summary", () => {
+		const original: ImageContent = { type: "image", data: "cG5n", mimeType: "image/png" };
+		const frame: ImageContent = { ...original };
+		bindMessageSource({ role: "user", content: [original], timestamp: 0 }, "source-user", 0);
+		const mixed: AgentMessage = {
+			role: "compactionSummary",
+			summary: "",
+			blocks: [original, frame],
+			tokensBefore: 0,
+			timestamp: 0,
+		};
+		const tokenizer = new Tokenizer();
+		expect(tokenizer.countMessage(mixed)).toBe(1200 + 5024);
+		expect(tokenizer.countMessage(mixed, { excludeEncryptedReasoning: true })).toBe(1200 + 5024);
+	});
+	test("charges a metadata-only computer screenshot without charging content mirrors again", () => {
+		const tokenizer = new Tokenizer();
+		const screenshot: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call_screen",
+			toolName: "computer",
+			content: [],
+			isError: false,
+			timestamp: 0,
+			providerMetadata: {
+				type: "computer",
+				screenshot: { type: "computer_screenshot", file_id: "file-screen" },
+				acknowledgedSafetyChecks: [],
+			},
+		};
+		expect(tokenizer.countMessage(screenshot)).toBe(1200);
+		expect(tokenizer.countMessage(screenshot, { excludeEncryptedReasoning: true })).toBe(1200);
+		const image: ImageContent = { type: "image", data: "cG5n", mimeType: "image/png" };
+		// The computer-result serializer emits its one screenshot instead of content images.
+		expect(tokenizer.countMessage({ ...screenshot, content: [image, { ...image }] })).toBe(1200);
+		expect(
+			tokenizer.countMessage({ ...screenshot, providerMetadata: undefined, content: [image, { ...image }] }),
+		).toBe(2400);
+	});
+
+	test("prices current native logical text, computer metadata and images without counting opaque snapshots", () => {
+		const tokenizer = new Tokenizer();
+		const actions = [{ type: "type" as const, text: "visible action" }];
+		const checks = [{ id: "check", code: "reason", message: "visible safety" }];
+		const search = { type: "search", queries: ["visible query"] };
+		const items = [
+			{
+				type: "code_interpreter_call",
+				code: "visible code",
+				outputs: [
+					{ type: "logs", logs: "visible log" },
+					{ type: "image", url: "data:image/png;base64,cG5n" },
+				],
+				encrypted_content: "opaque".repeat(1000),
+			},
+			{ type: "web_search_call", action: search, signature: "opaque".repeat(1000) },
+			{ type: "unknown_extension", text: "opaque".repeat(1000) },
+		];
+		const message: AssistantMessage = {
+			role: "assistant",
+			provider: "openai",
+			api: "openai-responses",
+			model: "fixture",
+			timestamp: 0,
+			stopReason: "stop",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			content: [
+				{
+					type: "toolCall",
+					id: "call",
+					name: "computer",
+					arguments: {},
+					providerMetadata: { type: "computer", providerItemId: "item", actions, pendingSafetyChecks: checks },
+				},
+			],
+			providerPayload: createOpenAIResponsesHistoryPayload("openai", items),
+		};
+		const metadata = ["computer", "{}", JSON.stringify(actions), JSON.stringify(checks)];
+		const expected =
+			tokenizer.countTokens(["visible code", "visible log", JSON.stringify(search), ...metadata]) + 1200;
+		expect(tokenizer.countMessage(message)).toBe(expected);
+		expect(tokenizer.countMessage(message, { excludeEncryptedReasoning: true })).toBe(expected);
+		expect(
+			tokenizer.countMessage({
+				...message,
+				providerPayload: createOpenAIResponsesHistoryPayload("openai", items, false),
+			}),
+		).toBe(tokenizer.countTokens(metadata));
+	});
+
+	test("charges normalized generated images once and never revives deleted native mirrors after JSON reload", () => {
+		const tokenizer = new Tokenizer();
+		const image: ImageContent = { type: "image", data: "cG5n", mimeType: "image/png" };
+		const text: TextContent = { type: "text", text: "equal source" };
+		const message: AssistantMessage = {
+			role: "assistant",
+			provider: "openai",
+			api: "openai-responses",
+			model: "fixture",
+			timestamp: 0,
+			stopReason: "stop",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			content: [image, { ...image }, text],
+			providerPayload: createOpenAIResponsesHistoryPayload(
+				"openai",
+				[
+					{ type: "image_generation_call", result: image.data },
+					{ type: "image_generation_call", result: image.data },
+					{ type: "message", role: "assistant", content: [{ type: "output_text", text: text.text }] },
+				],
+				true,
+				[
+					{ itemIndex: 0, contentIndex: 0 },
+					{ itemIndex: 1, contentIndex: 1 },
+					{ itemIndex: 2, contentIndex: 2 },
+				],
+			),
+		};
+		expect(tokenizer.countMessage(message)).toBe(2400 + tokenizer.countTokens(text.text));
+		bindMessageSource(message, "source", 0);
+		const payload = message.providerPayload;
+		if (payload?.type !== "openaiResponsesHistory" || !payload.origins)
+			throw new Error("Expected captured source origins");
+		const rewritten: AssistantMessage = JSON.parse(
+			JSON.stringify({
+				...message,
+				content: [image, text],
+				providerPayload: {
+					...payload,
+					origins: remapNativeItemOrigins(payload.origins, [
+						{
+							entryId: "source",
+							blocks: [
+								{ oldBlockIndex: 0, newBlockIndex: null },
+								{ oldBlockIndex: 1, newBlockIndex: 0 },
+								{ oldBlockIndex: 2, newBlockIndex: 1 },
+							],
+						},
+					]),
+				},
+			}),
+		);
+		expect(tokenizer.countMessage(rewritten)).toBe(1200 + tokenizer.countTokens(text.text));
+		expect(tokenizer.countMessage(rewritten, { excludeEncryptedReasoning: true })).toBe(
+			1200 + tokenizer.countTokens(text.text),
+		);
+	});
+
 	test("defaults to null encoding and byte estimation", () => {
 		const tokenizer = new Tokenizer();
 		expect(tokenizer.encoding).toBeNull();

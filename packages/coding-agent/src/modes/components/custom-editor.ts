@@ -26,6 +26,7 @@ import { MacOSSpellingProvider, type SpellingFeatures } from "../macos-spelling"
 import { hasMagicKeyword, highlightMagicKeywords } from "../magic-keywords";
 import { isQueuedMessageList, parseQueueShorthand, QUEUE_LIST_MARKER_RE } from "../queue-input";
 import { fgOrPlain, theme } from "../theme/theme";
+import type { SubmittedUserInput } from "../types";
 
 type ConfigurableEditorAction = Extract<
 	AppKeybinding,
@@ -409,6 +410,15 @@ export type ComposerChipDescriptor =
 export class CustomEditor extends Editor {
 	#spelling = new MacOSSpellingProvider();
 	imageLinks?: readonly (string | undefined)[];
+	/** Original submissions returned for editing; reused only while the rich draft is unchanged. */
+	restoredOriginalSubmissions?: readonly Pick<
+		SubmittedUserInput,
+		"originalSubmission" | "text" | "images" | "imageLinks" | "compactionOverride"
+	>[];
+
+	restoreOriginalSubmission(source: NonNullable<CustomEditor["restoredOriginalSubmissions"]>[number] | undefined): void {
+		this.restoredOriginalSubmissions = source?.originalSubmission ? [source] : undefined;
+	}
 
 	/** Draft images pasted into the composer, consumed on submit. Co-located with
 	 *  {@link imageLinks} so every piece of draft-image state lives on the editor. */
@@ -472,6 +482,7 @@ export class CustomEditor extends Editor {
 		this.setText("");
 		this.clearAtoms();
 		this.imageLinks = undefined;
+		this.restoredOriginalSubmissions = undefined;
 		this.pendingImages = [];
 		this.pendingImageLinks = [];
 		this.pendingTexts = [];
@@ -482,14 +493,22 @@ export class CustomEditor extends Editor {
 	 *  images, collapses stored `[Image #N, WxH]` markers back into compact chip tokens (so the
 	 *  chips band and atomic deletion return), and re-materializes `file://` links so the tokens
 	 *  are clickable again instead of degrading to dead text (esc-esc branch, `/tree`). */
-	setDraft(text: string, images?: readonly ImageContent[]): void {
+	setDraft(
+		text: string,
+		images?: readonly ImageContent[],
+		source?: NonNullable<CustomEditor["restoredOriginalSubmissions"]>[number],
+	): void {
 		this.clearAtoms();
 		this.pendingTexts = [];
 		this.#textAttachmentCounter = 0;
 		this.imageLinks = undefined;
 		this.pendingImages = images ? [...images] : [];
-		this.pendingImageLinks = images ? images.map(() => undefined) : [];
+		this.pendingImageLinks = source?.imageLinks ? [...source.imageLinks] : images ? images.map(() => undefined) : [];
+		this.imageLinks = source?.imageLinks ? this.pendingImageLinks : undefined;
 		this.setCollapsedText(text);
+		this.restoreOriginalSubmission(
+			source ? { ...source, images: this.pendingImages, imageLinks: this.pendingImageLinks } : undefined,
+		);
 		void this.#materializeDraftLinks();
 	}
 
@@ -557,6 +576,8 @@ export class CustomEditor extends Editor {
 		this.pendingImageLinks = images.map((image, index) => videoPreviewSource(image) ?? links[index]);
 		this.imageLinks = this.pendingImageLinks;
 		this.#requestShimmerRepaint?.();
+		const source = this.restoredOriginalSubmissions?.[0];
+		if (source?.images === images) source.imageLinks = this.pendingImageLinks;
 	}
 
 	/** Treat image/paste references — compact chip tokens and bracketed markers alike — as

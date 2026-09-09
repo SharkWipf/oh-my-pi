@@ -1,13 +1,23 @@
 import type {
 	ImageContent,
+	OriginalSubmission,
+	UserMessageProducer,
 	Message,
 	MessageAttribution,
 	ProviderPayload,
 	TextContent,
 	ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
+import {
+	combineContentSourceOrigins,
+	combineSourceOrigins,
+	setSourceOrigin,
+	transferSourceOrigin,
+	transferTransformedSourceOrigin,
+} from "@oh-my-pi/pi-ai/utils/source-origin";
 import { prompt } from "@oh-my-pi/pi-utils";
 import type { AgentMessage } from "../types";
+import type { CompactionDiagnostics } from "./diagnostics";
 import branchSummaryContextPrompt from "./prompts/branch-summary-context.md" with { type: "text" };
 import compactionSummaryContextPrompt from "./prompts/compaction-summary-context.md" with { type: "text" };
 import handoffSummaryContextPrompt from "./prompts/handoff-summary-context.md" with { type: "text" };
@@ -17,6 +27,11 @@ const HANDOFF_SUMMARY_TEMPLATE = handoffSummaryContextPrompt;
 const BRANCH_SUMMARY_TEMPLATE = branchSummaryContextPrompt;
 
 export interface CustomMessage<T = unknown> {
+	/** Original host input, retained through custom skill delivery and queued replay. */
+	originalSubmission?: OriginalSubmission;
+	producer?: UserMessageProducer;
+	imageLinks?: (string | undefined)[];
+	compactionOverride?: "keep" | "exclude";
 	role: "custom";
 	customType: string;
 	content: string | (TextContent | ImageContent)[];
@@ -55,6 +70,8 @@ export interface CompactionSummaryMessage {
 	tokensAfter?: number;
 	/** Harness compaction method that produced this summary (display metadata). */
 	method?: string;
+	/** Frozen facts from the event that produced these bytes. */
+	diagnostics?: CompactionDiagnostics;
 	providerPayload?: ProviderPayload;
 	/** Runtime-only ordered archive blocks for snapcompact: old text region,
 	 *  imaged middle, then new text region. When present, `summary` is already
@@ -84,15 +101,28 @@ function getPrunedToolResultContent(message: ToolResultMessage): (TextContent | 
 		return message.content;
 	}
 	const textBlocks = message.content.filter((content): content is TextContent => content.type === "text");
-	const text = textBlocks.map(block => block.text).join("") || "[Output truncated]";
+	const sourceText = textBlocks.map(block => block.text).join("");
+	const text = sourceText || "[Output truncated]";
 	const firstTextIndex = message.content.findIndex(content => content.type === "text");
-	if (firstTextIndex < 0) return [{ type: "text", text }, ...message.content];
+	if (firstTextIndex < 0) {
+		return [
+			setSourceOrigin({ type: "text", text }, { kind: "synthetic", reason: "truncation-marker" }),
+			...message.content,
+		];
+	}
+	const merged: TextContent = { type: "text", text };
+	if (sourceText) {
+		setSourceOrigin(merged, combineSourceOrigins(textBlocks));
+		transferTransformedSourceOrigin(merged, merged, "partial");
+	} else {
+		setSourceOrigin(merged, { kind: "synthetic", reason: "truncation-marker" });
+	}
 
 	const content: (TextContent | ImageContent)[] = [];
 	for (let index = 0; index < message.content.length; index++) {
 		const block = message.content[index];
 		if (block.type !== "text") content.push(block);
-		else if (index === firstTextIndex) content.push({ type: "text", text });
+		else if (index === firstTextIndex) content.push(merged);
 	}
 	return content;
 }
@@ -135,6 +165,7 @@ export interface CompactionSummaryMessageOptions {
 	method?: string;
 	/** Estimated context tokens after the rewrite, for display alongside `tokensBefore`. */
 	tokensAfter?: number;
+	diagnostics?: CompactionDiagnostics;
 }
 
 export function createCompactionSummaryMessage(
@@ -143,7 +174,7 @@ export function createCompactionSummaryMessage(
 	timestamp: string,
 	options: CompactionSummaryMessageOptions = {},
 ): CompactionSummaryMessage {
-	const { shortSummary, providerPayload, images, blocks, warning, method, tokensAfter } = options;
+	const { shortSummary, providerPayload, images, blocks, warning, method, tokensAfter, diagnostics } = options;
 	const imageBlocks =
 		blocks?.filter((block): block is ImageContent => block.type === "image") ??
 		(images && images.length > 0 ? images : undefined);
@@ -154,6 +185,7 @@ export function createCompactionSummaryMessage(
 		tokensBefore,
 		tokensAfter,
 		method,
+		diagnostics,
 		providerPayload,
 		blocks: blocks && blocks.length > 0 ? blocks : undefined,
 		images: imageBlocks && imageBlocks.length > 0 ? imageBlocks : undefined,
@@ -190,6 +222,11 @@ function isCoreCompactionMessage(message: AgentMessage): message is AgentMessage
 	);
 }
 
+function withContentSourceOrigin<T extends Message>(message: T): T {
+	if (Array.isArray(message.content)) setSourceOrigin(message, combineContentSourceOrigins(message.content));
+	return message;
+}
+
 /**
  * Transform a single core-domain agent message to its LLM form; `undefined`
  * drops it from the provider request.
@@ -207,65 +244,71 @@ export function convertMessageToLlm(message: AgentMessage): Message | undefined 
 			case "hookMessage": {
 				const content =
 					typeof message.content === "string"
-						? [{ type: "text" as const, text: message.content }]
+						? [transferSourceOrigin(message, { type: "text" as const, text: message.content })]
 						: message.content;
-				return {
+				return withContentSourceOrigin({
 					role: "developer",
 					content,
 					attribution: message.attribution,
 					timestamp: message.timestamp,
-				};
+				});
 			}
 			case "branchSummary":
-				return {
+				return withContentSourceOrigin({
 					role: "user",
 					content: [
-						{
+						transferTransformedSourceOrigin(message, {
 							type: "text" as const,
 							text: renderBranchSummaryContext(message.summary),
-						},
+						}),
 					],
 					attribution: "agent",
 					historyRewriteAt: message.timestamp,
 					timestamp: message.timestamp,
-				};
+				});
 			case "compactionSummary":
-				return {
+				return withContentSourceOrigin({
 					role: "user",
 					content:
 						message.blocks !== undefined
-							? [{ type: "text" as const, text: message.summary }, ...message.blocks]
+							? [
+									setSourceOrigin(
+										{ type: "text" as const, text: message.summary },
+										{ kind: "synthetic", reason: "archive-prefix" },
+									),
+									...message.blocks,
+								]
 							: [
-									{
+									transferTransformedSourceOrigin(message, {
 										type: "text" as const,
 										text:
 											message.method === "handoff"
 												? renderHandoffSummaryContext(message.summary)
 												: renderCompactionSummaryContext(message.summary),
-									},
+									}),
 									...(message.images ?? []),
 								],
 					attribution: "agent",
 					historyRewriteAt: message.timestamp,
 					providerPayload: message.providerPayload,
 					timestamp: message.timestamp,
-				};
+				});
 		}
 	}
 
 	switch (message.role) {
 		case "user":
-			return { ...message, attribution: message.attribution ?? "user" };
+			return transferSourceOrigin(message, { ...message, attribution: message.attribution ?? "user" });
 		case "developer":
-			return { ...message, attribution: message.attribution ?? "agent" };
+			return transferSourceOrigin(message, { ...message, attribution: message.attribution ?? "agent" });
 		case "assistant":
 			return message;
 		case "toolResult":
-			return {
+			return withContentSourceOrigin({
 				...message,
 				content: getPrunedToolResultContent(message as ToolResultMessage),
 				attribution: message.attribution ?? "agent",
-			};
+			});
 		default:
 			return undefined;
 	}

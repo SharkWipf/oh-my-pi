@@ -69,6 +69,7 @@ import { getProxyForUrl } from "../utils/proxy";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { adaptSchemaForStrict, NO_STRICT, sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
 import { notifyRawSseEvent } from "../utils/sse-debug";
+import { cloneWithSourceOrigins, combineContentSourceOrigins, getSourceOrigin, invalidateSourceOrigins, mergeSourceHistory, setSourceOrigin, transferSourceOrigin, transferTransformedSourceOrigin } from "../utils/source-origin";
 import { compactGrammarDefinition } from "./grammar";
 import {
 	type CodexLiteShapedBody,
@@ -109,6 +110,7 @@ import {
 	appendResponsesToolResultMessages,
 	applyOpenAIServiceTier,
 	applyReasoningSummaryDone,
+	applyReasoningSummaryTextDone,
 	buildResponsesDeltaInput,
 	computerCallMetadata,
 	convertResponsesAssistantMessage,
@@ -811,6 +813,7 @@ interface CodexOpenItem {
 	contentIndex: number;
 	itemId?: string;
 	outputIndex?: number;
+	rawThinking?: string;
 }
 
 class CodexStreamRuntime {
@@ -840,6 +843,7 @@ class CodexStreamRuntime {
 	currentItem: CodexEventItem | null = null;
 	currentBlock: CodexOutputBlock | null = null;
 	nativeOutputItems: Array<Record<string, unknown>> = [];
+	contentBlocks: Array<{ itemIndex: number; contentIndex: number }> = [];
 	/** Sequential-cutoff summary sections/emitted text, global to the response (indices span reasoning items). */
 	cutoffSummaries: SequentialCutoffSummaryState = createSequentialCutoffSummaryState();
 	/** Summary deltas buffered while waiting to see whether atomic `.done` events arrive. */
@@ -876,6 +880,7 @@ class CodexStreamRuntime {
 		this.currentItem = null;
 		this.currentBlock = null;
 		this.nativeOutputItems.length = 0;
+		this.contentBlocks.length = 0;
 		this.pendingSummaryDeltas.clear();
 		this.cutoffSummaries = createSequentialCutoffSummaryState();
 	}
@@ -1274,13 +1279,13 @@ function unrollCodexComputerItems(items: ResponseInput, supportsImageDetailOrigi
 	for (const item of replayItems) {
 		if (item.type === "computer_call") {
 			const actions = item.actions ?? (item.action ? [item.action] : []);
-			unrolled.push({
+			unrolled.push(transferTransformedSourceOrigin(item, {
 				type: "function_call",
 				call_id: item.call_id,
 				name: "computer",
 				arguments: JSON.stringify({ actions }),
 				status: item.status,
-			});
+			}));
 			continue;
 		}
 		if (item.type === "computer_call_output") {
@@ -1298,16 +1303,15 @@ function unrollCodexComputerItems(items: ResponseInput, supportsImageDetailOrigi
 								file_id: item.output.file_id,
 							} satisfies ResponseInputContent)
 						: undefined;
-			unrolled.push({
+			unrolled.push(setSourceOrigin({
 				type: "function_call_output",
 				call_id: item.call_id,
 				output: image ? "(see attached image)" : "",
-			});
+			}, { kind: "synthetic", reason: "provider-control" }));
 			if (image) {
-				unrolled.push({
-					role: "user",
-					content: [{ type: "input_text", text: "Attached image from computer tool result:" }, image],
-				});
+				transferSourceOrigin(item.output, image);
+				const content: ResponseInputContent[] = [setSourceOrigin({ type: "input_text", text: "Attached image from computer tool result:" }, { kind: "synthetic", reason: "prefix" }), image];
+				unrolled.push(setSourceOrigin({ role: "user", content }, combineContentSourceOrigins(content)));
 			}
 			continue;
 		}
@@ -1326,16 +1330,16 @@ function unrollCodexComputerAssistantMessage(message: AssistantMessage): Assista
 			arguments: { actions: structuredCloneJSON(block.providerMetadata.actions) },
 		};
 		delete call.providerMetadata;
-		return call;
+		return transferTransformedSourceOrigin(block, call);
 	});
-	return changed ? { ...message, content } : message;
+	return changed ? transferSourceOrigin(message, { ...message, content }) : message;
 }
 
 function unrollCodexComputerToolResult(message: ToolResultMessage): ToolResultMessage {
 	if (message.providerMetadata?.type !== "computer") return message;
 	const result: ToolResultMessage = { ...message };
 	delete result.providerMetadata;
-	return result;
+	return transferSourceOrigin(message, result);
 }
 
 function getCodexServiceTierCostMultiplier(
@@ -1546,7 +1550,7 @@ export async function buildTransformedCodexRequestBody(
 	const input = convertMessages(model, context);
 	const params: RequestBody = {
 		model: model.requestModelId ?? model.id,
-		input: inputPrefix?.length ? [...inputPrefix, ...input] : input,
+		input: inputPrefix?.length ? mergeSourceHistory<InputItem>(inputPrefix, input) : input,
 		stream: true,
 		prompt_cache_key: promptCacheKey,
 	};
@@ -1612,6 +1616,11 @@ function applyCodexStableEffort(
 	if (!providerState || !sessionId) return;
 	const state = getOpenAIEffortControlState(providerState.effortControls, `${model.id}\u0000${sessionId}`);
 	body.reasoning = { ...body.reasoning, effort: planStableOpenAIEffort(state, body.input, effort) };
+	for (const item of body.input ?? []) {
+		if (item.type === "configuration_update" && !getSourceOrigin(item)) {
+			setSourceOrigin(item, { kind: "synthetic", reason: "provider-control" });
+		}
+	}
 }
 
 async function openInitialCodexEventStream(
@@ -1825,6 +1834,7 @@ async function openCodexWebSocketTransport(
 	if (replacementWebsocketRequest !== undefined) {
 		websocketRequest = replacementWebsocketRequest as typeof websocketRequest;
 	}
+	if (options?.onPayload) invalidateSourceOrigins(websocketRequest, replacementWebsocketRequest === undefined ? "externally-mutated" : "externally-replaced");
 	recordCodexTurnRequestDiagnostics(websocketState, websocketRequest, "websocket", canAppendBeforeRequest);
 	const websocketHeaders = createCodexHeaders(
 		requestContext.requestHeaders,
@@ -1840,7 +1850,8 @@ async function openCodexWebSocketTransport(
 		await getCodexAttestationHeader(requestContext.accountId),
 		requestContext.transformedBody,
 	);
-	const requestBodyForState = structuredCloneJSON(requestContext.transformedBody);
+	const requestBodyForState = cloneWithSourceOrigins(requestContext.transformedBody);
+	if (options?.onPayload) invalidateSourceOrigins(requestBodyForState, "externally-mutated");
 	// `onPayload` may rewrite the outgoing frame (e.g. drop `stream_options`);
 	// recorded state must reflect what was actually sent — the sequential-cutoff
 	// summary decoder keys off it.
@@ -1953,8 +1964,9 @@ async function openCodexSseTransport(
 	if (replacementWireBody !== undefined) {
 		wireBody = replacementWireBody as RequestBody;
 	}
+	if (options?.onPayload) invalidateSourceOrigins(wireBody, replacementWireBody === undefined ? "externally-mutated" : "externally-replaced");
 	recordCodexTurnRequestDiagnostics(state, wireBody, "sse", canAppendBeforeRequest);
-	return { eventStream: await open(wireBody), requestBodyForState: structuredCloneJSON(wireBody), transport: "sse" };
+	return { eventStream: await open(wireBody), requestBodyForState: cloneWithSourceOrigins(wireBody), transport: "sse" };
 }
 
 function isJsonWhitespaceOnly(value: string): boolean {
@@ -2225,8 +2237,7 @@ class CodexStreamProcessor {
 		}
 
 		if (eventType === "response.reasoning_summary_text.done") {
-			// Outside the cutoff contract the text already streamed via `.delta`.
-			if (!this.#sequentialCutoffSummaries) return firstTokenTime;
+			// Completed text can carry a late summary even outside cutoff delivery.
 			const entry = this.runtime.openItemForEvent(rawEvent);
 			if (entry?.item.type === "reasoning" && entry.block?.type === "thinking") {
 				this.runtime.takeSummaryDeltas(entry);
@@ -2235,15 +2246,19 @@ class CodexStreamProcessor {
 					typeof rawEvent.summary_index === "number" && Number.isFinite(rawEvent.summary_index)
 						? Math.trunc(rawEvent.summary_index)
 						: 0;
-				applyReasoningSummaryDone(
-					this.runtime.cutoffSummaries,
-					entry.block,
-					typeof rawEvent.text === "string" ? rawEvent.text : "",
-					summaryIndex,
-					stream,
-					output,
-					entry.contentIndex,
-				);
+				if (this.#sequentialCutoffSummaries) {
+					applyReasoningSummaryDone(
+						this.runtime.cutoffSummaries, entry.block,
+						typeof rawEvent.text === "string" ? rawEvent.text : "", summaryIndex,
+						stream, output, entry.contentIndex,
+					);
+				} else {
+					applyReasoningSummaryTextDone(
+						entry.item, entry.block,
+						typeof rawEvent.text === "string" ? rawEvent.text : "", summaryIndex,
+						stream, output, entry.contentIndex,
+					);
+				}
 			}
 			return firstTokenTime;
 		}
@@ -2252,13 +2267,7 @@ class CodexStreamProcessor {
 			const entry = this.runtime.openItemForEvent(rawEvent);
 			const delta = typeof rawEvent.delta === "string" ? rawEvent.delta : "";
 			if (entry?.item.type === "reasoning" && entry.block?.type === "thinking") {
-				entry.block.thinking += delta;
-				stream.push({
-					type: "thinking_delta",
-					contentIndex: entry.contentIndex,
-					delta,
-					partial: output,
-				});
+				entry.rawThinking = (entry.rawThinking ?? "") + delta;
 			}
 			return firstTokenTime;
 		}
@@ -2403,25 +2412,24 @@ class CodexStreamProcessor {
 		const contentIndex = entry?.contentIndex ?? output.content.length - 1;
 
 		if (item.type === "image_generation_call" && item.result) {
-			appendResponsesImageResult(output, stream, item.result);
+			runtime.contentBlocks.push({ itemIndex: runtime.nativeOutputItems.length - 1, contentIndex: appendResponsesImageResult(output, stream, item.result) });
 			runtime.closeOpenItem(entry);
 			return;
 		}
 
 		if (item.type === "reasoning" && block?.type === "thinking") {
-			this.#flushSummaryDeltas(entry);
-			block.thinking = finalizeReasoningThinking(
+			if (item.summary?.some(part => part.text)) this.runtime.takeSummaryDeltas(entry);
+			else this.#flushSummaryDeltas(entry);
+			finalizeReasoningThinking(
 				item,
-				block.thinking,
-				this.#sequentialCutoffSummaries ? this.runtime.cutoffSummaries : undefined,
-			);
-			block.thinkingSignature = JSON.stringify(item);
-			stream.push({
-				type: "thinking_end",
+				block,
+				stream,
+				output,
 				contentIndex,
-				content: block.thinking,
-				partial: output,
-			});
+				this.#sequentialCutoffSummaries ? this.runtime.cutoffSummaries : undefined,
+				entry?.rawThinking,
+			);
+			runtime.contentBlocks.push({ itemIndex: runtime.nativeOutputItems.length - 1, contentIndex });
 			runtime.closeOpenItem(entry);
 			return;
 		}
@@ -2436,6 +2444,7 @@ class CodexStreamProcessor {
 				content: block.text,
 				partial: output,
 			});
+			runtime.contentBlocks.push({ itemIndex: runtime.nativeOutputItems.length - 1, contentIndex });
 			runtime.closeOpenItem(entry);
 			return;
 		}
@@ -2455,6 +2464,7 @@ class CodexStreamProcessor {
 			}
 			// Detach so a late/duplicate arguments.delta cannot append to the
 			// finished block or trip the whitespace-loop guard against it.
+			if (block?.type === "toolCall") runtime.contentBlocks.push({ itemIndex: runtime.nativeOutputItems.length - 1, contentIndex });
 			runtime.closeOpenItem(entry);
 			runtime.canSafelyReplayWebsocketOverSse = false;
 			stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
@@ -2478,6 +2488,7 @@ class CodexStreamProcessor {
 				output.content.push(toolCall);
 				resolvedContentIndex = output.content.length - 1;
 			}
+			runtime.contentBlocks.push({ itemIndex: runtime.nativeOutputItems.length - 1, contentIndex: resolvedContentIndex });
 			runtime.closeOpenItem(entry);
 			runtime.canSafelyReplayWebsocketOverSse = false;
 			stream.push({ type: "toolcall_end", contentIndex: resolvedContentIndex, toolCall, partial: output });
@@ -2498,6 +2509,7 @@ class CodexStreamProcessor {
 				block.arguments = { input: rawInput };
 				clearStreamingPartialJson(block);
 			}
+			if (block?.type === "toolCall") runtime.contentBlocks.push({ itemIndex: runtime.nativeOutputItems.length - 1, contentIndex });
 			runtime.closeOpenItem(entry);
 			runtime.canSafelyReplayWebsocketOverSse = false;
 			stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
@@ -2510,6 +2522,19 @@ class CodexStreamProcessor {
 		runtime.sawTerminalEvent = true;
 		const rawResponse = rawEvent.response;
 		const response = rawResponse && typeof rawResponse === "object" ? rawResponse : undefined;
+		const responseOutput = response && "output" in response && Array.isArray(response.output) ? response.output : [];
+		const finishReasoning = (entry: CodexOpenItem | null): void => {
+			if (entry?.item.type !== "reasoning") return;
+			const finalItem = entry.itemId
+				? responseOutput.find(item => item?.type === "reasoning" && item.id === entry.itemId)
+				: responseOutput[entry.outputIndex ?? -1];
+			const item = finalItem?.type === "reasoning" ? finalItem : entry.item;
+			this.#handleOutputItemDone({ item, output_index: entry.outputIndex });
+		};
+		// Closing an item removes it from both maps, so each is finalized once.
+		for (const entry of runtime.openItems.values()) finishReasoning(entry);
+		for (const entry of runtime.openItemsByOutputIndex.values()) finishReasoning(entry);
+		finishReasoning(runtime.currentEntry);
 		const responseId = response && "id" in response && typeof response.id === "string" ? response.id : undefined;
 		const usage = response && "usage" in response ? parseCodexResponseUsage(response.usage) : undefined;
 		const serviceTier =
@@ -2971,7 +2996,7 @@ class CodexStreamProcessor {
 			throw new CodexProviderStreamError("Codex response failed", false);
 		}
 
-		output.providerPayload = createOpenAIResponsesHistoryPayload(this.model.provider, this.runtime.nativeOutputItems);
+		output.providerPayload = createOpenAIResponsesHistoryPayload(this.model.provider, this.runtime.nativeOutputItems, true, this.runtime.contentBlocks);
 		output.duration = performance.now() - this.startTime;
 		if (completion.firstTokenTime) {
 			output.ttft = completion.firstTokenTime - this.startTime;
@@ -4586,7 +4611,14 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 
 			const normalizedContent = normalizeInputMessageContent(model, msg.content);
 			if (normalizedContent.length === 0) continue;
-			messages.push({ role: msg.role, content: normalizedContent });
+			// A string message is exactly one logical source block; array content must
+			// use each emitted block origin so filtered images receive no credit.
+			if (typeof msg.content === "string") {
+				const text = (normalizedContent[0] as { text: string }).text;
+				if (text === msg.content) transferSourceOrigin(msg, normalizedContent[0]);
+				else transferTransformedSourceOrigin(msg, normalizedContent[0]);
+			}
+			messages.push(setSourceOrigin({ role: msg.role, content: normalizedContent }, combineContentSourceOrigins(normalizedContent)));
 			msgIndex += 1;
 			continue;
 		}
@@ -4610,6 +4642,11 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 							? sanitizedHistoryItems
 							: unrollCodexComputerItems(sanitizedHistoryItems, model.compat.supportsImageDetailOriginal);
 					const replayItems = escapeControlTokens ? escapeReplayedControlTokens(rawReplayItems) : rawReplayItems;
+					if (!providerPayload?.dt) {
+						customCallIds.clear();
+						knownCallIds.clear();
+						computerCallIds.clear();
+					}
 					for (const item of replayItems) {
 						if (item.type === "custom_tool_call") {
 							customCallIds.add(item.call_id);
@@ -4623,7 +4660,6 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 						messages.push(...replayItems);
 					} else {
 						messages.splice(0, messages.length, ...replayItems);
-						// Keep customCallIds from the pre-splice state since historyItems may re-introduce them.
 					}
 					msgIndex += 1;
 					continue;

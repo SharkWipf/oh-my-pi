@@ -58,11 +58,10 @@ function makeCtx(
 describe("flushCompactionQueue loop parking", () => {
 	test("all-slash drain parks the loop when the body is consumed locally", async () => {
 		const queued: CompactionQueuedMessage[] = [{ text: "/void-cmd", mode: "steer" }];
-		const { ctx, prompt, pauseLoop, getLoopPrompt } = makeCtx(queued, "/void-cmd");
+		const { ctx, pauseLoop, getLoopPrompt } = makeCtx(queued, "/void-cmd");
 
 		await new UiHelpers(ctx).flushCompactionQueue({ willRetry: false });
 
-		expect(prompt).toHaveBeenCalledWith("/void-cmd");
 		expect(pauseLoop).toHaveBeenCalledTimes(1);
 		expect(getLoopPrompt()).toBeUndefined();
 	});

@@ -8,7 +8,18 @@
  */
 
 import type { Api, CodexCompactionContext, FetchImpl, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
+import { compactionSourceKey } from "@oh-my-pi/pi-ai/compaction-source";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import {
+	combineContentSourceOrigins,
+	exportItemOrigins,
+	getSourceOrigin,
+	importItemOrigins,
+	type NativeItemOrigin,
+	type NativeSourcePart,
+	setSourceOrigin,
+	validateNativeItemOrigins,
+} from "@oh-my-pi/pi-ai/utils/source-origin";
 import { applyCodexResponsesLiteShape } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
 import {
 	createOpenAICodexCompactionRequestContext,
@@ -33,6 +44,7 @@ import {
 	OPENAI_HEADERS,
 } from "@oh-my-pi/pi-catalog/wire/codex";
 import { $env, logger, stringifyJson } from "@oh-my-pi/pi-utils";
+import type { CompactionResult } from "./compaction";
 
 // ============================================================================
 // Types & Configuration
@@ -71,19 +83,33 @@ export interface CompactionV2Usage {
 	reasoningOutputTokens?: number;
 }
 
+/** Admitted source selections, serialized once independently of ordinary retention. */
+export interface NativeCompactionPreservation {
+	userCandidates: Array<Record<string, unknown>>;
+	nonUserSourceIds: readonly string[];
+	nonUserItems: Array<Record<string, unknown>>;
+	/** Complete original N quote captured before conversion, never repriced from native items. */
+	readonly nonUserTokens: number;
+	/** Actual pre-addition ordinary input; selected P never changes its allocation. */
+	ordinaryInput?: unknown[];
+}
+
 /** Provider-ready Responses body and local state needed for V2 compaction. */
 export interface CompactionV2Request {
 	body: OpenAICodexCompactionBody;
 	input: unknown[];
 	retainedMessageBudget: number;
+	preservation?: NativeCompactionPreservation;
 	sessionId?: string;
 	promptCacheKey?: string;
 }
 
 /** Response collected from the V2 stream and converted into replacement history. */
 export interface CompactionV2Response {
+	retentionTarget: NonNullable<CompactionResult["retentionTarget"]>;
 	compactionItem: Record<string, unknown>;
 	replacementHistory: Array<Record<string, unknown>>;
+	replacementOrigins?: NativeItemOrigin[];
 	usedTokens: number;
 	usage?: CompactionV2Usage;
 	retainedImageCount: number;
@@ -199,6 +225,7 @@ export function buildCompactionV2Request(
 		sessionId?: string;
 		promptCacheKey?: string;
 		retainedMessageBudget?: number;
+		preservation?: NativeCompactionPreservation;
 	},
 ): CompactionV2Request {
 	const cacheOptions = { sessionId: options?.sessionId, promptCacheKey: options?.promptCacheKey };
@@ -232,6 +259,7 @@ export function buildCompactionV2RequestFromBody(
 		sessionId?: string;
 		promptCacheKey?: string;
 		retainedMessageBudget?: number;
+		preservation?: NativeCompactionPreservation;
 	},
 ): CompactionV2Request {
 	const input = Array.isArray(body.input) ? body.input : [];
@@ -239,6 +267,7 @@ export function buildCompactionV2RequestFromBody(
 		body: { ...body, model: resolveCompactionV2Model(model), input },
 		input,
 		retainedMessageBudget: resolveCompactionV2RetainedMessageBudget(options?.retainedMessageBudget),
+		preservation: options?.preservation,
 		sessionId: options?.sessionId,
 		promptCacheKey: options?.promptCacheKey,
 	};
@@ -544,15 +573,18 @@ function finishCompactionV2Collection(
 	}
 
 	const compactionItem = state.compactionItems[0];
-	const { replacementHistory, retainedImageCount } = buildCompactionV2ReplacementHistory(
+	const { replacementHistory, retainedImageCount, retentionTarget } = buildCompactionV2ReplacementHistory(
 		request.input,
 		compactionItem,
 		request.retainedMessageBudget,
+		request.preservation,
 	);
 	return {
 		compactionItem,
 		replacementHistory,
+		retentionTarget,
 		usedTokens: state.usage?.inputTokens ?? 0,
+		replacementOrigins: exportItemOrigins(replacementHistory),
 		usage: state.usage,
 		retainedImageCount,
 	};
@@ -664,45 +696,83 @@ function isRetryableCompactionError(error: Error): boolean {
 // Replacement History
 // ============================================================================
 
+interface CompactionV2Message extends Record<string, unknown> {
+	role: string;
+	content: string | unknown[];
+}
+
+// Normalize typed Responses messages and typeless easy-input messages to one
+// local view, without rewriting the cacheable input or full retained items.
+function isCompactionV2Message(item: unknown): item is CompactionV2Message {
+	return (
+		isRecord(item) &&
+		(item.type === undefined || item.type === "message") &&
+		typeof item.role === "string" &&
+		(typeof item.content === "string" || Array.isArray(item.content))
+	);
+}
+
 /** Build Codex-style V2 replacement history from prompt input plus compaction output. */
 export function buildCompactionV2ReplacementHistory(
 	input: unknown[],
 	compactionItem: Record<string, unknown>,
 	retainedMessageBudget = V2_RETAINED_MESSAGE_TOKEN_BUDGET,
-): { replacementHistory: Array<Record<string, unknown>>; retainedImageCount: number } {
-	const retained = input.filter(
-		(item): item is Record<string, unknown> =>
-			isRecord(item) && isRetainedForCompactionV2(item) && shouldKeepCompactionV2HistoryItem(item),
+	preservation?: NativeCompactionPreservation,
+): {
+	replacementHistory: Array<Record<string, unknown>>;
+	retainedImageCount: number;
+	retentionTarget: NonNullable<CompactionResult["retentionTarget"]>;
+} {
+	const prepaid = new Set(preservation?.nonUserSourceIds);
+	const retained = (preservation?.ordinaryInput ?? input).filter(
+		(item): item is CompactionV2Message =>
+			isCompactionV2Message(item) &&
+			isRetainedForCompactionV2(item) &&
+			shouldKeepCompactionV2HistoryItem(item) &&
+			!isPrepaidNativeItem(item, prepaid),
 	);
-	const replacementHistory = truncateRetainedMessagesForCompactionV2(
-		retained,
-		resolveCompactionV2RetainedMessageBudget(retainedMessageBudget),
+	const nonUserItems = preservation?.nonUserItems ?? [];
+	const prechargedTokens = preservation?.nonUserTokens ?? 0;
+	const configuredTokens = resolveCompactionV2RetainedMessageBudget(retainedMessageBudget);
+	const residualTokens = resolveCompactionV2RetainedMessageBudget(Math.max(0, configuredTokens - prechargedTokens));
+	const ordinary = truncateRetainedMessagesForCompactionV2(retained, residualTokens);
+	const replacementHistory = mergeNativeSourceItems(
+		unionNativeUserHistory(ordinary, preservation?.userCandidates ?? []),
+		nonUserItems,
 	);
 	const retainedImageCount = replacementHistory.reduce((count, item) => count + retainedInputImageCount(item), 0);
+	setSourceOrigin(compactionItem, { kind: "unknown", reason: "provider-compaction-aggregate" });
 	replacementHistory.push(compactionItem);
-	return { replacementHistory, retainedImageCount };
+	return {
+		replacementHistory,
+		retainedImageCount,
+		retentionTarget: { configuredTokens, manualNonUserTokens: prechargedTokens, residualTokens },
+	};
 }
 
-function isRetainedForCompactionV2(item: Record<string, unknown>): boolean {
-	if (item.type !== "message") return false;
-	const role = stringField(item, "role");
+function isRetainedForCompactionV2(item: CompactionV2Message): boolean {
+	const role = item.role;
 	return role === "user" || role === "developer" || role === "system";
 }
 
-function shouldKeepCompactionV2HistoryItem(item: Record<string, unknown>): boolean {
-	if (item.type !== "message") return item.type === "compaction";
-	const role = stringField(item, "role");
+function shouldKeepCompactionV2HistoryItem(item: CompactionV2Message): boolean {
+	const role = item.role;
 	if (role !== "user") return false;
 	return !isContextualUserMessage(item);
 }
 
-function isContextualUserMessage(item: Record<string, unknown>): boolean {
-	const content = Array.isArray(item.content) ? item.content : [];
+function isContextualUserMessage(item: CompactionV2Message): boolean {
+	const content = item.content;
+	if (typeof content === "string") return isContextualUserText(content);
 	return content.some(part => {
 		if (!isRecord(part) || part.type !== "input_text") return false;
-		const text = stringField(part, "text")?.trimStart().toLowerCase();
-		return !!text && CONTEXTUAL_USER_PREFIXES.some(prefix => text.startsWith(prefix));
+		return isContextualUserText(stringField(part, "text") ?? "");
 	});
+}
+
+function isContextualUserText(text: string): boolean {
+	const normalized = text.trimStart().toLowerCase();
+	return CONTEXTUAL_USER_PREFIXES.some(prefix => normalized.startsWith(prefix));
 }
 
 function retainedInputImageCount(item: Record<string, unknown>): number {
@@ -715,7 +785,7 @@ function retainedInputImageCount(item: Record<string, unknown>): number {
 }
 
 function truncateRetainedMessagesForCompactionV2(
-	items: Array<Record<string, unknown>>,
+	items: CompactionV2Message[],
 	maxTokens: number,
 ): Array<Record<string, unknown>> {
 	let remaining = maxTokens;
@@ -740,8 +810,9 @@ function truncateRetainedMessagesForCompactionV2(
 	return truncatedReversed;
 }
 
-function messageContentTokenCount(item: Record<string, unknown>): number {
-	const content = Array.isArray(item.content) ? item.content : [];
+function messageContentTokenCount(item: CompactionV2Message): number {
+	const content = item.content;
+	if (typeof content === "string") return approxTokenCount(content);
 	let tokens = 0;
 	for (const part of content) {
 		if (!isRecord(part)) continue;
@@ -757,10 +828,16 @@ function messageContentTokenCount(item: Record<string, unknown>): number {
 }
 
 function truncateMessageTextToTokenBudget(
-	item: Record<string, unknown>,
+	item: CompactionV2Message,
 	maxTokens: number,
 ): Record<string, unknown> | undefined {
-	const content = Array.isArray(item.content) ? item.content : [];
+	const content = item.content;
+	if (typeof content === "string") {
+		const retained = truncateTextToTokenBudget(content, maxTokens);
+		return retained.text.length > 0
+			? setSourceOrigin({ ...item, content: retained.text }, retainedTextOrigin(item, retained.ranges))
+			: undefined;
+	}
 	let remaining = maxTokens;
 	const truncatedContent: unknown[] = [];
 	for (const part of content) {
@@ -784,24 +861,276 @@ function truncateMessageTextToTokenBudget(
 
 		const truncatedText = truncateTextToTokenBudget(text, remaining);
 		remaining = 0;
-		if (truncatedText.length > 0) {
-			truncatedContent.push({ ...part, text: truncatedText });
+		if (truncatedText.text.length > 0) {
+			truncatedContent.push(
+				setSourceOrigin({ ...part, text: truncatedText.text }, retainedTextOrigin(part, truncatedText.ranges)),
+			);
 		}
 	}
 
 	if (truncatedContent.length === 0) return undefined;
-	return { ...item, content: truncatedContent };
+	return setSourceOrigin({ ...item, content: truncatedContent }, combineContentSourceOrigins(truncatedContent));
 }
 
-function truncateTextToTokenBudget(text: string, maxTokens: number): string {
-	if (maxTokens <= 0) return "";
+interface RetainedTextRange {
+	start: number;
+	end: number;
+	outputStart: number;
+}
+
+function truncateTextToTokenBudget(text: string, maxTokens: number): { text: string; ranges: RetainedTextRange[] } {
+	if (maxTokens <= 0) return { text: "", ranges: [] };
 	const maxChars = maxTokens * 4;
-	if (text.length <= maxChars) return text;
+	if (text.length <= maxChars) return { text, ranges: [{ start: 0, end: text.length, outputStart: 0 }] };
 	const omittedTokens = Math.max(1, approxTokenCount(text) - maxTokens);
 	const marker = `…${omittedTokens} tokens truncated…`;
-	if (maxChars <= marker.length + 2) return text.slice(0, maxChars);
+	if (maxChars <= marker.length + 2)
+		return { text: text.slice(0, maxChars), ranges: [{ start: 0, end: maxChars, outputStart: 0 }] };
 	const sideChars = Math.max(1, Math.floor((maxChars - marker.length) / 2));
-	return `${text.slice(0, sideChars)}${marker}${text.slice(-sideChars)}`;
+	return {
+		text: `${text.slice(0, sideChars)}${marker}${text.slice(-sideChars)}`,
+		ranges: [
+			{ start: 0, end: sideChars, outputStart: 0 },
+			{ start: text.length - sideChars, end: text.length, outputStart: sideChars + marker.length },
+		],
+	};
+}
+
+function retainedTextOrigin(value: object, ranges: RetainedTextRange[]): NativeItemOrigin {
+	const origin = getSourceOrigin(value);
+	if (!origin || origin.kind !== "source") return origin ?? { kind: "unknown", reason: "legacy-map-absent" };
+	const parts: NativeSourcePart[] = [];
+	for (const part of origin.parts) {
+		const transport = part.transportSpan;
+		if (!transport) {
+			parts.push({ ...part, coverage: "partial", sourceSpan: undefined, currentSourceSpan: undefined });
+			continue;
+		}
+		for (const range of ranges) {
+			const start = Math.max(range.start, transport.start);
+			const end = Math.min(range.end, transport.end);
+			if (start >= end) continue;
+			const source = part.sourceSpan;
+			const exact = source && source.end - source.start === transport.end - transport.start;
+			const current = part.currentSourceSpan;
+			parts.push({
+				...part,
+				coverage: "partial",
+				sourceSpan: exact
+					? { start: source.start + start - transport.start, end: source.start + end - transport.start }
+					: undefined,
+				currentSourceSpan:
+					exact && current
+						? { start: current.start + start - transport.start, end: current.start + end - transport.start }
+						: undefined,
+				transportSpan: {
+					start: range.outputStart + start - range.start,
+					end: range.outputStart + end - range.start,
+				},
+			});
+		}
+	}
+	return { kind: "source", parts };
+}
+
+function nativeSourceParts(value: object): NativeSourcePart[] {
+	const origin = getSourceOrigin(value);
+	return origin?.kind === "source" ? origin.parts : [];
+}
+
+function isPrepaidNativeItem(item: object, prepaid: ReadonlySet<string>): boolean {
+	const parts = nativeSourceParts(item);
+	return parts.length > 0 && parts.every(part => prepaid.has(part.entryId));
+}
+
+function nativeItemSource(item: object): NativeSourcePart | undefined {
+	const parts = nativeSourceParts(item);
+	return parts.length && parts.every(part => part.entryId === parts[0].entryId && part.projection === parts[0].projection) ? parts[0] : undefined;
+}
+
+function mergeNativeSourceItems(
+	ordinary: Array<Record<string, unknown>>,
+	additions: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+	if (!additions.length) return ordinary;
+	const seen = new Set(ordinary);
+	const pending: Array<{ item: Record<string, unknown>; order: number }> = [];
+	for (const item of additions) {
+		if (seen.has(item)) continue;
+		seen.add(item);
+		pending.push({ item, order: nativeItemSource(item)?.order ?? Infinity });
+	}
+	pending.sort((a, b) => a.order - b.order);
+	const result: Array<Record<string, unknown>> = [];
+	let index = 0;
+	for (const item of ordinary) {
+		const order = nativeItemSource(item)?.order;
+		while (index < pending.length && order !== undefined && pending[index].order < order)
+			result.push(pending[index++].item);
+		result.push(item);
+	}
+	while (index < pending.length) result.push(pending[index++].item);
+	return result;
+}
+
+/** Add independently selected users without moving or replacing ordinary source bytes. */
+export function unionNativeUserHistory(
+	ordinary: Array<Record<string, unknown>>,
+	candidates: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+	if (!candidates.length) return ordinary;
+	const selected = new Map<string, Record<string, unknown>>();
+	const unmapped: Array<Record<string, unknown>> = [];
+	for (const candidate of candidates) {
+		const source = nativeItemSource(candidate);
+		if (!source) {
+			unmapped.push(candidate);
+			continue;
+		}
+		const key = compactionSourceKey(source);
+		const prior = selected.get(key);
+		selected.set(key, prior ? unionNativeUserItem(prior, candidate) : candidate);
+	}
+	const result = ordinary.map(item => {
+		const source = nativeItemSource(item);
+		const candidate = source && isCompactionV2Message(item) ? selected.get(compactionSourceKey(source)) : undefined;
+		if (!candidate || !source) return item;
+		selected.delete(compactionSourceKey(source));
+		return item === candidate ? item : unionNativeUserItem(item, candidate);
+	});
+	return mergeNativeSourceItems(result, [...selected.values(), ...unmapped]);
+}
+
+function nativeMessageBlocks(item: Record<string, unknown>): Record<string, unknown>[] {
+	if (Array.isArray(item.content)) return item.content.filter(isRecord);
+	if (typeof item.content !== "string") return [];
+	const block = { type: "input_text", text: item.content };
+	const origin = getSourceOrigin(item);
+	return [origin ? setSourceOrigin(block, origin) : block];
+}
+
+function nativeBlockKey(block: object): string | undefined {
+	const parts = nativeSourceParts(block);
+	const first = parts[0];
+	if (
+		!first ||
+		parts.some(
+			part =>
+				part.entryId !== first.entryId || part.projection !== first.projection ||
+				(part.currentBlockIndex ?? part.blockIndex) !== (first.currentBlockIndex ?? first.blockIndex) ||
+				(part.status !== undefined && part.status !== "exact-current"),
+		)
+	)
+		return undefined;
+	return JSON.stringify([compactionSourceKey(first), first.currentBlockIndex ?? first.blockIndex]);
+}
+
+function unionNativeUserItem(
+	ordinary: Record<string, unknown>,
+	candidate: Record<string, unknown>,
+): Record<string, unknown> {
+	const blocks = nativeMessageBlocks(ordinary);
+	for (const candidateBlock of nativeMessageBlocks(candidate)) {
+		const key = nativeBlockKey(candidateBlock);
+		const index = key ? blocks.findIndex(block => nativeBlockKey(block) === key) : -1;
+		if (index >= 0) {
+			const existing = blocks[index];
+			if (existing === candidateBlock || nativeSourceParts(existing).every(part => part.coverage === "full"))
+				continue;
+			const merged = unionNativeTextBlock(existing, candidateBlock);
+			if (merged) {
+				blocks[index] = merged;
+				continue;
+			}
+		}
+		const blockIndex = nativeSourceParts(candidateBlock)[0]?.blockIndex;
+		const at =
+			typeof blockIndex === "number"
+				? blocks.findIndex(block => {
+						const other = nativeSourceParts(block)[0];
+						return other && typeof other.blockIndex === "number" && other.blockIndex > blockIndex;
+					})
+				: -1;
+		if (at < 0) blocks.push(candidateBlock);
+		else blocks.splice(at, 0, candidateBlock);
+	}
+	if (typeof ordinary.content === "string" && blocks.length === 1 && typeof blocks[0].text === "string") {
+		return setSourceOrigin(
+			{ ...ordinary, content: blocks[0].text },
+			getSourceOrigin(blocks[0]) ?? { kind: "unknown", reason: "unmapped-content" },
+		);
+	}
+	return setSourceOrigin({ ...ordinary, content: blocks }, combineContentSourceOrigins(blocks));
+}
+
+interface NativeTextFragment {
+	start: number;
+	end: number;
+	text: string;
+	part: NativeSourcePart;
+	priority: number;
+}
+
+function unionNativeTextBlock(
+	ordinary: Record<string, unknown>,
+	candidate: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+	if (typeof ordinary.text !== "string" || typeof candidate.text !== "string") return undefined;
+	const fragments: NativeTextFragment[] = [];
+	for (const [priority, block] of [ordinary, candidate].entries()) {
+		for (const part of nativeSourceParts(block)) {
+			const source = part.currentSourceSpan ?? part.sourceSpan;
+			const transport = part.transportSpan;
+			if (!source || !transport || source.end - source.start !== transport.end - transport.start) return undefined;
+			fragments.push({
+				start: source.start,
+				end: source.end,
+				text: (block.text as string).slice(transport.start, transport.end),
+				part,
+				priority,
+			});
+		}
+	}
+	if (!fragments.length) return undefined;
+	const boundaries = [...new Set(fragments.flatMap(fragment => [fragment.start, fragment.end]))].sort((a, b) => a - b);
+	let length = 0;
+	for (const fragment of fragments) {
+		const knownLength =
+			fragment.part.currentSourceLength ??
+			(fragment.part.status === undefined ? fragment.part.sourceLength : undefined);
+		length = Math.max(length, knownLength ?? fragment.end);
+	}
+	let text = "";
+	let previousEnd = 0;
+	const parts: NativeSourcePart[] = [];
+	for (let index = 0; index < boundaries.length - 1; index++) {
+		const start = boundaries[index];
+		const end = boundaries[index + 1];
+		let selected: NativeTextFragment | undefined;
+		for (const fragment of fragments)
+			if (fragment.start <= start && fragment.end >= end && (!selected || fragment.priority < selected.priority))
+				selected = fragment;
+		if (!selected) continue;
+		if (start > previousEnd) text += "[truncated]";
+		const outputStart = text.length;
+		text += selected.text.slice(start - selected.start, end - selected.start);
+		const original = selected.part.sourceSpan;
+		parts.push({
+			...selected.part,
+			coverage: "partial",
+			sourceSpan: original
+				? { start: original.start + start - selected.start, end: original.start + end - selected.start }
+				: undefined,
+			currentSourceSpan: selected.part.currentSourceSpan ? { start, end } : undefined,
+			transportSpan: { start: outputStart, end: text.length },
+		});
+		previousEnd = end;
+	}
+	if (previousEnd < length) text += "[truncated]";
+	const complete =
+		parts.reduce((total, part) => total + (part.transportSpan!.end - part.transportSpan!.start), 0) === length;
+	if (complete && parts.length === 1) parts[0].coverage = "full";
+	return setSourceOrigin({ ...ordinary, text }, { kind: "source", parts });
 }
 
 function approxTokenCount(text: string): number {
@@ -819,6 +1148,7 @@ export function storeCompactionV2PreserveData(response: CompactionV2Response, mo
 			version: "v2",
 			provider: model.provider,
 			replacementHistory: response.replacementHistory,
+			replacementOrigins: response.replacementOrigins ?? exportItemOrigins(response.replacementHistory),
 			usedTokens: response.usedTokens,
 			usage: response.usage,
 			retainedImageCount: response.retainedImageCount,
@@ -827,18 +1157,25 @@ export function storeCompactionV2PreserveData(response: CompactionV2Response, mo
 }
 
 /** Retrieve preserved OpenAI replacement history that V2 can extend. */
-export function getCompactionV2PreserveData(
-	preserveData: Record<string, unknown> | undefined,
-): { provider: string; replacementHistory: Array<Record<string, unknown>>; usedTokens: number } | undefined {
+export function getCompactionV2PreserveData(preserveData: Record<string, unknown> | undefined):
+	| {
+			provider: string;
+			replacementHistory: Array<Record<string, unknown>>;
+			replacementOrigins?: NativeItemOrigin[];
+			usedTokens: number;
+	  }
+	| undefined {
 	const candidate = preserveData?.[OPENAI_REMOTE_COMPACTION_PRESERVE_KEY];
 	if (!isRecord(candidate)) return undefined;
 	const provider = stringField(candidate, "provider");
 	if (!provider) return undefined;
 	if (!Array.isArray(candidate.replacementHistory)) return undefined;
-
+	const replacementOrigins = validateNativeItemOrigins(candidate.replacementOrigins);
+	importItemOrigins(candidate.replacementHistory, replacementOrigins);
 	return {
 		provider,
 		replacementHistory: candidate.replacementHistory as Array<Record<string, unknown>>,
+		replacementOrigins,
 		usedTokens: numberField(candidate, "usedTokens") ?? 0,
 	};
 }

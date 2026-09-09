@@ -137,6 +137,56 @@ const finalAnswer: AssistantMessage = {
 const frame = { tick: 0, now: 0 };
 
 describe("TranscriptContainer", () => {
+	it("reflects public middle replacement without changing either end", () => {
+		const transcript = new TranscriptContainer();
+		transcript.addChild(new Block(["first"], false));
+		transcript.addChild(new Block(["old-middle"], false));
+		transcript.addChild(new Block(["last"], false));
+		expect(transcript.renderViewport(100, 40, frame)).toEqual(["first", "", "old-middle", "", "last"]);
+		transcript.children[1] = new Block(["new-middle"], false);
+		expect(transcript.renderViewport(100, 40, frame)).toEqual(["first", "", "new-middle", "", "last"]);
+	});
+
+	it("keeps assigned child-array aliases observable across subsequent additions", () => {
+		const transcript = new TranscriptContainer();
+		const children = [new Block(["first"], false), new Block(["middle"], false)];
+		transcript.children = children;
+		transcript.addChild(new Block(["last"], false));
+		expect(transcript.renderViewport(100, 40, frame)).toEqual(["first", "", "middle", "", "last"]);
+		children[1] = new Block(["replacement"], false);
+		expect(transcript.renderViewport(100, 40, frame)).toEqual(["first", "", "replacement", "", "last"]);
+	});
+
+	it("synchronizes splice, defineProperty and truncation before managed mutations", () => {
+		const transcript = new TranscriptContainer();
+		transcript.addChild(new Block(["first"], false));
+		transcript.addChild(new Block(["middle"], false));
+		transcript.addChild(new Block(["last"], false));
+		transcript.renderViewport(100, 40, frame);
+		transcript.children.splice(1, 1, new Block(["spliced"], false));
+		transcript.addChild(new Block(["tail"], false));
+		expect(transcript.renderViewport(100, 40, frame)).toEqual(["first", "", "spliced", "", "last", "", "tail"]);
+		Object.defineProperty(transcript.children, "1", { value: new Block(["defined"], false) });
+		transcript.children.length = 2;
+		expect(transcript.renderViewport(100, 40, frame)).toEqual(["first", "", "defined"]);
+		transcript.clear();
+		transcript.addChild(new Block(["fresh"], false));
+		transcript.children[0] = new Block(["fresh replacement"], false);
+		expect(transcript.renderViewport(100, 40, frame)).toEqual(["fresh replacement"]);
+	});
+
+	it("does not remove a reused component whose first occurrence is committed", () => {
+		const transcript = new TranscriptContainer();
+		const repeated = new Block(["history"], true);
+		transcript.addChild(repeated);
+		const batch = transcript.peekFinalizedBatch(80, 0)!;
+		transcript.acknowledgeFinalizedBatch(batch.id);
+		transcript.addChild(repeated);
+		expect(transcript.canRemoveBlock(repeated)).toBe(false);
+		transcript.removeChild(repeated);
+		expect(transcript.render(80)).toEqual(["history", "", "history"]);
+	});
+
 	it("captures mutable by default and append-only declarations permanently", () => {
 		const transcript = new TranscriptContainer();
 		const mutable = new Block(["mutable"], false) as Block & {
