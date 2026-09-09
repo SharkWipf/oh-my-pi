@@ -16,6 +16,7 @@
 
 ### Fixed
 
+- Notes-backed local rollovers preserve selected originals without overriding extension-owned cuts, keep latest requests once in chronological replay, restore branch-local notebook state across resume and clear boundaries, and expose original input and provenance alongside delivered raw history.
 - Automatic snapcompact frame rescue no longer commits a smaller frame window when its text spill increases local context size; genuine reductions remain eligible even when they do not clear the headroom band.
 - Legacy archive migration now reports unavailable original source boundaries and current original-image references before replacing installed history, instead of treating a fresh suffix as a complete original baseline.
 - Automatic image-drop rescue now skips protected source entries while still removing unselected images; explicit image removal and `/shake images` continue to override preservation.
@@ -65,6 +66,7 @@
 - Transcript retirement and tail updates skip already committed blocks while preserving public middle-child replacements and externally assigned child arrays.
 - Compacted selected originals now retain their own text/image coordinates through reload and repeated compaction, without replacing an ordinarily retained expanded submission.
 - Fixed physical attribution joining original-input and expanded-delivery coverage solely by journal entry ID; reconstructed and prepared inventories now keep their distinct physical charges without inflating shared ownership.
+- Ordinary turns prepare preservation policy only after finding an eligible pruning victim. Full selected-user, complete non-user, and pending-live protection still applies before mutation, including source ownership checks and minimum-savings revalidation.
 ### Fixed
 
 - Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.
