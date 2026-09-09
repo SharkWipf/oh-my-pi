@@ -18,13 +18,14 @@
  * - history://current/full - Full, caller-bound current branch history (experimental)
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, UserMessage } from "@oh-my-pi/pi-ai";
 import type { AgentRef } from "../registry/agent-registry";
 import { AgentRegistry } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
 import { formatSessionHistoryMarkdown } from "../session/session-history-format";
 import {
 	bashExecutionToText,
+	getOriginalSourceMessage,
 	pythonExecutionToText,
 	type BashExecutionMessage,
 	type BranchSummaryMessage,
@@ -80,9 +81,46 @@ function appendTextContent(lines: string[], content: string | readonly { type: s
 	}
 }
 
+function appendInputContent(lines: string[], message: UserMessage | CustomMessage): void {
+	lines.push(
+		"Provenance:",
+		jsonFence(
+			JSON.stringify(
+				{ producer: message.producer ?? { type: "unknown" }, attribution: message.attribution ?? null },
+				null,
+				2,
+			),
+		),
+	);
+	const submission = message.originalSubmission;
+	if (submission) lines.push("#### delivered content");
+	appendTextContent(lines, message.content);
+	if (!submission) return;
+
+	// Custom slash-command expansions share the accepted-original reader;
+	// their recorded role and delivered body remain unchanged above.
+	const original = getOriginalSourceMessage(message.role === "user" ? message : { ...message, role: "user" });
+	lines.push("#### original submission");
+	appendTextContent(lines, original.content);
+	if (submission.imageLinks || submission.compactionOverride) {
+		lines.push(
+			jsonFence(
+				JSON.stringify(
+					{ imageLinks: submission.imageLinks, compactionOverride: submission.compactionOverride },
+					null,
+					2,
+				),
+			),
+		);
+	}
+}
+
 function appendRawMessage(lines: string[], message: AgentMessage): void {
 	switch (message.role) {
 		case "user":
+			lines.push("### user");
+			appendInputContent(lines, message);
+			return;
 		case "developer":
 			lines.push(`### ${message.role}`);
 			appendTextContent(lines, message.content);
@@ -166,7 +204,8 @@ function appendRawMessage(lines: string[], message: AgentMessage): void {
 		case "hookMessage": {
 			const customMessage = message as CustomMessage | HookMessage;
 			lines.push(`### ${customMessage.role} (${customMessage.customType})`);
-			appendTextContent(lines, customMessage.content);
+			if (customMessage.role === "custom") appendInputContent(lines, customMessage);
+			else appendTextContent(lines, customMessage.content);
 			return;
 		}
 		case "branchSummary": {

@@ -305,11 +305,11 @@ class SessionEntryIndex {
 		}
 	}
 
-	branchFold(): SessionBranchFold {
-		if (this.#fold.id === this.#leaf) return this.#fold;
+	branchFold(fromId: string | null = this.#leaf): SessionBranchFold {
+		if (this.#fold.id === fromId) return this.#fold;
 		const pending: SessionEntry[] = [];
 		const seen = new Set<string>();
-		let cursor = this.#leaf ? this.#entriesById.get(this.#leaf) : undefined;
+		let cursor = fromId ? this.#entriesById.get(fromId) : undefined;
 		while (cursor && !seen.has(cursor.id) && cursor.id !== this.#fold.id && cursor.id !== this.#boundaryFold?.id) {
 			seen.add(cursor.id);
 			pending.push(cursor);
@@ -325,8 +325,7 @@ class SessionEntryIndex {
 		return { ...this.#assistantUsage };
 	}
 
-	#sourceContextPath(compaction: CompactionEntry): NonNullable<SessionBranchFold["sourceContext"]> {
-		const fold = this.branchFold();
+	#sourceContextPath(compaction: CompactionEntry, fold: SessionBranchFold): NonNullable<SessionBranchFold["sourceContext"]> {
 		if (fold.sourceContext?.compactionId === compaction.id) return fold.sourceContext;
 		const representation = getCompactionSourceRepresentation(compaction.preserveData)!;
 		const ancestry = this.pathTo(compaction.id);
@@ -342,6 +341,8 @@ class SessionEntryIndex {
 		const referenced = new Set<string>();
 		for (const part of representation.layout) if ("entryId" in part) referenced.add(part.entryId);
 		for (const run of representation.coverage) referenced.add(run.entryId);
+		const request = fold.controls.rolloverUserRequest;
+		if (request) referenced.add(request.id);
 		const path: SessionEntry[] = [];
 		const before = new Map<string, number>();
 		const orders = new Map<string, number>();
@@ -363,10 +364,13 @@ class SessionEntryIndex {
 	}
 
 	/** Walk only actual replay; the existing boundary fold holds cold source inventory. */
-	contextPath(options?: BuildSessionContextOptions): { path: SessionEntry[]; inventory?: SessionContextSourceInventory } {
+	contextPath(options?: BuildSessionContextOptions, fromId: string | null = this.#leaf): {
+		path: SessionEntry[]; controls: SessionContextControlState; inventory?: SessionContextSourceInventory;
+	} {
+		const fold = this.branchFold(fromId);
 		const path: SessionEntry[] = [];
 		const seen = new Set<string>();
-		let cursor = this.leafEntry();
+		let cursor = fromId ? this.#entriesById.get(fromId) : undefined;
 		let compaction: CompactionEntry | undefined;
 		let first: string | undefined;
 		while (cursor && !seen.has(cursor.id)) {
@@ -380,10 +384,10 @@ class SessionEntryIndex {
 						first = compaction.providerReplayThroughEntryId;
 						if (!first) break;
 					} else if (getCompactionSourceRepresentation(compaction.preserveData) && !getOpenAiRemoteCompactionPayload(compaction)) {
-						const source = this.#sourceContextPath(compaction);
+						const source = this.#sourceContextPath(compaction, fold);
 						const result = source.path.slice();
 						for (let i = path.length - 2; i >= 0; i--) result.push(path[i]);
-						return { path: result, inventory: source.inventory };
+						return { path: result, controls: fold.controls, inventory: source.inventory };
 					} else first = compaction.firstKeptEntryId;
 				}
 			}
@@ -391,7 +395,11 @@ class SessionEntryIndex {
 			cursor = cursor.parentId ? this.#entriesById.get(cursor.parentId) : undefined;
 		}
 		path.reverse();
-		return { path };
+		// A plain notes boundary may have cut past its request. Recover only that
+		// entry from the existing branch fold, not the entire discarded turn.
+		const request = !options?.transcript && compaction ? fold.controls.rolloverUserRequest : undefined;
+		if (request && !seen.has(request.id)) path.unshift(request);
+		return { path, controls: fold.controls };
 	}
 
 	clear(): void {
@@ -2824,7 +2832,7 @@ export class SessionManager {
 			return buildSessionContext(this.#entries, this.#index.leafId(), this.#index.entriesById(), options);
 		}
 		const context = this.#index.contextPath(options);
-		return buildSessionContextFromPath(context.path, options, this.#index.branchFold().controls, context.inventory);
+		return buildSessionContextFromPath(context.path, options, context.controls, context.inventory);
 	}
 
 	/** Strip stale OpenAI Responses assistant replay metadata from loaded entries. */

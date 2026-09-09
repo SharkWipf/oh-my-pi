@@ -669,17 +669,15 @@ export class SessionMaintenance {
 	}
 
 	async #pruneToolOutputs(operation: CompactionOperation): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
-		const protectedSourceEntryIds = await this.#host.protectedSourceEntryIds();
 		if (!this.#compactionOwnerValid(operation)) throw new CompactionCancelledError();
 		let rewrite: Promise<void> | undefined;
 		const branchEntries = operation.manager.getBranch();
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
-		const result = pruneToolOutputs(
+		const result = await pruneToolOutputs(
 			branchEntries,
 			this.#tokenizer,
 			this.#withPlanProtection({
 				...DEFAULT_PRUNE_CONFIG,
-				protectedSourceEntryIds,
 				pruneUseless: this.#host.settings.getGroup("compaction").dropUseless,
 				// Cache-stable boundary: never re-write the warm, already-sent prefix
 				// (deep stale/age victims) or summarized-away entries every turn.
@@ -689,6 +687,11 @@ export class SessionMaintenance {
 					this.#host.model()?.thinking?.prefixBinding === true ? 0 : PRUNE_CACHE_WARM_SUFFIX_TOKENS,
 			}),
 			(maps, apply) => { rewrite = this.#rewriteSources(operation, maps, apply); },
+			async () => {
+				const protectedIds = await this.#host.protectedSourceEntryIds();
+				if (!this.#compactionOwnerValid(operation)) throw new CompactionCancelledError();
+				return protectedIds;
+			},
 		);
 		await rewrite;
 		if (!this.#compactionOwnerValid(operation)) throw new CompactionCancelledError();
@@ -717,16 +720,14 @@ export class SessionMaintenance {
 	async #pruneStaleToolResults(operation: CompactionOperation): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
 		const { supersedeReads, dropUseless } = this.#host.settings.getGroup("compaction");
 		if (!supersedeReads && !dropUseless) return undefined;
-		const protectedSourceEntryIds = await this.#host.protectedSourceEntryIds();
 		if (!this.#compactionOwnerValid(operation)) throw new CompactionCancelledError();
 		let rewrite: Promise<void> | undefined;
 		const branchEntries = operation.manager.getBranch();
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
-		const result = pruneSupersededToolResults(
+		const result = await pruneSupersededToolResults(
 			branchEntries,
 			this.#tokenizer,
 			this.#withPlanProtection({
-				protectedSourceEntryIds,
 				supersedeKey: supersedeReads ? readToolSupersedeKey : undefined,
 				pruneUseless: dropUseless,
 				protectedTools: [...DEFAULT_PRUNE_CONFIG.protectedTools],
@@ -738,6 +739,11 @@ export class SessionMaintenance {
 				suffixTokenLimit: this.#host.model()?.thinking?.prefixBinding === true ? 0 : undefined,
 			}),
 			(maps, apply) => { rewrite = this.#rewriteSources(operation, maps, apply); },
+			async () => {
+				const protectedIds = await this.#host.protectedSourceEntryIds();
+				if (!this.#compactionOwnerValid(operation)) throw new CompactionCancelledError();
+				return protectedIds;
+			},
 		);
 		await rewrite;
 		if (!this.#compactionOwnerValid(operation)) throw new CompactionCancelledError();
@@ -1047,7 +1053,7 @@ export class SessionMaintenance {
 				!customInstructions &&
 				!options?.internalGuidance
 			) {
-				const result = await this.#compactExperimentalContext(activeModel, compactionAbortController);
+				const result = await this.#compactExperimentalContext(activeModel, compactionAbortController, operation);
 				options?.onComplete?.(result);
 				return result;
 			}
@@ -1426,14 +1432,18 @@ export class SessionMaintenance {
 	 * rewriting the canonical transcript. Explicit compact modes and focused
 	 * manual compactions deliberately bypass this path.
 	 */
-	async #compactExperimentalContext(model: Model, signalController: AbortController): Promise<CompactionResult> {
-		const entries = this.#host.sessionManager.getBranch();
+	async #compactExperimentalContext(
+		model: Model,
+		signalController: AbortController,
+		operation: CompactionOperation,
+	): Promise<CompactionResult> {
+		const entries = operation.manager.getBranch();
 		const settings = this.#host.settings.getGroup("compaction");
-		const preparation = prepareCompaction(entries, settings, model, this.#tokenizer);
+		const preparation = this.#prepareSourceCompaction(entries, settings, model, operation.selection);
 		if (!preparation) throw new Error("Nothing to compact (session too small or already rolled over)");
+		this.#captureCompactionSources(operation, entries, preparation);
 
 		const sourceLeafId = entries.at(-1)?.id;
-		const sourceSessionId = this.#host.sessionId();
 		const sourceModel = `${model.provider}/${model.id}`;
 		let hookCompaction: CompactionResult | undefined;
 		let fromExtension = false;
@@ -1454,7 +1464,7 @@ export class SessionMaintenance {
 		if (
 			signalController.signal.aborted ||
 			!this.#usesExperimentalContextManagement() ||
-			this.#host.sessionId() !== sourceSessionId ||
+			!this.#compactionInputValid(operation) ||
 			this.#host.sessionManager.getBranch().at(-1)?.id !== sourceLeafId ||
 			(this.#model && `${this.#model.provider}/${this.#model.id}` !== sourceModel)
 		) {
@@ -1466,12 +1476,20 @@ export class SessionMaintenance {
 		if (
 			signalController.signal.aborted ||
 			!this.#usesExperimentalContextManagement() ||
-			this.#host.sessionId() !== sourceSessionId ||
+			!this.#compactionInputValid(operation) ||
 			this.#host.sessionManager.getBranch().at(-1)?.id !== sourceLeafId ||
 			(this.#model && `${this.#model.provider}/${this.#model.id}` !== sourceModel)
 		) {
 			throw new CompactionCancelledError(undefined, { cause: signalController.signal.reason });
 		}
+		// A local window boundary discards a prefix; it does not summarize that source.
+		if (prepared.kind !== "fromHook" && preparation.sourcePreserveData) {
+			delete preparation.sourcePreserveData.sourceRepresentation.aggregate;
+		}
+		// An extension-provided result owns its cut and representation, as in ordinary compaction.
+		const preserveData = prepared.kind !== "fromHook" && preparation.sourcePreserveData
+			? { ...prepared.preserveData, ...preparation.sourcePreserveData }
+			: prepared.preserveData;
 		const result =
 			prepared.kind === "fromHook"
 				? {
@@ -1484,7 +1502,7 @@ export class SessionMaintenance {
 							version: 1,
 							hookDetails: prepared.details,
 						},
-						preserveData: prepared.preserveData,
+						preserveData,
 					}
 				: {
 						summary: experimentalContextRolloverPrompt,
@@ -1492,15 +1510,17 @@ export class SessionMaintenance {
 						firstKeptEntryId: preparation.firstKeptEntryId,
 						tokensBefore: preparation.tokensBefore,
 						details: { kind: "experimental-context-rollover", version: 1 },
-						preserveData: prepared.preserveData,
+						preserveData,
 					};
-		await this.#commitCompactionEntry({
+		const installed = await this.#commitCompactionEntry({
+			operation,
 			...result,
 			fromExtension,
 			method: undefined,
 			codexCompaction: undefined,
 			advisorResetReason: "experimental-context-rollover",
 		});
+		if (!installed) throw new CompactionCancelledError();
 		this.#experimentalNotesReminderBoundaryId = undefined;
 		return {
 			...result,
@@ -1526,16 +1546,12 @@ export class SessionMaintenance {
 		const model = this.#model;
 		if (!model || this.isCompacting) return COMPACTION_CHECK_NONE;
 		const settings = this.#host.settings.getGroup("compaction");
-		const branch = this.#host.sessionManager.getBranch();
-		const preparation = prepareCompaction(branch, settings, model, this.#tokenizer);
-		if (!preparation) return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
-		const sourceLeafId = branch.at(-1)?.id;
-		const sourceSessionId = this.#host.sessionId();
 		const sourceModel = `${model.provider}/${model.id}`;
 
 		this.cancelSpeculation();
 		this.#autoCompactionAbortController?.abort();
 		const controller = new AbortController();
+		const operation = this.#captureCompactionOperation(controller.signal);
 		this.#autoCompactionAbortController = controller;
 		const generation = this.#host.promptGeneration();
 		const suppressContinuation = options.suppressContinuation === true;
@@ -1545,14 +1561,21 @@ export class SessionMaintenance {
 			options.terminalTextAnswer ?? isTerminalTextAssistantAnswer(this.#host.findLastAssistantMessage());
 		const detachPostCommit = options.detachPostCommit === true;
 		try {
+			await this.#preflightCompactionOperation(operation);
+			const branch = operation.manager.getBranch();
+			const preparation = this.#prepareSourceCompaction(branch, settings, model, operation.selection);
+			if (!preparation) return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
+			this.#captureCompactionSources(operation, branch, preparation);
+			const sourceLeafId = branch.at(-1)?.id;
 			await this.#emitLifecycleEvent({ type: "auto_compaction_start", reason, action: "context-full" }, false);
-			if (controller.signal.aborted) {
+			if (controller.signal.aborted || !this.#compactionInputValid(operation)) {
 				await this.#emitLifecycleEvent(
 					{
 						type: "auto_compaction_end",
 						action: "context-full",
 						result: undefined,
-						aborted: true,
+						aborted: controller.signal.aborted,
+						skipped: !controller.signal.aborted,
 						willRetry: false,
 					},
 					detachPostCommit,
@@ -1566,7 +1589,7 @@ export class SessionMaintenance {
 				const hookResult = (await this.#host.extensionRunner.emit({
 					type: "session_before_compact",
 					preparation,
-					branchEntries: this.#host.sessionManager.getBranch(),
+					branchEntries: branch,
 					customInstructions: undefined,
 					signal: controller.signal,
 				})) as SessionBeforeCompactResult | undefined;
@@ -1588,7 +1611,7 @@ export class SessionMaintenance {
 					fromExtension = true;
 				}
 			}
-			if (controller.signal.aborted || !this.#usesExperimentalContextManagement()) {
+			if (controller.signal.aborted || !this.#usesExperimentalContextManagement() || !this.#compactionInputValid(operation)) {
 				await this.#emitLifecycleEvent(
 					{
 						type: "auto_compaction_end",
@@ -1609,7 +1632,7 @@ export class SessionMaintenance {
 			if (
 				controller.signal.aborted ||
 				!this.#usesExperimentalContextManagement() ||
-				this.#host.sessionId() !== sourceSessionId ||
+				!this.#compactionInputValid(operation) ||
 				this.#host.sessionManager.getBranch().at(-1)?.id !== sourceLeafId ||
 				(this.#model && `${this.#model.provider}/${this.#model.id}` !== sourceModel)
 			) {
@@ -1626,6 +1649,14 @@ export class SessionMaintenance {
 				);
 				return COMPACTION_CHECK_NONE;
 			}
+			// A local window boundary discards a prefix; it does not summarize that source.
+			if (prepared.kind !== "fromHook" && preparation.sourcePreserveData) {
+				delete preparation.sourcePreserveData.sourceRepresentation.aggregate;
+			}
+			// An extension-provided result owns its cut and representation, as in ordinary compaction.
+			const preserveData = prepared.kind !== "fromHook" && preparation.sourcePreserveData
+				? { ...prepared.preserveData, ...preparation.sourcePreserveData }
+				: prepared.preserveData;
 			const result =
 				prepared.kind === "fromHook"
 					? {
@@ -1638,7 +1669,7 @@ export class SessionMaintenance {
 								version: 1,
 								hookDetails: prepared.details,
 							},
-							preserveData: prepared.preserveData,
+							preserveData,
 						}
 					: {
 							summary: experimentalContextRolloverPrompt,
@@ -1646,9 +1677,10 @@ export class SessionMaintenance {
 							firstKeptEntryId: preparation.firstKeptEntryId,
 							tokensBefore: options.triggerContextTokens ?? preparation.tokensBefore,
 							details: { kind: "experimental-context-rollover", version: 1 },
-							preserveData: prepared.preserveData,
+							preserveData,
 						};
-			await this.#commitCompactionEntry({
+			const installed = await this.#commitCompactionEntry({
+				operation,
 				...result,
 				fromExtension,
 				method: undefined,
@@ -1656,6 +1688,13 @@ export class SessionMaintenance {
 				advisorResetReason: "experimental-context-rollover",
 				detachExtensionEmit: detachPostCommit,
 			});
+			if (!installed) {
+				await this.#emitLifecycleEvent({
+					type: "auto_compaction_end", action: "context-full", result: undefined,
+					aborted: controller.signal.aborted, skipped: !controller.signal.aborted, willRetry: false,
+				}, detachPostCommit);
+				return COMPACTION_CHECK_NONE;
+			}
 			this.#experimentalNotesReminderBoundaryId = undefined;
 
 			const compactionResult: CompactionResult = {
@@ -1675,13 +1714,12 @@ export class SessionMaintenance {
 				},
 				detachPostCommit,
 			);
+			if (!this.#compactionOwnerValid(operation, installed.id)) return COMPACTION_CHECK_NONE;
 			if (!safeToContinue) {
 				const warning = compactionDeadEndWarning("clear large tool output");
-				const entry = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
-				if (entry) {
-					entry.warning = warning;
-					await this.#host.sessionManager.rewriteEntries();
-				}
+				installed.warning = warning;
+				await operation.manager.rewriteEntries();
+				if (!this.#compactionOwnerValid(operation, installed.id)) return COMPACTION_CHECK_NONE;
 				this.#host.emitNotice("warning", warning, "compaction");
 				return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
 			}
