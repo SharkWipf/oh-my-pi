@@ -2632,7 +2632,7 @@ export class SessionManager {
 					if (candidate.id !== locator.entryId) return;
 					if (journalId === locator.sessionId) entry = candidate;
 					return false;
-				}, this.#storage.existsSync(locator.journalPath) ? this.#storage : new FileSessionStorage());
+				}, this.#storage.existsSync(locator.journalPath) ? this.#storage : new FileSessionStorage(), new Set<string>().add(locator.entryId));
 			} catch (error) { if (!isEnoent(error)) throw error; }
 		}
 		return entry?.type === "message" || entry?.type === "custom_message" ? entry : undefined;
@@ -2712,7 +2712,7 @@ export class SessionManager {
 					if (entry.type === "session") { journalId = entry.id; return; }
 					if (journalId === journalLocator.sessionId && needed.has(entry.id) && (entry.type === "message" || entry.type === "custom_message")) entries.set(entry.id, entry);
 					if (entries.size === needed.size) return false;
-				}, this.#storage.existsSync(journalLocator.journalPath) ? this.#storage : new FileSessionStorage());
+				}, this.#storage.existsSync(journalLocator.journalPath) ? this.#storage : new FileSessionStorage(), needed);
 			} catch (error) { if (!isEnoent(error)) throw error; }
 			return entries;
 		};

@@ -20,6 +20,45 @@ function append(session: SessionManager, text: string) {
 }
 
 // These regressions replace the former capture-ID/byte-remapping contract.
+test("indexed originals bind the current journal namespace and revoke a reset during the first point read", async () => {
+	class PausedIndexStorage extends FileSessionStorage {
+		pause = false;
+		entered = Promise.withResolvers<void>();
+		release = Promise.withResolvers<void>();
+		override async readJsonlLinesById(filePath: string, ids: ReadonlySet<string>) {
+			const read = super.readJsonlLinesById(filePath, ids);
+			if (this.pause) {
+				this.pause = false;
+				this.entered.resolve();
+				await this.release.promise;
+			}
+			return read;
+		}
+	}
+	using temp = TempDir.createSync("requirements-index-authority-");
+	const storage = new PausedIndexStorage();
+	const session = SessionManager.create(temp.path(), temp.path(), storage);
+	try {
+		const id = append(session, "Authoritative original A");
+		await session.ensureOnDisk(); await session.flush();
+		const source = session.getRequirementsSource(id)!;
+		storage.pause = true;
+		const interrupted = session.resolveRequirementsEvidence(source.key, source);
+		await storage.entered.promise;
+		session.appendResetBoundary(); await session.flush();
+		storage.release.resolve();
+		expect(await interrupted).toBeUndefined();
+		expect((await session.resolveRequirementsEvidence(source.key, source, { context: false }))?.units[0].text).toBe("Authoritative original A");
+		const file = session.getSessionFile()!;
+		const journal = await storage.readText(file);
+		const currentId = session.getSessionId();
+		const otherId = (currentId[0] === "0" ? "1" : "0") + currentId.slice(1);
+		await storage.writeText(file, journal.replace(JSON.stringify(session.getSessionId()), JSON.stringify(otherId)));
+		expect(await session.resolveRequirementsEvidence(source.key, source, { context: false })).toBeUndefined();
+	} finally { await session.close(); }
+});
+
+
 describe("accepted original source authority", () => {
 	test("independent accepted entries retain identity and pre-expansion image ordering", async () => {
 		const session = manager();
