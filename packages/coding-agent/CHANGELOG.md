@@ -57,6 +57,7 @@
 - Requirements extraction, literal adoption and restoration retain the initiating lifecycle signal through asynchronous evidence preparation. Disposing the owning session prevents delayed preparation from issuing fresh model calls or reacquiring publication authority, and aborts in-flight requirements requests.
 ### Fixed
 
+- `/compact` no longer leaves retained tool cards reduced to bare Eval/Todo labels; their details remain available immediately after the transcript rebuild.
 - Streaming updates no longer cross queued message boundaries, which could lose assistant text and leave an orphaned running tool card that squeezed subsequent transcript entries into collapsed rows.
 - TODO changes made inside Eval now persist and refresh the TODO pane; subagent completion reconciliation no longer restores an older displayed plan over the current session plan.
 ### Fixed
