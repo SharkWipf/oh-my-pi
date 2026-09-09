@@ -81,13 +81,20 @@ export interface CompactionMessageManagerOptions {
 const STATES: readonly CompactionMessageState[] = ["never", "auto", "always"];
 const ROLES: readonly CompactionMessageRole[] = ["user", "assistant", "tool", "custom"];
 const GLYPHS: Record<CompactionMessageState, string> = { never: "[ ]", auto: "[-]", always: "[*]" };
+const LEGEND = [
+	"Manual: [ ] Never · [-] Auto (no override) · [*] Always",
+	"A: selected for compaction via filter Keep/manual Always; [-] can have A.",
+	"H: recent protection · F#/R#: first/recent ranks · i Inspect: why",
+	"Classifier: + saved · ! failed · x canceled · spinner: queued/running",
+];
 const HELP = [
 	"Context: active branch, after the current clear boundary. Oldest first, newest at bottom. Filters hide sources; they never change policy or reset/backfill scope.",
-	"Never [ ]: n. No custom protection; vanilla may still retain or summarize it. Auto [-]: - / Backspace / r. Follow current policy, without erasing tags. Always [*]: y / *. Manual candidate, subject to the uniform cap. Enter / Space cycle.",
-	"H is temporary most-recent protection, even for stored Never. F/R positions come from actual first/recent policy selection, never the visible row number. A is admitted Always, not merely stored Always.",
-	"Heuristic → Regex → stored Classifier policy → Final Regex → Manual. Auto is neutral, not inferred Always. Within a stage Keep wins over Never, then Auto.",
-	"Manual Always and current H retain raw content and bypass every long-pruning mode, including Exclude. Automatic candidates outside H use configured pruning. Original images are not dropped to meet a text limit.",
-	"One mixed-role Always cap includes /keep and H overlap. Complete tool exchanges are indivisible and charged by linked source count or source quota. Denying Always does not remove independent first/recent/H or ordinary retention.",
+	"The checkbox is only your saved manual override, not the effective keep decision. Never [ ]: n; rejects extra retention, not normal recent history or summarization. Auto [-]: - / Backspace / r; no manual override, so filters may still select it without changing the checkbox. Always [*]: y / *; requests retention subject to Rule / Manual Keep Limit. Enter / Space cycle.",
+	"A means this message is actually selected by Rule / Manual Keep Limit, requested by either automatic filter Keep or manual Always. A does not change [-] into [*]. Inspect shows which rule or manual choice requested it. A is a current selection preview, not proof that compaction has run.",
+	"H is current most-recent protection, even for saved Never. F#/R# are ranks in the actual First/Recent selections: F1 is the oldest selected message; R1 is the newest. They are not visible row numbers. Classifier + means saved categories, ! failed, x canceled; a spinner means queued/running, not a change to the manual override.",
+	"Heuristic → Regex → saved category rules → Final Regex → Manual. Auto makes no decision at that stage; later non-Auto rules take precedence. Within a stage Keep wins over Never, then Auto.",
+	"Manual Always and current H retain intact content and bypass long-message pruning, including Exclude. Other automatic selections use configured pruning; text trimming retains original images.",
+	"Rule / Manual Keep Limit selects filter Keep and manual Always messages using a separate allowance with the First/Recent limit value. Complete tool exchanges stay together. Denial does not remove independent First/Recent/H or normal recent retention; overlaps are kept once.",
 	"Current policy / next-compaction preview are not installed representation. Use Inspect for source facts; Usage for physical totals; Details for emitted group inventory. Estimates and unavailable attribution remain labeled.",
 	"c reclassifies the selected real user, retaining valid prior tags until success. C backfills missing/current-unusable tags across the whole current scope, including hidden rows. Many requests/tokens may cost money; choose workers before launch.",
 	"Classifier job offers Cancel backfill and explicit missing-only Resume. Closing this view does not cancel session work. Only queued/running rows spin; failures remain visible and retryable.",
@@ -854,8 +861,9 @@ export class CompactionMessageManagerComponent implements Component {
 		const title = this.#menu
 			? this.#menuTitle
 			: (this.#document?.title ?? (this.#inputKind === "workers" ? "Classifier workers" : "Context"));
+		const showLegend = !this.#menu && !this.#document && this.#inputKind !== "workers";
 		if (height >= 3) out.push(fit(theme.bold(singleLine(`${title} · ${summary.scope}`))));
-		if (height >= 7)
+		if (height >= 7 && (!showLegend || height >= 12))
 			out.push(
 				fit(
 					singleLine(
@@ -863,7 +871,7 @@ export class CompactionMessageManagerComponent implements Component {
 					),
 				),
 			);
-		if (height >= 9 && !this.#menu && !this.#document)
+		if (height >= 12 && !this.#menu && !this.#document)
 			out.push(
 				fit(
 					singleLine(
@@ -873,6 +881,13 @@ export class CompactionMessageManagerComponent implements Component {
 					),
 				),
 			);
+		if (showLegend) {
+			for (const line of LEGEND) {
+				const wrapped = wrapTextWithAnsi(line, Math.max(1, width));
+				if (out.length + wrapped.length > height - 2) break;
+				for (const part of wrapped) out.push(fit(theme.fg("dim", part)));
+			}
+		}
 		this.#bodyStart = out.length;
 		this.#bodyRows = Math.max(0, height - out.length - 1);
 		let active = !!summary.job && (summary.job.queued > 0 || summary.job.running > 0);

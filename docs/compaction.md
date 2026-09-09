@@ -525,6 +525,8 @@ For example, First = 50 messages, Recent = 250 messages and Newest first select 
 
 Each limit offers Off (no selection), All (all eligible messages), a positive whole-message count, a nonnegative token budget, or 0–100% of the active model's maximum context size. Percentages are not based on current usage or free space. For the linked Rule / Manual Keep selection only, Off and All mean no cap; zero tokens or zero percent is a finite zero-token allowance, which can still admit zero-token messages until a positive-cost message is reached. Token budgets keep whole messages and stop before the first over-budget message. Long-message pruning applies only to automatic retention; text-trimming modes retain images, while `exclude` skips the whole message from extra retention. Manual Always and protected recent messages are exempt.
 
+The normal `/context` list keeps a legend visible. Its checkbox is the saved manual override: `[ ]` Never, `[-]` Auto (no override), or `[*]` Always. Separate markers show the current selection for compaction, not content already installed in model context: `A` means admission through Rule / Manual Keep Limit, from automatic filter Keep or manual Always; `H` means recent protection; `F#` and `R#` are First/Recent selection ranks, not visible row numbers. An Auto row can therefore show `A` without its checkbox changing. `i` Inspect names the requesting rule/manual choice from existing policy facts, and `?` explains precedence and classifier status markers. Short terminals prioritize the manual/selection distinction while retaining navigable message rows; classifier details remain in Help.
+
 ### Defaults
 
 From `settings-schema.ts`:

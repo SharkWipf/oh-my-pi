@@ -348,6 +348,25 @@ export class SelectorController {
 			const reasons = selection.reasons(id);
 			const candidate = query.inspectCandidate(id, source.manual === "keep" || reasons.hardRecent);
 			const work = session.getMessageClassificationRowStatus(id);
+			const automatic = stages
+				? stages.finalRegex !== "auto"
+					? stages.finalRegex
+					: stages.classifier !== "auto"
+						? stages.classifier
+						: stages.regex !== "auto"
+							? stages.regex
+							: stages.heuristic
+				: undefined;
+			const keepRequestSource =
+				source.manual === "keep"
+					? "manual Always (/keep or /context)"
+					: stages?.finalRegex === "keep"
+						? "Final regex Keep"
+						: stages?.classifier === "keep"
+							? "saved category rule Keep"
+							: stages?.regex === "keep"
+								? "regex Keep"
+								: "automatic filter Keep";
 			const lines = [
 				"Current policy (not installed bytes)",
 				`Source: ${id}`,
@@ -358,8 +377,9 @@ export class SelectorController {
 							`Complete group raw quota: ${source.memberIds.reduce((tokens, memberId) => tokens + (query!.inspectCandidate(memberId, true)?.quotaTokens ?? 0), 0)} estimated tokens; admission is indivisible.`,
 						]
 					: []),
-				`Stored manual: ${manualLabel(source.manual)}`,
-				`Automatic result: ${stages ? manualLabel(stages.finalRegex !== "auto" ? stages.finalRegex : stages.classifier !== "auto" ? stages.classifier : stages.regex !== "auto" ? stages.regex : stages.heuristic) : "unavailable"}`,
+				`Stored manual: ${source.manual === "auto" ? "[-] Auto — no manual override; filters may still select this message" : manualLabel(source.manual)}`,
+				`Automatic filter result: ${automatic === "keep" ? "Keep (not a manual Always override)" : automatic === "exclude" ? "Never" : automatic === "auto" ? "Auto (no filter decision)" : "unavailable"}`,
+				`A marker: ${reasons.always ? `selected by Rule / Manual Keep Limit; requested by ${keepRequestSource}. The saved manual state is unchanged.` : "absent — not selected by Rule / Manual Keep Limit; other selection reasons may still apply."}`,
 				`Stages: heuristic ${stages?.heuristic}; regex ${stages?.regex}; classifier ${stages?.classifier}; Final ${stages?.finalRegex}; manual ${stages?.manual}`,
 				`Selecting reasons: ${
 					Object.entries(reasons)
@@ -627,7 +647,7 @@ export class SelectorController {
 					return "Cannot calculate this percentage without the active model's maximum context size. Your setting is unchanged.";
 				const quota = selection.quota[group === "hardRecent" ? "H" : group];
 				const blocker = selection.blockers[group];
-				return `${quota.count} messages selected; ${quota.tokens} estimated tokens. ${blocker ? `Stopped before message ${blocker}: the next message or tool exchange exceeds this limit.` : "No message exceeded this limit."}`;
+				return `Selected messages: ${quota.count}; ${quota.tokens} estimated tokens. ${blocker ? `Stopped before message ${blocker}: the next message or tool exchange exceeds this limit.` : "No message exceeded this limit."}`;
 			};
 			// Fullscreen settings editor on the alternate screen: the overlay
 			// enables mouse tracking (click/hover/wheel) for its lifetime and
