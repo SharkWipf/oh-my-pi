@@ -16,6 +16,7 @@
 
 ### Fixed
 
+- Restored an always-visible `/context` legend distinguishing saved manual overrides from current compaction-selection markers; Inspect now explains automatic `A` selection without implying a checkbox change or already-installed content.
 - Clarified message-retention settings, linked rule/manual keep budgets and per-value help; nested settings pickers now retain their explanations at narrow terminal widths without changing retention policy or presets.
 - Notes-backed local rollovers preserve selected originals without overriding extension-owned cuts, keep latest requests once in chronological replay, restore branch-local notebook state across resume and clear boundaries, and expose original input and provenance alongside delivered raw history.
 - Automatic snapcompact frame rescue no longer commits a smaller frame window when its text spill increases local context size; genuine reductions remain eligible even when they do not clear the headroom band.
