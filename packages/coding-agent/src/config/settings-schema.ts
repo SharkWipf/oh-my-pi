@@ -2788,7 +2788,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "context",
 			group: "User Message Preservation",
 			label: "Remember User Messages",
-			description: "Automatic selection only. Manual Always and its cap remain active when disabled.",
+			description:
+				"After compaction, keep selected user messages beside the summary and normal recent history. Enables First/Recent, recent protection and filters. Off still honors manual Always (/keep) and its limit.",
 		},
 	},
 
@@ -2800,7 +2801,7 @@ export const SETTINGS_SCHEMA = {
 			group: "User Message Preservation",
 			label: "Keep First Limit",
 			description:
-				"Off / All / positive messages / nonnegative tokens / 0–100% maximum model context. Linked Always cap remains editable when automatic selection is off.",
+				"With Remember User Messages on, keep the oldest user messages that pass filters after compaction. Off adds none; All keeps all. Combined with Recent/protection. Rule / Manual Keep can reuse this budget.",
 		},
 	},
 
@@ -2812,7 +2813,7 @@ export const SETTINGS_SCHEMA = {
 			group: "User Message Preservation",
 			label: "Keep Recent Limit",
 			description:
-				"Off / All / positive messages / nonnegative tokens / 0–100% maximum model context. Linked Always cap remains editable when automatic selection is off.",
+				"With Remember User Messages on, keep the newest user messages that pass filters after compaction. Off adds none; All keeps all. Combined with First/protection. Rule / Manual Keep can reuse this budget.",
 		},
 	},
 
@@ -2824,7 +2825,7 @@ export const SETTINGS_SCHEMA = {
 			group: "User Message Preservation",
 			label: "Protect Most-Recent Limit",
 			description:
-				"Off / All / messages / tokens / % maximum context. Newest real users bypass stored Never and all pruning.",
+				"With Remember User Messages on, keep newest user messages intact after compaction, overriding filters, manual Never and pruning. Separate from other keep limits. Off protects none; All protects all.",
 		},
 	},
 
@@ -2837,7 +2838,7 @@ export const SETTINGS_SCHEMA = {
 			group: "User Message Preservation",
 			label: "Prune Kept Long Messages",
 			description:
-				"Automatic/inferred Keep only. Manual Always and hard-most-recent bypass every mode. Images are never dropped.",
+				"Automatic keeps above Max Tokens Per Message: no = intact; middle-out = trim middle; head-only = keep start; tail-only = keep end; exclude = skip. Manual Always/protected recent are exempt. Trimming retains images.",
 		},
 	},
 
@@ -2849,7 +2850,7 @@ export const SETTINGS_SCHEMA = {
 			group: "User Message Preservation",
 			label: "Max Tokens Per Message",
 			description:
-				"Positive integer text-plus-image pruning threshold; not a manual Always or hard-most-recent ceiling.",
+				"Text-plus-image token threshold for Prune Kept Long Messages; enter a positive whole number. Not a total retention budget. Manual Always and protected recent messages are exempt.",
 		},
 	},
 
@@ -2860,9 +2861,9 @@ export const SETTINGS_SCHEMA = {
 		ui: {
 			tab: "context",
 			group: "User Message Preservation Filtering",
-			label: "Always-Keep Limit",
+			label: "Rule / Manual Keep Limit",
 			description:
-				"Uniform mixed-role cap including /keep. Linked First/Recent Off or All is uncapped; tokens 0 and 0% remain finite zero.",
+				"After compaction, additionally keep filter Keep or manual Always (/keep) messages, including assistant/tools. Reuses First/Recent budget; overlaps kept once, not a total cap. Open for order and budget rules.",
 		},
 	},
 
