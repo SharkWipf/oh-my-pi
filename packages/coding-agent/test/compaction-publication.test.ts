@@ -133,6 +133,44 @@ function compactions(manager: SessionManager) {
 }
 
 describe("compaction durable publication", () => {
+	it("commits a cold manual rollover without modifying native source JSON during projection", async () => {
+		const f = fixture(true);
+		const id = f.manager.appendMessage({
+			role: "assistant", content: [{ type: "text", text: "native answer" }],
+			api: "openai-responses", provider: "openai", model: "test", stopReason: "stop", timestamp: 3,
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+			providerPayload: { type: "openaiResponsesHistory", provider: "openai", dt: true,
+				items: [{ type: "message", content: [{ type: "output_text", text: "native answer" }] }],
+			},
+		});
+		const before = JSON.stringify(f.manager.getEntry(id));
+		await f.maintenance.compact();
+		expect(compactions(f.manager)).toHaveLength(1);
+		expect(f.agent.state.messages.some(message => message.role === "assistant")).toBe(true);
+		expect(JSON.stringify(f.manager.getEntry(id))).toBe(before);
+	});
+	it("publishes native ingress correspondence before a block rewrite and preserves it after reload", async () => {
+		const f = fixture(true);
+		const id = f.manager.appendMessage({
+			role: "assistant", content: [{ type: "text", text: "remove me" }, { type: "text", text: "native answer" }],
+			api: "openai-responses", provider: "openai", model: "test", stopReason: "stop", timestamp: 3,
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+			providerPayload: { type: "openaiResponsesHistory", provider: "openai", dt: true,
+				items: [{ type: "message", content: [{ type: "output_text", text: "native answer" }] }],
+				contentBlocks: [{ itemIndex: 0, contentIndex: 1 }],
+			},
+		});
+		const source = f.manager.getEntry(id);
+		if (source?.type !== "message" || source.message.role !== "assistant") throw new Error("Expected native assistant");
+		const message = source.message;
+		await f.manager.rewriteEntries([{ entryId: id, blocks: [{ oldBlockIndex: 0, newBlockIndex: null }, { oldBlockIndex: 1, newBlockIndex: 0 }] }], () => { message.content.splice(0, 1); });
+		const reopened = await SessionManager.open(f.manager.getSessionFile()!, undefined, f.storage);
+		managers.push(reopened);
+		const saved = reopened.getEntry(id);
+		if (saved?.type !== "message" || saved.message.role !== "assistant") throw new Error("Expected persisted native assistant");
+		expect(saved.message.content).toEqual([{ type: "text", text: "native answer" }]);
+		expect(saved.message.providerPayload).toMatchObject({ items: [{ type: "message", content: [{ type: "output_text", text: "native answer" }] }], origins: [{ kind: "source", parts: [{ entryId: id, blockIndex: 1, currentBlockIndex: 0, status: "exact-current" }] }] });
+	});
 	for (const mode of ["manual", "automatic"] as const) {
 		it(`retains selected source through ${mode} local rollover without a generated summary`, async () => {
 			const f = fixture(true);
