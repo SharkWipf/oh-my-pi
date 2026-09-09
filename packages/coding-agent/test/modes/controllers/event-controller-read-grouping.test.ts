@@ -84,7 +84,7 @@ function createFixture() {
 async function streamCompletion(controller: EventController, content: Block[]): Promise<void> {
 	const message = assistantMessage(content);
 	await controller.handleEvent({ type: "message_start", message } as AgentSessionEvent);
-	await controller.handleEvent({ type: "message_update", message } as AgentSessionEvent);
+	await controller.handleEvent({ type: "message_update", message, assistantMessageEvent: { type: "toolcall_delta", contentIndex: 0, delta: "", partial: message } } as AgentSessionEvent);
 }
 
 function readGroups(chatContainer: TranscriptContainer): ReadToolGroupComponent[] {
@@ -133,7 +133,7 @@ describe("EventController read-group accretion", () => {
 		message.timestamp = new Date(2026, 0, 2, 3, 4, 5).getTime();
 
 		await controller.handleEvent({ type: "message_start", message } as AgentSessionEvent);
-		await controller.handleEvent({ type: "message_update", message } as AgentSessionEvent);
+		await controller.handleEvent({ type: "message_update", message, assistantMessageEvent: { type: "toolcall_delta", contentIndex: 0, delta: "", partial: message } } as AgentSessionEvent);
 		await controller.handleEvent({ type: "message_end", message } as AgentSessionEvent);
 
 		const [group] = readGroups(chatContainer);
@@ -159,7 +159,7 @@ describe("EventController read-group accretion", () => {
 		message.timestamp = new Date(2026, 0, 2, 3, 4, 5).getTime();
 
 		await controller.handleEvent({ type: "message_start", message } as AgentSessionEvent);
-		await controller.handleEvent({ type: "message_update", message } as AgentSessionEvent);
+		await controller.handleEvent({ type: "message_update", message, assistantMessageEvent: { type: "toolcall_delta", contentIndex: 0, delta: "", partial: message } } as AgentSessionEvent);
 		await controller.handleEvent({ type: "message_end", message } as AgentSessionEvent);
 
 		const [group] = readGroups(chatContainer);
@@ -186,7 +186,7 @@ describe("EventController read-group accretion", () => {
 		message.timestamp = new Date(2026, 0, 2, 3, 4, 5).getTime();
 
 		await controller.handleEvent({ type: "message_start", message } as AgentSessionEvent);
-		await controller.handleEvent({ type: "message_update", message } as AgentSessionEvent);
+		await controller.handleEvent({ type: "message_update", message, assistantMessageEvent: { type: "toolcall_delta", contentIndex: 0, delta: "", partial: message } } as AgentSessionEvent);
 		await controller.handleEvent({ type: "message_end", message } as AgentSessionEvent);
 		await streamCompletion(controller, [read("second.ts:1-50")]);
 

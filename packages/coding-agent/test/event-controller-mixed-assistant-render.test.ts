@@ -103,9 +103,11 @@ describe("EventController mixed assistant text/tool rendering", () => {
 			AgentSessionEvent,
 			{ type: "message_start" }
 		>);
+		const partial = assistantMessage([{ type: "thinking", thinking: "**dead attempt**" }]);
 		await controller.handleEvent({
 			type: "message_update",
-			message: assistantMessage([{ type: "thinking", thinking: "**dead attempt**" }]),
+			message: partial,
+			assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "**dead attempt**", partial },
 		} as Extract<AgentSessionEvent, { type: "message_update" }>);
 		const orphan = chatContainer.children.at(-1) as Component & {
 			isTranscriptBlockFinalized(): boolean;

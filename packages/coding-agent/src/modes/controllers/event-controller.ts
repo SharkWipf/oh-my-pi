@@ -603,9 +603,13 @@ export class EventController {
 			// setTarget, per-block tool-call reconciliation) even though the TUI
 			// paints at most ~30fps — at 40-100 tps the handler work then
 			// dominates the CPU profile of an idle-looking streaming session
-			// (issue #7443). Only the latest snapshot is meaningful; non-update
-			// events flush the pending snapshot first so ordering is preserved.
-			if (event.type === "message_update") {
+			// (issue #7443). End events establish immutable content boundaries;
+			// preserve them and flush the pending snapshot first.
+			if (
+				event.type === "message_update" &&
+				event.assistantMessageEvent.type !== "thinking_end" &&
+				event.assistantMessageEvent.type !== "text_end"
+			) {
 				this.#enqueueMessageUpdate(event);
 				return;
 			}
@@ -1201,6 +1205,10 @@ export class EventController {
 			this.#vocalizeDelta(event);
 		}
 		if (this.ctx.streamingComponent && event.message.role === "assistant") {
+			const delta = event.assistantMessageEvent;
+			if (delta.type === "thinking_end" || delta.type === "text_end") {
+				this.ctx.streamingComponent.markContentBlockClosed(delta.contentIndex);
+			}
 			const unlockedThinkingVisibility = this.ctx.noteDisplayableThinkingContent(event.message);
 			if (unlockedThinkingVisibility) {
 				this.ctx.streamingComponent.setHideThinkingBlock(this.ctx.effectiveHideThinkingBlock);
@@ -1220,18 +1228,14 @@ export class EventController {
 				this.#lastVisibleBlockCount = visibleBlockCount;
 			}
 
-			// Content blocks stream sequentially: a toolCall block can only begin
-			// after every preceding thinking/text block has closed, and the
-			// reveal's setTarget above force-completes the visible text for
-			// toolCall messages. Finalize the assistant block now instead of at
-			// message_end so the transcript's commit-safe run can extend through
-			// it into the streaming tool preview below — otherwise a long args
-			// stream (a big write/edit/eval) sits below a still-live block and
-			// can never reach native scrollback: the head of the preview is
-			// neither committed nor on screen and the transcript reads as cut.
+			// Providers can interleave blocks: a tool preview does not close
+			// earlier prose. Seal only after explicit end events for the whole
+			// prefix. setTarget has already completed its reveal, so genuinely
+			// closed prose still lets long tool previews reach native scrollback.
 			if (
-				this.ctx.streamingMessage.content.some(content => content.type === "toolCall") &&
-				!this.ctx.streamingComponent.isTranscriptBlockFinalized()
+				timeline.hasToolCalls &&
+				!this.ctx.streamingComponent.isTranscriptBlockFinalized() &&
+				timeline.beforeTools.content.every((_, index) => this.ctx.streamingComponent!.isContentBlockClosed(index))
 			) {
 				const linkTargets = await refreshAssistantMessageLinkTargets(this.ctx, [timeline.beforeTools]);
 				this.ctx.streamingComponent.setLinkTargets(assistantMessageLinkTargets(timeline.beforeTools, linkTargets));

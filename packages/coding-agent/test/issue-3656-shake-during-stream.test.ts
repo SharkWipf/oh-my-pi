@@ -141,16 +141,17 @@ describe("issue #3656 /shake mid-stream preserves the in-flight assistant turn",
 
 	it("routes later streamed tool-call deltas into the preserved on-screen component", async () => {
 		const { pendingTool } = makeStreamingFixture();
-		const updateArgs = vi.spyOn(pendingTool, "updateArgs");
 
 		mode.rebuildChatFromMessages();
+		const partial = assistantWithBash("echo after");
 		await mode.eventController.handleEvent({
 			type: "message_update",
-			message: assistantWithBash("echo after"),
+			message: partial,
+			assistantMessageEvent: { type: "toolcall_delta", contentIndex: 0, delta: "", partial },
 		} as AgentSessionEvent);
 
 		expect(mode.pendingTools.get("call-1")).toBe(pendingTool);
-		expect(updateArgs).toHaveBeenCalledWith({ command: "echo after" }, "call-1");
+		expect(Bun.stripANSI(pendingTool.render(100).join("\n"))).toContain("echo after");
 	});
 
 	it("re-appends in-flight components after the historical replay (live tail order)", () => {
