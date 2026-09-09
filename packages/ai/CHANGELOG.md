@@ -23,6 +23,8 @@
 
 ### Fixed
 
+- Native source binding now keeps journal payloads byte-for-byte unchanged during context reconstruction and compaction projections, while preserving transient replay provenance and authoritative invalidation.
+- Kept differing original-submission and delivered-message source coordinates distinct through native history deduplication, persistence, and controlled rewrites. Ordinary messages still need no source metadata.
 - Escaped reserved Harmony markers in typed native replay text at Responses, Azure Responses, and Codex request boundaries without changing identifiers, schemas, encrypted replay state, or image bytes and original-image provenance.
 - Native Responses source capture now records actual normalized text/tool/image correspondence and preserves it through controlled rewrites and JSON replay. Shared logical readers expose typed visible fields and images without counting native mirrors twice or traversing opaque provider state.
 ### Added
