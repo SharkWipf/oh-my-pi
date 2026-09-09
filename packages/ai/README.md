@@ -397,6 +397,8 @@ All streaming events emitted during assistant message generation:
 
 OpenAI, Azure Responses, and Codex thinking display is append-only. A final summary's unseen suffix is emitted as `thinking_delta` before `thinking_end`, including summaries that arrive only at completion. Raw reasoning is buffered until completion so a readable summary can take precedence; raw-only streams still display their reasoning. If the final provider text diverges from an already displayed prefix, the displayed text is retained rather than retracted. The authoritative provider item remains in `thinkingSignature` for replay, independently of that display.
 
+Within these adapters' reasoning channels, a complete JSON record with exactly `codex_json: true`, `codex_event_type: "item.completed"`, `codex_item_type: "reasoning"`, and a string `text` is displayed as that text. Object-like streamed summary prefixes wait for a text/part/item/response completion boundary before decoding, so split envelopes do not leak JSON fragments. Unknown or malformed records and embedded/quoted examples remain literal; user and assistant message text are not decoded. Signatures and native replay retain the original record.
+
 ## Image Input
 
 Models with vision capabilities can process images. You can check if a model supports images via the `input` property. If you pass images to a non-vision model, they are silently ignored.

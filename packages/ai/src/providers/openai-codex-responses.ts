@@ -845,7 +845,7 @@ class CodexStreamRuntime {
 	/** Sequential-cutoff summary sections/emitted text, global to the response (indices span reasoning items). */
 	cutoffSummaries: SequentialCutoffSummaryState = createSequentialCutoffSummaryState();
 	/** Summary deltas buffered while waiting to see whether atomic `.done` events arrive. */
-	pendingSummaryDeltas = new Map<CodexOpenItem, string[]>();
+	pendingSummaryDeltas = new Map<CodexOpenItem, Array<string | null>>();
 	websocketStreamRetries = 0;
 	providerRetryAttempt = 0;
 	sawTerminalEvent = false;
@@ -900,14 +900,14 @@ class CodexStreamRuntime {
 		if (outputIndex !== undefined) return this.openItemsByOutputIndex.get(outputIndex) ?? null;
 		return this.currentEntry;
 	}
-	queueSummaryDelta(entry: CodexOpenItem | null | undefined, delta: string): void {
-		if (entry?.block?.type !== "thinking" || delta.length === 0) return;
+	queueSummaryDelta(entry: CodexOpenItem | null | undefined, delta: string | null): void {
+		if (entry?.block?.type !== "thinking" || delta === "") return;
 		const pending = this.pendingSummaryDeltas.get(entry) ?? [];
 		pending.push(delta);
 		this.pendingSummaryDeltas.set(entry, pending);
 	}
 
-	takeSummaryDeltas(entry: CodexOpenItem | null | undefined): string[] {
+	takeSummaryDeltas(entry: CodexOpenItem | null | undefined): Array<string | null> {
 		if (!entry) return [];
 		const pending = this.pendingSummaryDeltas.get(entry) ?? [];
 		this.pendingSummaryDeltas.delete(entry);
@@ -2232,7 +2232,10 @@ class CodexStreamProcessor {
 				return firstTokenTime;
 			}
 			if (entry?.item.type === "reasoning" && entry.block?.type === "thinking") {
-				appendReasoningSummaryTextDelta(entry.item, entry.block, delta, stream, output, entry.contentIndex);
+				appendReasoningSummaryTextDelta(
+					entry.item, entry.block, delta, stream, output, entry.contentIndex,
+					typeof rawEvent.summary_index === "number" ? rawEvent.summary_index : 0,
+				);
 			}
 			return firstTokenTime;
 		}
@@ -2276,7 +2279,7 @@ class CodexStreamProcessor {
 		if (eventType === "response.reasoning_summary_part.done") {
 			const entry = this.runtime.openItemForEvent(rawEvent);
 			if (this.#sequentialCutoffSummaries) {
-				if (entry && this.runtime.pendingSummaryDeltas.has(entry)) this.runtime.queueSummaryDelta(entry, "\n\n");
+				if (entry && this.runtime.pendingSummaryDeltas.has(entry)) this.runtime.queueSummaryDelta(entry, null);
 				return firstTokenTime;
 			}
 			if (entry?.item.type === "reasoning" && entry.block?.type === "thinking") {
@@ -2383,16 +2386,22 @@ class CodexStreamProcessor {
 	}
 
 	#flushSummaryDeltas(entry: CodexOpenItem | null): void {
-		if (entry?.block?.type !== "thinking") return;
+		if (entry?.item.type !== "reasoning" || entry.block?.type !== "thinking") return;
+		let summaryIndex = 0;
 		for (const delta of this.runtime.takeSummaryDeltas(entry)) {
-			entry.block.thinking += delta;
-			this.stream.push({
-				type: "thinking_delta",
-				contentIndex: entry.contentIndex,
-				delta,
-				partial: this.output,
-			});
+			if (delta === null) {
+				appendReasoningSummaryPartDone(entry.item, entry.block, this.stream, this.output, entry.contentIndex);
+				summaryIndex++;
+			} else {
+				appendReasoningSummaryTextDelta(
+					entry.item, entry.block, delta, this.stream, this.output, entry.contentIndex, summaryIndex,
+				);
+			}
 		}
+		const part = entry.item.summary?.[summaryIndex];
+		if (part) applyReasoningSummaryTextDone(
+			entry.item, entry.block, part.text, summaryIndex, this.stream, this.output, entry.contentIndex,
+		);
 	}
 	#handleOutputItemDone(rawEvent: Record<string, unknown>): void {
 		const { runtime, output, stream } = this;

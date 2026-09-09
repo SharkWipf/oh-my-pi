@@ -6,6 +6,7 @@
 
 - Fixed OpenAI, Azure Responses, and Codex thinking summaries arriving only in final snapshots: late text and unseen suffixes now reach streaming clients before completion, while divergent display text remains append-only and replay signatures retain the authoritative provider item.
 - Buffered raw Responses reasoning until completion so readable summaries take precedence, retaining raw-only fallback and completing reasoning when a terminal snapshot omits per-item completion.
+- Decoded explicitly tagged Codex reasoning envelopes in Responses/Azure/Codex raw reasoning, completed summaries, and split summary streams, including sequential-cutoff delivery. Display receives the reasoning text while native replay payloads and literal message JSON remain unchanged.
 - Codex SSE streams that end without a terminal completion event now retry when replay-safe and remain transient errors when partial output prevents replay ([#11349](https://github.com/can1357/oh-my-pi/issues/11349)).
 
 ## [18.1.15] - 2026-09-08

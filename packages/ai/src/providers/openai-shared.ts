@@ -2492,12 +2492,42 @@ export function createSequentialCutoffSummaryState(): SequentialCutoffSummarySta
 	return { summary: [], emitted: "" };
 }
 
+// Decode only the complete, explicitly tagged reasoning protocol record. This
+// is not a JSON-text sanitizer: prose, quoted examples, unknown records and
+// malformed JSON stay literal. Replay items never pass through this decoder.
+function decodeReasoningEnvelope(text: string): string {
+	if (!text.trimStart().startsWith("{")) return text;
+	try {
+		const value: unknown = JSON.parse(text);
+		if (!value || typeof value !== "object" || Array.isArray(value)) return text;
+		const record = value as Record<string, unknown>;
+		if (
+			record.codex_json !== true ||
+			record.codex_event_type !== "item.completed" ||
+			record.codex_item_type !== "reasoning" ||
+			typeof record.text !== "string" ||
+			Object.keys(record).length !== 4
+		) return text;
+		return record.text;
+	} catch {
+		return text;
+	}
+}
+
+// Object-like summary prefixes cannot be published until a completion boundary
+// distinguishes a protocol record from literal JSON. Keep references to the
+// existing wire accumulator, not another copy of every streamed delta.
+const pendingReasoningEnvelopes = new WeakMap<ThinkingContent, {
+	part: ResponseReasoningItem["summary"][number];
+	prefix: string;
+}>();
+
 // Sequential-cutoff streams may repeat the full canonical summary as later parts.
 function foldReasoningSummary(parts: ResponseReasoningItem["summary"] | undefined): string {
 	if (!parts) return "";
 	let canonical = "";
 	for (const part of parts) {
-		const text = part.text;
+		const text = decodeReasoningEnvelope(part.text);
 		if (!text || text === canonical) continue;
 		const extendsCanonical = text.startsWith(canonical) && text[canonical.length] === "\n";
 		canonical = !canonical || extendsCanonical ? text : `${canonical}\n\n${text}`;
@@ -2517,11 +2547,14 @@ export function finalizeReasoningThinking(
 ): void {
 	const summaryThinking = cutoff
 		? finalizeCutoffReasoningThinking(item, block.thinking, cutoff)
-		: (item.summary?.map(part => part.text).join("\n\n") ?? "");
+		: (item.summary?.map(part => decodeReasoningEnvelope(part.text)).join("\n\n") ?? "");
 	const contentThinking = item.content?.[0]?.type === "reasoning_text" ? (item.content[0].text ?? "") : "";
-	const finalThinking =
-		summaryThinking ||
-		(cutoff && item.summary?.some(part => part.text) ? "" : contentThinking || rawThinking);
+	const pending = pendingReasoningEnvelopes.get(block);
+	const bufferedSummary = pending ? pending.prefix + decodeReasoningEnvelope(pending.part.text) : "";
+	pendingReasoningEnvelopes.delete(block);
+	const finalThinking = item.summary?.some(part => part.text)
+		? summaryThinking
+		: bufferedSummary || summaryThinking || decodeReasoningEnvelope(contentThinking || rawThinking);
 	// Delta consumers cannot retract earlier text; replay retains the authoritative item.
 	if (finalThinking.startsWith(block.thinking)) {
 		const delta = finalThinking.slice(block.thinking.length);
@@ -2555,7 +2588,7 @@ function finalizeCutoffReasoningThinking(
 		// Diverged from streamed text — the deltas already shown win.
 		return streamedThinking;
 	}
-	return item.content?.[0]?.type === "reasoning_text" ? (item.content[0].text ?? "") : "";
+	return item.content?.[0]?.type === "reasoning_text" ? decodeReasoningEnvelope(item.content[0].text ?? "") : "";
 }
 
 export function appendReasoningSummaryTextDelta(
@@ -2568,8 +2601,12 @@ export function appendReasoningSummaryTextDelta(
 	summaryIndex = 0,
 ): void {
 	const part = ensureReasoningSummaryPart(item, summaryIndex);
-	block.thinking += delta;
+	if (!part.text && delta && (!delta.trimStart() || delta.trimStart().startsWith("{"))) {
+		pendingReasoningEnvelopes.set(block, { part, prefix: block.thinking });
+	}
 	part.text += delta;
+	if (pendingReasoningEnvelopes.has(block)) return;
+	block.thinking += delta;
 	stream.push({ type: "thinking_delta", contentIndex, delta, partial: output });
 }
 
@@ -2589,14 +2626,12 @@ export function applyReasoningSummaryTextDone(
 	const part = ensureReasoningSummaryPart(item, summaryIndex);
 	const previous = part.text;
 	part.text = text;
-	if (!text || text === previous) return;
-	if (!block.thinking) {
-		block.thinking = text;
-		stream.push({ type: "thinking_delta", contentIndex, delta: text, partial: output });
-		return;
-	}
-	if (text.startsWith(block.thinking)) {
-		const delta = text.slice(block.thinking.length);
+	const pending = pendingReasoningEnvelopes.get(block);
+	if (!pending && (!text || text === previous)) return;
+	const display = (pending?.prefix ?? "") + decodeReasoningEnvelope(text);
+	pendingReasoningEnvelopes.delete(block);
+	if (display.startsWith(block.thinking)) {
+		const delta = display.slice(block.thinking.length);
 		if (!delta) return;
 		block.thinking += delta;
 		stream.push({ type: "thinking_delta", contentIndex, delta, partial: output });
@@ -2613,6 +2648,9 @@ export function appendReasoningSummaryPartDone(
 	item.summary = item.summary || [];
 	const lastPart = item.summary[item.summary.length - 1];
 	if (!lastPart) return;
+	if (pendingReasoningEnvelopes.has(block)) {
+		applyReasoningSummaryTextDone(item, block, lastPart.text, item.summary.length - 1, stream, output, contentIndex);
+	}
 	block.thinking += "\n\n";
 	lastPart.text += "\n\n";
 	stream.push({ type: "thinking_delta", contentIndex, delta: "\n\n", partial: output });
