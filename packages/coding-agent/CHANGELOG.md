@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- Fixed cold manual compaction cancelling when native replay provenance was lazily attached during its context projection. Read-only binding now leaves source JSON unchanged; controlled source rewrites explicitly persist native correspondence before remapping it.
 - Notes-backed local rollovers preserve selected originals without overriding extension-owned cuts, keep latest requests once in chronological replay, restore branch-local notebook state across resume and clear boundaries, and expose original input and provenance alongside delivered raw history.
 - Automatic snapcompact frame rescue no longer commits a smaller frame window when its text spill increases local context size; genuine reductions remain eligible even when they do not clear the headroom band.
 - Legacy archive migration now reports unavailable original source boundaries and current original-image references before replacing installed history, instead of treating a fresh suffix as a complete original baseline.
