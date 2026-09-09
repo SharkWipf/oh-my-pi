@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Message, Model, Usage, UserMessage } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -113,6 +113,81 @@ describe("AgentSession session stats", () => {
 		session = createStatsSession(manager, target);
 
 		expect(session.getSessionStats()).toMatchObject({ tokens: { total: 7 }, cost: 7 });
+	});
+
+	it("keeps model usage on its branch through rewind, reset and supported rewrite", async () => {
+		const target = model();
+		const manager = SessionManager.inMemory();
+		appendUsage(manager, target, 2);
+		const branchPoint = manager.appendMessage({ role: "user", content: "root", timestamp: 1 });
+		appendUsage(manager, target, 7);
+		const firstLeaf = manager.getLeafId()!;
+		manager.branch(branchPoint);
+		appendUsage(manager, target, 11);
+		session = createStatsSession(manager, target);
+		expect(session.getSessionStats()).toMatchObject({ tokens: { total: 13 }, cost: 13 });
+
+		manager.branch(firstLeaf);
+		session.agent.replaceMessages(manager.buildSessionContext().messages);
+		expect(session.getSessionStats()).toMatchObject({ tokens: { total: 9 }, cost: 9 });
+		manager.appendResetBoundary();
+		appendUsage(manager, target, 3);
+		session.agent.replaceMessages(manager.buildSessionContext().messages);
+		await manager.rewriteEntries();
+		expect(session.getSessionStats()).toMatchObject({ tokens: { total: 3 }, cost: 3 });
+	});
+
+	it("reads retained usage and the provider anchor without expanding discarded ancestry", () => {
+		const target = model();
+		const manager = SessionManager.inMemory();
+		appendUsage(manager, target, 100);
+		const discarded = manager.appendMessage({ role: "user", content: "discarded", timestamp: 1 });
+		appendUsage(manager, target, 7);
+		const kept = manager.appendMessage({ role: "user", content: "kept", timestamp: 2 });
+		manager.appendCompaction("summary", undefined, kept, 100);
+		manager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "answer" }],
+			api: target.api,
+			provider: target.provider,
+			model: target.id,
+			stopReason: "stop",
+			timestamp: 3,
+			usage: {
+				input: 200,
+				output: 2,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 202,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 1 },
+			},
+			contextSnapshot: { promptTokens: 200, nonMessageTokens: 1_000_000 },
+		});
+		appendUsage(manager, target, 3);
+		session = createStatsSession(manager, target);
+		const getEntry = manager.getEntry.bind(manager);
+		const branchRead = spyOn(manager, "getBranch").mockImplementation(() => {
+			throw new Error("Statistics must not materialize the full branch");
+		});
+		const entryRead = spyOn(manager, "getEntry").mockImplementation(id => {
+			if (id === discarded) throw new Error("Statistics must not load discarded messages");
+			return getEntry(id);
+		});
+		try {
+			expect(session.getSessionStats()).toMatchObject({
+				userMessages: 1,
+				assistantMessages: 1,
+				toolCalls: 0,
+				toolResults: 0,
+				tokens: { input: 210, output: 2, total: 212 },
+				cost: 11,
+				contextUsage: { tokens: 200 },
+			});
+			expect(session.getContextBreakdown()).toMatchObject({ anchored: true, usedTokens: 200 });
+		} finally {
+			branchRead.mockRestore();
+			entryRead.mockRestore();
+		}
 	});
 
 	it("preserves authoritative provider occupancy above the local transcript estimate", () => {
