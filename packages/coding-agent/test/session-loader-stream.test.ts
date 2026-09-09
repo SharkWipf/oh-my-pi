@@ -98,7 +98,7 @@ it("point reads preserve top-level IDs, whole UTF-8 records, and fresh rewritten
 	expect(entryIds(entries)).toEqual(["s1", id]);
 	expect(messageTexts(entries)).toEqual(["Rewritten original"]);
 	const writer = storage.openWriter(file);
-	writer.appendSync(JSON.stringify(msg("accepted", id, "Newly appended original")) + "\n");
+	await writer.append(JSON.stringify(msg("accepted", id, "Newly appended original")) + "\n");
 	await writer.close();
 	await storage.updateSessionTitle(file, { title: "Current heading", source: "user", updatedAt: ISO });
 	entries = [];
