@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { CompactionDiagnostics } from "@oh-my-pi/pi-agent-core/compaction/diagnostics";
 import { getCompactionSourceRepresentation, type SourceRewrite } from "@oh-my-pi/pi-agent-core/compaction/source";
 
@@ -105,6 +106,7 @@ import {
 	normalizeWorkspaceDirectory,
 } from "./session-workspace";
 import { recordSessionTitle } from "./title-index";
+import { sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 
 const JSONL_SUFFIX_LENGTH = ".jsonl".length;
 const DRAFT_ONLY_SESSION_MARKER = ".draft-only-session";
@@ -256,10 +258,21 @@ function orderedByTimestamp(a: SessionTreeNode, b: SessionTreeNode): number {
 	return new Date(a.entry.timestamp).getTime() - new Date(b.entry.timestamp).getTime();
 }
 
+interface BranchModelUsage {
+	entry: ModelUsageEntry;
+	position: number;
+	previous?: BranchModelUsage;
+}
+
 interface SessionBranchFold {
 	id: string | null;
 	controls: SessionContextControlState;
 	pins: Map<string, { hash: string; lastUsedAt: number }>;
+	entryCount: number;
+	latestCompaction: CompactionEntry | null;
+	hasToolResults: boolean;
+	modelUsage?: BranchModelUsage;
+	modelUsageStart: number;
 	sourceContext?: { compactionId: string; path: SessionEntry[]; inventory: SessionContextSourceInventory };
 }
 /**
@@ -270,6 +283,7 @@ interface SessionBranchFold {
  */
 class SessionEntryIndex {
 	#entriesById = new Map<string, SessionEntry>();
+	#messagesByPersistenceKey = new Map<string, SessionMessageEntry | SessionMessageEntry[]>();
 	#children = new Map<string | null, SessionEntry[]>();
 	#labels = new Map<string, string>();
 	#leaf: string | null = null;
@@ -282,7 +296,15 @@ class SessionEntryIndex {
 	#rebuilding = false;
 
 	#emptyFold(): SessionBranchFold {
-		return { id: null, controls: createSessionContextControlState(), pins: new Map() };
+		return {
+			id: null,
+			controls: createSessionContextControlState(),
+			pins: new Map(),
+			entryCount: 0,
+			latestCompaction: null,
+			hasToolResults: false,
+			modelUsageStart: 0,
+		};
 	}
 
 	#cloneFold(fold: SessionBranchFold): SessionBranchFold {
@@ -292,6 +314,17 @@ class SessionEntryIndex {
 	}
 
 	#foldEntry(entry: SessionEntry): void {
+		const position = this.#fold.entryCount++;
+		if (entry.type === "compaction") {
+			this.#fold.latestCompaction = entry;
+			this.#fold.modelUsageStart = this.#fold.modelUsage ? this.#modelUsageWindowStart(entry, position) : position + 1;
+		} else if (entry.type === "reset_boundary") {
+			this.#fold.modelUsageStart = position + 1;
+		} else if (entry.type === "model_usage") {
+			this.#fold.modelUsage = { entry, position, previous: this.#fold.modelUsage };
+		} else if (entry.type === "message" && entry.message.role === "toolResult") {
+			this.#fold.hasToolResults = true;
+		}
 		applySessionContextControlEntry(this.#fold.controls, entry);
 		if (entry.type === "credential_pin") {
 			this.#fold.pins.set(entry.provider, { hash: entry.hash, lastUsedAt: new Date(entry.timestamp).getTime() });
@@ -303,6 +336,41 @@ class SessionEntryIndex {
 		if (entry.type === "reset_boundary" || entry.type === "compaction") {
 			this.#boundaryFold = this.#cloneFold(this.#fold);
 		}
+	}
+
+	// Preserve the statistics window: include metadata immediately before firstKept.
+	#modelUsageWindowStart(compaction: CompactionEntry, position: number): number {
+		let cursor: SessionEntry | undefined = compaction;
+		const seen = new Set<string>();
+		while (cursor && cursor.id !== compaction.firstKeptEntryId && !seen.has(cursor.id)) {
+			seen.add(cursor.id);
+			cursor = cursor.parentId ? this.#entriesById.get(cursor.parentId) : undefined;
+			position--;
+		}
+		if (!cursor || cursor.id !== compaction.firstKeptEntryId) return this.#fold.entryCount;
+		let previous = cursor.parentId ? this.#entriesById.get(cursor.parentId) : undefined;
+		while (previous && !seen.has(previous.id)) {
+			if (
+				previous.type === "message" ||
+				previous.type === "custom_message" ||
+				previous.type === "branch_summary" ||
+				previous.type === "compaction" ||
+				previous.type === "reset_boundary"
+			) break;
+			seen.add(previous.id);
+			position--;
+			previous = previous.parentId ? this.#entriesById.get(previous.parentId) : undefined;
+		}
+		return position;
+	}
+
+	activeModelUsageEntries(): readonly ModelUsageEntry[] {
+		const fold = this.branchFold();
+		const entries: ModelUsageEntry[] = [];
+		for (let usage = fold.modelUsage; usage && usage.position >= fold.modelUsageStart; usage = usage.previous) {
+			entries.push(usage.entry);
+		}
+		return entries.reverse();
 	}
 
 	branchFold(fromId: string | null = this.#leaf): SessionBranchFold {
@@ -404,6 +472,7 @@ class SessionEntryIndex {
 
 	clear(): void {
 		this.#entriesById.clear();
+		this.#messagesByPersistenceKey.clear();
 		this.#children.clear();
 		this.#labels.clear();
 		this.#leaf = null;
@@ -424,6 +493,15 @@ class SessionEntryIndex {
 	insert(entry: SessionEntry): void {
 		this.#entriesById.set(entry.id, entry);
 		this.#leaf = entry.id;
+		if (entry.type === "message") {
+			const key = sessionMessagePersistenceKey(entry.message);
+			if (key !== undefined) {
+				const existing = this.#messagesByPersistenceKey.get(key);
+				if (!existing) this.#messagesByPersistenceKey.set(key, entry);
+				else if (Array.isArray(existing)) existing.push(entry);
+				else this.#messagesByPersistenceKey.set(key, [existing, entry]);
+			}
+		}
 
 		const bucket = this.#children.get(entry.parentId);
 		if (bucket) bucket.push(entry);
@@ -449,6 +527,27 @@ class SessionEntryIndex {
 
 	get(id: string): SessionEntry | undefined {
 		return this.#entriesById.get(id);
+	}
+
+	hasMessageWithPersistenceKey(key: string, message?: AgentMessage): boolean {
+		let entries = this.#messagesByPersistenceKey.get(key);
+		if (!entries) return false;
+		if (message !== undefined) {
+			if (Array.isArray(entries)) {
+				entries = entries.filter(entry => sameMessageContent(entry.message, message));
+				if (entries.length === 0) return false;
+			} else if (!sameMessageContent(entries.message, message)) return false;
+		}
+		const seen = new Set<string>();
+		let cursor = this.leafEntry();
+		while (cursor && !seen.has(cursor.id)) {
+			if (cursor.type === "message" && (Array.isArray(entries) ? entries.includes(cursor) : cursor === entries)) {
+				return true;
+			}
+			seen.add(cursor.id);
+			cursor = cursor.parentId ? this.#entriesById.get(cursor.parentId) : undefined;
+		}
+		return false;
 	}
 
 	/**
@@ -2813,6 +2912,26 @@ export class SessionManager {
 		const entry: LabelEntry = { type: "label", ...this.#freshEntryFields(), targetId, label };
 		this.#recordEntry(entry);
 		return entry.id;
+	}
+
+	/** Latest branch compaction, including one before a later reset boundary. */
+	getLatestCompactionEntry(): CompactionEntry | null {
+		return this.#index.branchFold().latestCompaction;
+	}
+
+	/** Conservative eligibility for whole-branch tool-output maintenance. */
+	hasBranchToolResults(): boolean {
+		return this.#index.branchFold().hasToolResults;
+	}
+
+	/** Sparse model calls in the current statistics window, in branch order. */
+	getActiveModelUsageEntries(): readonly ModelUsageEntry[] {
+		return this.#index.activeModelUsageEntries();
+	}
+
+	/** Current-branch persistence identity; optional content disambiguates key collisions. */
+	hasMessageWithPersistenceKey(key: string, message?: AgentMessage): boolean {
+		return this.#index.hasMessageWithPersistenceKey(key, message);
 	}
 
 	/**
