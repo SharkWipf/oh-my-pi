@@ -619,15 +619,15 @@ export class SelectorController {
 								if (current()) this.ctx.ui.requestRender();
 							});
 					}
-					return loadError ? `Selection unavailable: ${loadError}` : "Loading source selection…";
+					return loadError ? `Selection unavailable: ${loadError}` : "Calculating messages to keep…";
 				}
 				if (!selection) selection = session.getPreservedMessageSelection();
-				if (!selection) return "Source selection unavailable.";
+				if (!selection) return "Message selection unavailable.";
 				if (selection.unavailableLimits.includes(group))
-					return "Percentage quota unavailable without an effective model maximum; configuration preserved.";
+					return "Cannot calculate this percentage without the active model's maximum context size. Your setting is unchanged.";
 				const quota = selection.quota[group === "hardRecent" ? "H" : group];
 				const blocker = selection.blockers[group];
-				return `${quota.count} source entries; ${quota.tokens} estimated quota tokens. ${blocker ? `Overflow stops before source ${blocker}.` : "No prefix overflow."}`;
+				return `${quota.count} messages selected; ${quota.tokens} estimated tokens. ${blocker ? `Stopped before message ${blocker}: the next message or tool exchange exceeds this limit.` : "No message exceeded this limit."}`;
 			};
 			// Fullscreen settings editor on the alternate screen: the overlay
 			// enables mouse tracking (click/hover/wheel) for its lifetime and

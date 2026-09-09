@@ -367,9 +367,13 @@ class SelectSubmenu extends Container {
 		const lines: string[] = [];
 		if (this.getHeight) {
 			const height = Math.max(1, this.getHeight());
-			this.#selectList.setMaxVisible(Math.max(1, height - 2));
-			lines.push(truncateToWidth(this.children[0]?.render(width).join(" ") ?? "", width));
-			this.#selectListLineOffset = 1;
+			for (const child of this.children) {
+				if (child === this.#selectList) break;
+				lines.push(...child.render(Math.max(1, width)));
+			}
+			if (lines.length > height - 2) lines.length = Math.max(1, height - 2);
+			this.#selectList.setMaxVisible(Math.max(1, height - lines.length));
+			this.#selectListLineOffset = lines.length;
 			lines.push(...this.#selectList.render(width));
 			return lines;
 		}
@@ -1300,11 +1304,11 @@ export class SettingsSelectorComponent implements Component {
 		const limit = parsePreservationLimit(value);
 		if (!limit) return "Invalid limit — choose a valid mode/value.";
 		if (limit.mode !== "context-percent")
-			return `Effective limit: ${this.#limitLabel(value)}. Whole eligible sources; stop at the first overflow.`;
+			return `Effective limit: ${this.#limitLabel(value)}. Keep whole messages; stop before the first one that exceeds the budget.`;
 		const maximum = this.context.maxContextTokens;
 		return maximum !== undefined && Number.isFinite(maximum) && maximum > 0
-			? `${limit.value}% of maximum ${maximum} = ${Math.floor((maximum * limit.value) / 100)} tokens (no reserve deduction).`
-			: `${limit.value}% configured; token ceiling unavailable without an effective model maximum.`;
+			? `${limit.value}% of the model maximum (${maximum} tokens) = ${Math.floor((maximum * limit.value) / 100)} tokens. Not a percentage of current usage or free space.`
+			: `${limit.value}% configured; the token budget needs the active model's maximum context size.`;
 	}
 
 	#createLimit(def: SettingDef, done: (value?: string) => void): SettingsSubmenu {
@@ -1312,9 +1316,9 @@ export class SettingsSelectorComponent implements Component {
 		let displayedMaximum: number | undefined;
 		const usage: SettingItem = {
 			id: "usage",
-			label: "Selected quota / overflow",
+			label: "Current selection",
 			currentValue: "Unavailable",
-			description: "Selected quota and overflow unavailable without a source selection snapshot.",
+			description: "Current selection counts appear once message retention has been calculated for this session.",
 		};
 		const save = (limit: PreservationLimit) => {
 			this.#save(def.path, serializePreservationLimit(limit));
@@ -1330,17 +1334,17 @@ export class SettingsSelectorComponent implements Component {
 					id: "mode",
 					label: "Mode",
 					currentValue: limit?.mode ?? "Invalid",
-					description: `${def.description} Editing a legacy First/Recent limit saves both effective edges in this layer once; later canonical edits are independent.`,
+					description: def.description,
 					submenu: (_cv, close) =>
 						new SelectSubmenu(
 							"Limit Mode",
-							def.description,
+							"Off selects none here; All removes this limit. Messages counts whole messages; Tokens budgets their content; % uses the model maximum, not current usage. Linked Rule / Manual Keep treats Off and All as uncapped.",
 							[
-								{ value: "off", label: "Off" },
-								{ value: "all", label: "All" },
-								{ value: "messages", label: "Messages" },
-								{ value: "tokens", label: "Tokens" },
-								{ value: "context-percent", label: "% maximum context" },
+								{ value: "off", label: "Off", description: "No messages from this selection" },
+								{ value: "all", label: "All", description: "Every eligible message" },
+								{ value: "messages", label: "Messages", description: "A positive whole-message count" },
+								{ value: "tokens", label: "Tokens", description: "A token allowance, including zero" },
+								{ value: "context-percent", label: "% maximum context", description: "0–100% of the model context size" },
 							],
 							limit?.mode ?? "",
 							mode => {
@@ -1370,10 +1374,10 @@ export class SettingsSelectorComponent implements Component {
 				const mode = limit.mode;
 				const description =
 					mode === "messages"
-						? "Positive safe integer."
+						? "Maximum number of whole messages to keep; enter a positive whole number."
 						: mode === "tokens"
-							? "Nonnegative safe integer. Zero is finite, not Off or All."
-							: "Finite 0–100, including decimals. Zero remains finite.";
+							? "Token allowance for kept messages; enter a whole number of zero or more. Zero is a zero-token allowance, not Off or All."
+							: "Percentage of the model maximum context size: 0–100, decimals allowed. 0% is a zero-token allowance.";
 				rows.push({
 					id: "value",
 					label: "Value",
@@ -1449,7 +1453,7 @@ export class SettingsSelectorComponent implements Component {
 				const summary = this.context.getPreservationLimitUsage?.(def.path);
 				usage.currentValue = summary ?? "Unavailable";
 				usage.description =
-					summary ?? "Selected quota and overflow unavailable without a source selection snapshot.";
+					summary ?? "Current selection counts appear once message retention has been calculated for this session.";
 			},
 		);
 		return menu;
@@ -1457,26 +1461,45 @@ export class SettingsSelectorComponent implements Component {
 
 	#capSummary(): string {
 		const cap = settings.get("compaction.keepUserMessagesFilterKeepCap");
-		if (cap === "uncapped") return "Uncapped";
+		if (cap === "uncapped") return "No cap";
 		const raw = settings.get(cap === "keep-first" ? "compaction.keepFirstLimit" : "compaction.keepLastLimit");
 		const limit = parsePreservationLimit(raw);
-		return `${cap === "keep-first" ? "First" : "Recent"} ${this.#limitLabel(raw)} → ${limit?.mode === "off" || limit?.mode === "all" ? "Always uncapped" : "Always capped"}`;
+		return `${cap === "keep-first" ? "First" : "Recent"}: ${limit?.mode === "off" || limit?.mode === "all" ? "no cap" : this.#limitLabel(raw)}`;
 	}
 
 	#createCap(done: (value?: string) => void): SettingsSubmenu {
 		let displayedSummary: string;
-		const usage: SettingItem = { id: "usage", label: "Selected quota / overflow", currentValue: "Unavailable" };
+		const usage: SettingItem = { id: "usage", label: "Current selection", currentValue: "Unavailable" };
 		const items = (): SettingItem[] => {
 			displayedSummary = this.#capSummary();
 			const cap = settings.get("compaction.keepUserMessagesFilterKeepCap");
 			const rows: SettingItem[] = [
 				{
 					id: "direction",
-					label: "Direction",
-					currentValue: cap,
-					values: ["keep-last", "keep-first", "uncapped"],
-					description:
-						"Uniform mixed-role cap, including /keep. Complete groups; count distinct linked source entries. Off/All linked edges are uncapped; token/% zero remains finite.",
+					label: "Selection order",
+					currentValue: cap === "keep-last" ? "Newest first" : cap === "keep-first" ? "Oldest first" : "No cap",
+					description: "Extra retention for filter Keep or manual Always messages. Newest/Oldest first uses the Recent/First limit value separately; overlap is kept once. No cap keeps all marked messages.",
+					submenu: (_cv, close) =>
+						new SelectSubmenu(
+							"Rule / Manual Keep Order",
+							"Uses the First/Recent limit value as a separate Keep/Always allowance, not the window's remaining budget or an overall cap. Messages may also qualify through First/Recent or recent protection; duplicates are kept once.",
+							[
+								{ value: "keep-last", label: "Newest first", description: "Use Keep Recent Limit" },
+								{ value: "keep-first", label: "Oldest first", description: "Use Keep First Limit" },
+								{ value: "uncapped", label: "No cap", description: "Keep all Keep/Always messages" },
+							],
+							cap,
+							value => {
+								this.#save("compaction.keepUserMessagesFilterKeepCap", value);
+								close(value);
+								menu.list.setItems(items());
+							},
+							() => close(),
+							undefined,
+							undefined,
+							undefined,
+							() => this.#contentRowCount,
+						),
 				},
 			];
 			if (cap !== "uncapped") {
@@ -1484,9 +1507,9 @@ export class SettingsSelectorComponent implements Component {
 				const def = getSettingDef(path)!;
 				rows.push({
 					id: "edge",
-					label: "Linked edge…",
+					label: cap === "keep-first" ? "Edit Keep First Limit…" : "Edit Keep Recent Limit…",
 					currentValue: this.#limitLabel(settings.get(path)),
-					description: "Edits the same First/Recent limit, including when automatic selection is off.",
+					description: "Changes the ordinary Keep First/Recent Limit too. Off or All means no cap here; 0 tokens or 0% is a zero-token allowance. Assistant/tool exchanges stay together; each message counts toward the allowance.",
 					submenu: (_cv, close) =>
 						this.#createLimit(def, value => {
 							close(value);
@@ -1498,18 +1521,15 @@ export class SettingsSelectorComponent implements Component {
 				id: "effective",
 				label: "Effective",
 				currentValue: this.#capSummary(),
-				description: this.#capSummary(),
+					description: "This limits the Keep/Always selection, not the total retained context. A message beyond this cap can still qualify through First/Recent or recent protection. Overlapping selections keep one copy.",
 			});
 			rows.push(usage);
 			return rows;
 		};
 		const menu: SettingsSubmenu = new SettingsSubmenu(
-			"Always-Keep Limit",
+			"Rule / Manual Keep Limit",
 			items(),
-			(id, value) => {
-				if (id === "direction") this.#save("compaction.keepUserMessagesFilterKeepCap", value);
-				menu.list.setItems(items());
-			},
+			() => {},
 			() => done(this.#capSummary()),
 			() => this.#contentRowCount,
 			() => {
@@ -1517,7 +1537,7 @@ export class SettingsSelectorComponent implements Component {
 				const summary = this.context.getPreservationLimitUsage?.("compaction.keepUserMessagesFilterKeepCap");
 				usage.currentValue = summary ?? "Unavailable";
 				usage.description =
-					summary ?? "Selected quota and overflow unavailable without a source selection snapshot.";
+					summary ?? "Current selection counts appear once message retention has been calculated for this session.";
 			},
 		);
 		return menu;
@@ -1568,11 +1588,11 @@ export class SettingsSelectorComponent implements Component {
 	#actionSelector(current: string, save: (value: PreservationAction) => void, cancel: () => void): SelectSubmenu {
 		return new SelectSubmenu(
 			"Action",
-			"Auto is neutral; Never leaves ordinary vanilla treatment intact.",
+			"Auto leaves the decision to other rules and First/Recent limits. Keep requests extra retention within Rule / Manual Keep Limit. Never rejects extra retention, not normal recent history. Manual choices and recent protection take precedence.",
 			[
-				{ value: "auto", label: "Auto (disabled / defer)" },
-				{ value: "keep", label: "Keep" },
-				{ value: "exclude", label: "Never" },
+				{ value: "auto", label: "Auto", description: "No decision from this rule" },
+				{ value: "keep", label: "Keep", description: "Request extra retention" },
+				{ value: "exclude", label: "Never", description: "Reject extra retention" },
 			],
 			current,
 			value => save(value as PreservationAction),
