@@ -48,6 +48,8 @@ Optimistic user submissions call `renderNow()` before agent dispatch so synchron
 
 Finalizing a later block never bypasses an active predecessor. `peekFinalizedBatch(width, capacity)` retires the shortest settled prefix that lets the remaining live tail fit `capacity`, stops at the first active block, and reoffers the same id until `acknowledgeFinalizedBatch()` succeeds. `peekFlushBatch(width)` takes the whole eligible prefix during graceful shutdown. While the screen has room nothing retires during ordinary operation, so a submitted message is visible immediately and recent blocks keep reflowing on resize.
 
+Streaming assistant blocks may publish the leading thinking run through Markdown's frozen prefix without finalizing the whole message. A later text or tool block does not prove that earlier content is closed: providers can interleave their deltas. Explicit `thinking_end` and `text_end` events survive update coalescing and establish the closed content frontier. Unclosed blocks stay transient even before later content. Once all prose before the first tool call has closed and its reveal has completed, that assistant prefix can finalize immediately, preserving native-scrollback progress during long tool-argument streams.
+
 Display replay has an independent cursor over committed entries. It never changes
 `committed` states or the logical frontier, and an offered replay never removes
 the active tail from the projected viewport.
