@@ -234,6 +234,7 @@ export function transferMessageSourceOrigin<T extends Message>(from: Message, to
 	return setSourceOrigin(to, combineContentSourceOrigins(to.content));
 }
 
+/** Bind transient provenance without changing the serialized source or its ingress correspondence. */
 export function bindMessageSource(
 	message: Message | { role: "custom"; content: UserMessage["content"] },
 	entryId: string,
@@ -308,8 +309,6 @@ export function bindMessageSource(
 		}
 		setSourceOrigin(item, { kind: "source", parts: parts.splice(nativePartsStart) });
 	}
-	payload.origins = exportItemOrigins(payload.items);
-	delete payload.contentBlocks;
 }
 
 /** Serialize the sidecar separately; never put provenance fields inside provider items. */
@@ -323,6 +322,9 @@ export function importItemOrigins(items: readonly object[], itemOrigins?: readon
 	for (let index = 0; index < items.length; index++) {
 		const item = items[index]!;
 		const origin = itemOrigins[index] ?? unknownOrigin;
+		// A missing persisted map has no authority over a live binding. Explicit
+		// invalidations and remapped source coordinates still replace prior metadata.
+		if (origin.kind === "unknown" && origin.reason === "legacy-map-absent" && origins.has(item)) continue;
 		setSourceOrigin(item, withoutPhysicalAccounting(origin));
 		const payload = "content" in item ? item.content : "output" in item ? item.output : undefined;
 		const content = Array.isArray(payload) ? payload : payload && typeof payload === "object" ? [payload] : undefined;
