@@ -46,6 +46,9 @@
 
 ### Fixed
 
+- File-backed requirements evidence uses indexed whole-record journal reads, retaining fresh body and journal-identity validation while normal appends and title updates maintain entry locations.
+- Unchanged requirements source intake no longer expands historical review dependency graphs; real original changes and availability restoration still reconcile affected dependencies.
+- Contextual original metadata is installed before freezing a requirements review job, preventing first-time source discovery from invalidating its own reviewed results without weakening mid-review change detection.
 - Requirements review uses the normal execution context at the addressed source while retaining whole original evidence and needed distant referents. Later submissions and other branches cannot leak into that frozen context; compaction summaries remain untrusted context rather than original evidence.
 - Literal adoption and restoration read addressed original evidence and current heads before candidate-only sanity instead of materializing the raw history.
 - Requirements validation reuses a per-pass source index and cooperatively cancels long unit passes, avoiding quadratic source-graph rescans.

@@ -785,7 +785,7 @@ interface RequirementsWork {
 	requirementIds?: Iterable<string>;
 	ownerSessionId?: string;
 	receiptId?: string;
-	dependencies?: boolean;
+	dependencyKeys?: Iterable<string>;
 	scopes?: readonly RequirementsScope[];
 }
 
@@ -921,7 +921,7 @@ export class RequirementsStore {
 	#load(work: RequirementsWork): RequirementsSnapshot {
 		const sourceKeys = new Set(work.sourceKeys), batchIds = new Set(work.batchIds), revisionIds = new Set(work.revisionIds);
 		for (const id of work.requirementIds ?? []) for (const head of this.#backend.headIds(undefined, id)) revisionIds.add(head);
-		if (work.dependencies) for (const key of sourceKeys) {
+		for (const key of work.dependencyKeys ?? []) {
 			for (const id of this.#backend.dependentIds(key, "revision")) revisionIds.add(id);
 			for (const id of this.#backend.dependentIds(key, "batch")) batchIds.add(id);
 		}
@@ -985,7 +985,21 @@ export class RequirementsStore {
 	authorizeRequirementsOwner(authority: RequirementsAuthority): void { this.#mutate({ ownerSessionId: authority.ownerSessionId }, store => store.authorizeRequirementsOwner(authority)); }
 	invalidateRequirementsOwner(ownerSessionId: string): void { this.#mutate({ ownerSessionId }, store => store.invalidateRequirementsOwner(ownerSessionId)); }
 	intakeRequirementsSource(source: RequirementsSource): void { this.intakeRequirementsSources([source]); }
-	intakeRequirementsSources(sources: readonly RequirementsSource[]): void { this.#mutate({ sourceKeys: sources.map(source => source.key), dependencies: true }, store => store.intakeRequirementsSources(sources)); }
+	intakeRequirementsSources(sources: readonly RequirementsSource[]): void {
+		this.#backend.transaction(() => {
+			const sourceKeys = new Set<string>(), dependencyKeys = new Set<string>();
+			for (const source of sources) {
+				sourceKeys.add(source.key);
+				if (source.units.length === 0 && source.integrityAvailable === false) continue;
+				const existing = this.#backend.source(source.key);
+				// Unchanged bytes and locator/manifest hydration do not consume old batches
+				// or their potentially journal-wide frozen read sets.
+				if (existing && (existing.integrity !== source.integrity || existing.integrityAvailable === false))
+					dependencyKeys.add(source.key);
+			}
+			this.#mutate({ sourceKeys, dependencyKeys }, store => store.intakeRequirementsSources(sources));
+		});
+	}
 	setRequirementsSourceDisposition(key: string, integrity: string, state: Exclude<RequirementsSourceState, "complete" | "gap">, reason: string): void { this.#mutate({ sourceKeys: [key] }, store => store.setRequirementsSourceDisposition(key, integrity, state, reason)); }
 	recordRequirementsGap(key: string, integrity: string, actor: string, reason: string): void { this.#mutate({ sourceKeys: [key] }, store => store.recordRequirementsGap(key, integrity, actor, reason)); }
 	saveRequirementsBatch(batch: RequirementsBatch): string { return this.#mutate({ sourceKeys: [batch.sourceKey], batchIds: this.#backend.batchIdsForSource(batch.sourceKey) }, store => store.saveRequirementsBatch(batch)); }
@@ -994,7 +1008,10 @@ export class RequirementsStore {
 		const latest = new Map<string, RequirementsObservation>();
 		for (const observation of observations) latest.set(observation.key, { ...latest.get(observation.key), ...observation });
 		const changed = [...latest.values()].filter(observation => { const source = this.#backend.source(observation.key); return source && !(observation.integrity === source.integrity && source.integrityAvailable !== false && (!observation.locators || JSON.stringify(source.locators) === JSON.stringify(observation.locators))) && !(observation.integrity === null && source.integrityAvailable === false && !observation.locators); });
-		if (changed.length) this.#mutate({ sourceKeys: changed.map(row => row.key), dependencies: true }, store => store.reconcileRequirementsSources(changed));
+		if (changed.length) {
+			const sourceKeys = changed.map(row => row.key);
+			this.#mutate({ sourceKeys, dependencyKeys: sourceKeys }, store => store.reconcileRequirementsSources(changed));
+		}
 	}
 	quarantineRequirements(revisionIds: string[], actor: string, reason: string): number { return this.#mutate({ revisionIds }, store => store.quarantineRequirements(revisionIds, actor, reason)); }
 	restoreRequirements(receipt: RequirementsRestoreReceipt): boolean { return this.#mutate({ revisionIds: receipt.revisionIds, requirementIds: Object.keys(receipt.readHeads ?? {}), receiptId: receipt.id }, store => store.restoreRequirements(receipt)); }

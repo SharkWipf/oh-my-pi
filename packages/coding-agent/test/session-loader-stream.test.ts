@@ -5,6 +5,7 @@ import * as path from "node:path";
 import type { FileEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import * as sessionLoader from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
+import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 
 // Parity contract for the ≥8MiB streaming loader (now Bun.JSONL-based): it must
 // produce the SAME entries + titleSlot as the common-path parser
@@ -74,6 +75,39 @@ function messageTexts(entries: FileEntry[]): string[] {
 	}
 	return texts;
 }
+
+it("point reads preserve top-level IDs, whole UTF-8 records, and fresh rewritten/appended content", async () => {
+	const storage = new FileSessionStorage();
+	const id = 'chosen-é漢/"';
+	const whole = 'Whole source with "quotes" and nested-looking {"id":"phantom"}: ' + "é漢".repeat(70_000);
+	const target = msg(id, "decoy", whole);
+	const decoy = { ...msg("decoy", "s1", JSON.stringify({ id })), metadata: { id: "phantom" } };
+	const encodedId = JSON.stringify(id).replace("é", "\\u00E9").replace("漢", "\\u6F22");
+	const targetLine = '{"message":' + JSON.stringify(target.message) + ',"\\u0069d":' + encodedId + ',"type":"message","parentId":"decoy","timestamp":' + JSON.stringify(ISO) + '}';
+	const slot = serializeTitleSlot({ title: "Before", source: "user", updatedAt: ISO });
+	const file = await writeTemp([slot, JSON.stringify(HEADER), JSON.stringify(decoy), '{"id":' + JSON.stringify(id) + ',"broken":}', targetLine].join("\n"));
+	const selected = new Set(["decoy", id, "phantom"]);
+	let entries: FileEntry[] = [];
+	await sessionLoader.visitEntriesFromFile(file, entry => { entries.push(entry); }, storage, selected);
+	expect(entryIds(entries)).toEqual(["s1", "decoy", id]);
+	expect(messageTexts(entries).at(-1)).toBe(whole);
+
+	await storage.writeTextAtomic(file, [slot, JSON.stringify(HEADER), JSON.stringify(msg(id, "s1", "Rewritten original")), ""].join("\n"));
+	entries = [];
+	await sessionLoader.visitEntriesFromFile(file, entry => { entries.push(entry); }, storage, selected);
+	expect(entryIds(entries)).toEqual(["s1", id]);
+	expect(messageTexts(entries)).toEqual(["Rewritten original"]);
+	const writer = storage.openWriter(file);
+	await writer.append(JSON.stringify(msg("accepted", id, "Newly appended original")) + "\n");
+	await writer.close();
+	await storage.updateSessionTitle(file, { title: "Current heading", source: "user", updatedAt: ISO });
+	entries = [];
+	await sessionLoader.visitEntriesFromFile(file, entry => { entries.push(entry); }, storage, new Set(["accepted"]));
+	expect(entryIds(entries)).toEqual(["s1", "accepted"]);
+	expect(messageTexts(entries)).toEqual(["Newly appended original"]);
+	expect(entries[0]).toMatchObject({ title: "Current heading" });
+});
+
 
 describe("loadEntriesFromFileStream (Bun.JSONL parity)", () => {
 	it("visits entries incrementally while skipping malformed lines", async () => {
