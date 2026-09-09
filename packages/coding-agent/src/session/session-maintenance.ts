@@ -670,6 +670,7 @@ export class SessionMaintenance {
 
 	async #pruneToolOutputs(operation: CompactionOperation): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
 		if (!this.#compactionOwnerValid(operation)) throw new CompactionCancelledError();
+		if (!operation.manager.hasBranchToolResults()) return undefined;
 		let rewrite: Promise<void> | undefined;
 		const branchEntries = operation.manager.getBranch();
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
@@ -721,6 +722,9 @@ export class SessionMaintenance {
 		const { supersedeReads, dropUseless } = this.#host.settings.getGroup("compaction");
 		if (!supersedeReads && !dropUseless) return undefined;
 		if (!this.#compactionOwnerValid(operation)) throw new CompactionCancelledError();
+		// Consult journal metadata, not the displayed/selected context: hidden
+		// source results still need the normal chronological eligibility pass.
+		if (!operation.manager.hasBranchToolResults()) return undefined;
 		let rewrite: Promise<void> | undefined;
 		const branchEntries = operation.manager.getBranch();
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
@@ -2648,7 +2652,7 @@ export class SessionMaintenance {
 		// The error shouldn't trigger another compaction since we already compacted.
 		// Example: opus fails -> switch to codex -> compact -> switch back to opus -> opus error
 		// is still in context but shouldn't trigger compaction again.
-		const compactionEntry = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
+		const compactionEntry = this.#host.sessionManager.getLatestCompactionEntry();
 		const errorIsFromBeforeCompaction =
 			compactionEntry !== null && assistantMessage.timestamp < new Date(compactionEntry.timestamp).getTime();
 		const payloadRejection =
