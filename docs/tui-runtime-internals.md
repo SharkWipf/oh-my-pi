@@ -24,7 +24,7 @@ Each normal frame:
 Graceful shutdown switches the provider to Flush policy and synchronously drains
 every currently eligible finalized prefix before terminal handoff.
 
-The welcome header follows the same ordered retirement model but is composer-owned: it stays live viewport chrome while its intro animates and while the screen has room, then retires once — before any transcript batch — when content first overflows.
+The welcome header follows the same ordered retirement model but is composer-owned: it stays live viewport chrome while its intro animates and while the screen has room, then retires once — before any transcript batch — when content first overflows. After a compaction rebuild, its atomic replay also retires the fresh transcript’s overflowing settled prefix; otherwise a header-only replay would leave retained tool cards squeezed into activity labels until another paint.
 
 ## Input and focus
 

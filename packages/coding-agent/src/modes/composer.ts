@@ -378,7 +378,10 @@ export class Composer implements TerminalFrameProvider {
 			};
 		}
 		if (this.#headerReplayPending) {
-			const transcriptReplay = transcript.peekReplayBatch(width);
+			// A compaction rebuild has fresh settled blocks but no committed ledger.
+			// Retire its overflowing prefix in this same replay: replay frames are
+			// atomic and the TUI does not schedule another paint to drain them.
+			const transcriptReplay = transcript.peekFinalizedBatch(width, Math.max(0, rows - chromeRows));
 			// A replay follows a scrollback clear, so the header recomposes at
 			// the new width exactly like transcript entries do. An empty
 			// recompose (welcome unmounted after retirement) falls back to the
