@@ -16,6 +16,7 @@ import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { createAssistantMessage } from "./helpers/agent-session-setup";
 
 function activeGoalState(): GoalModeState {
 	const now = Date.now();
@@ -209,15 +210,35 @@ describe("AgentSession mid-run threshold compaction", () => {
 	});
 
 	it("compacts in place between tool-call turns during an active goal run", async () => {
-		const { session, observedContexts } = await createHarness();
+		const { session, sessionManager, observedContexts } = await createHarness({
+			"compaction.thresholdTokens": 25_000,
+		});
+		// Real reclaimable history keeps this about mid-run maintenance, not the
+		// calibrated price of a tiny synthetic turn plus its goal-context message.
+		for (let turn = 0; turn < 2; turn++) {
+			const oldUser: AgentMessage = {
+				role: "user",
+				content: (turn === 0 ? "OLD SOURCE " : "OTHER SOURCE ").repeat(2_000),
+				timestamp: turn + 1,
+			};
+			const oldAssistant = createAssistantMessage("old response ".repeat(2_000));
+			for (const message of [oldUser, oldAssistant]) {
+				sessionManager.appendMessage(message);
+				session.agent.appendMessage(message);
+			}
+		}
 		session.setGoalModeState(activeGoalState());
-		const compactSpy = mockCompaction("ACTIVE-GOAL-MID-RUN-COMPACTED");
+		const summary = "ACTIVE-GOAL-MID-RUN-COMPACTED";
+		mockCompaction(summary);
 
 		await session.prompt("work on the release");
 
-		expect(compactSpy).toHaveBeenCalledTimes(1);
-		expect(observedContexts.length).toBeGreaterThanOrEqual(2);
-		expect(observedContexts[1].join("\n")).toContain("ACTIVE-GOAL-MID-RUN-COMPACTED");
+		expect(observedContexts[0].join("\n")).toContain("OLD SOURCE");
+		expect(observedContexts[0].join("\n")).not.toContain(summary);
+		expect(observedContexts[1].join("\n")).toContain(summary);
+		expect(observedContexts[1].join("\n")).not.toContain("OLD SOURCE");
+		expect(sessionManager.getBranch().filter(entry => entry.type === "compaction")).toHaveLength(1);
+		expect(session.getGoalModeState()?.goal.status).toBe("active");
 	});
 
 	it("does not wait for message persistence below the mid-run threshold", async () => {
