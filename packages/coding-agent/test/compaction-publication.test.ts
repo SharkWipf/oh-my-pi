@@ -137,7 +137,7 @@ describe("compaction durable publication", () => {
 		it(`retains selected source through ${mode} local rollover without a generated summary`, async () => {
 			const f = fixture(true);
 			const source = f.manager.getEntry(f.first);
-			if (source?.type !== "message") throw new Error("Expected original source");
+			if (source?.type !== "message" || source.message.role !== "user") throw new Error("Expected original user");
 			f.host.compactionSourceSelection = async () => ({
 				originalSourceMessage: getOriginalSourceMessage,
 				selectedSources: [{ entryId: source.id, order: 0, message: source.message }],
