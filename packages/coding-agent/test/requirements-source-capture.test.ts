@@ -143,6 +143,29 @@ describe("accepted original source authority", () => {
 		await unlink(journalPath);
 		expect((await session.observeRequirementsEvidence([retained]))[0].integrity).toBeNull();
 	});
+	test("processing uses the normal compacted context and keeps whole originals outside that view", async () => {
+		const session = manager();
+		const distant = append(session, "Complete distant authored instruction, never truncate this original.");
+		for (let index = 0; index < 4096; index++) append(session, `omitted history ${index}`);
+		const kept = session.appendMessage({ role: "user", producer: { type: "human" }, content: "expanded retained delivery", originalSubmission: { text: "Whole retained pre-expansion instruction" }, timestamp: 1 });
+		session.appendCompaction("Context summary, not authored source evidence", undefined, kept, 100000);
+		const current = session.appendMessage({ role: "user", producer: { type: "human" }, content: "expanded current delivery", originalSubmission: { text: "Whole current pre-expansion instruction" }, timestamp: 2 });
+		const later = append(session, "Future source must not enter the earlier processing context");
+		const source = (await session.resolveRequirementsEvidence(session.getRequirementsSource(current)!.key))!;
+		expect(session.getLeafId()).toBe(later);
+		expect(source.context.map(message => message.role)).toEqual(["compactionSummary", "user", "user"]);
+		expect(source.units[0].text).toBe("Whole current pre-expansion instruction");
+		expect(source.contextIndex).toBeUndefined();
+		expect(source.referents.map(reference => [reference.source.original.entryId, reference.units[0].text, reference.contextIndex])).toEqual([[kept, "Whole retained pre-expansion instruction", undefined]]);
+		expect(source.unavailableContext).toEqual([]);
+		session.branch(kept);
+		const sibling = append(session, "Another branch must not enter the addressed source context");
+		const historical = await session.resolveRequirementsEvidence(source.source.key, source.source);
+		expect(historical?.context).toEqual(source.context);
+		expect(session.getLeafId()).toBe(sibling);
+		const addressed = await session.resolveRequirementsEvidence(session.getRequirementsSource(distant)!.key, undefined, { context: false });
+		expect(addressed?.units[0].text).toBe("Complete distant authored instruction, never truncate this original.");
+	});
 	test("later assistant and human entries preserve original A while reset still revokes it", async () => {
 		const session = manager();
 		for (let index = 0; index < 512; index++) append(session, `history ${index}`);

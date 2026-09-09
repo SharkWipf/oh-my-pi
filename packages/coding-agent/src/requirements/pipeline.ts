@@ -98,7 +98,7 @@ function array(value: unknown, label: string): unknown[] {
 	if (!Array.isArray(value)) throw new RequirementsPipelineError("mechanical", `${label} must be an array`);
 	return value;
 }
-function allSources(input: RequirementsEvidencePackage): ResolvedRequirementsSource[] {
+function allSources(input: RequirementsEvidencePackage): Map<string, ResolvedRequirementsSource> {
 	const found = new Map<string, ResolvedRequirementsSource>();
 	const visit = (source: ResolvedRequirementsSource) => {
 		if (found.has(source.source.key)) return;
@@ -107,20 +107,12 @@ function allSources(input: RequirementsEvidencePackage): ResolvedRequirementsSou
 	};
 	visit(input.source);
 	for (const reference of input.references) visit(reference);
-	return [...found.values()];
+	return found;
 }
-export function verifyRequirementsEvidence(value: unknown, input: RequirementsEvidencePackage): RequirementsEvidence {
-	const span = object(value, "evidence");
-	keys(span, ["sourceKey", "integrity", "unitId"], "evidence");
-	const sourceKey = text(span.sourceKey, "sourceKey");
-	const integrity = text(span.integrity, "integrity");
-	const unitId = text(span.unitId, "unitId");
-	const resolved = allSources(input).find(item => item.source.key === sourceKey);
-	const descriptor = resolved?.source.units.find(unit => unit.id === unitId);
-	const unit = resolved?.units.find(unit => unit.id === unitId);
-	if (!resolved || resolved.source.integrity !== integrity || !descriptor || !unit || descriptor.unsupportedReason) {
-		throw new RequirementsPipelineError("mechanical", "Unknown, stale or unsupported evidence unit");
-	}
+function verifyRequirementsUnit(
+	descriptor: RequirementsBatch["manifest"][number],
+	unit: ResolvedRequirementsSource["units"][number],
+): void {
 	const bytes =
 		unit.text !== undefined
 			? Buffer.from(unit.text, "utf8")
@@ -136,7 +128,27 @@ export function verifyRequirementsEvidence(value: unknown, input: RequirementsEv
 	}
 	if ((unit.text !== undefined ? "text" : "image") !== descriptor.kind)
 		throw new RequirementsPipelineError("mechanical", "Evidence kind differs from frozen manifest");
+}
+function verifyRequirementsEvidenceInSources(
+	value: unknown,
+	sources: ReadonlyMap<string, ResolvedRequirementsSource>,
+): RequirementsEvidence {
+	const span = object(value, "evidence");
+	keys(span, ["sourceKey", "integrity", "unitId"], "evidence");
+	const sourceKey = text(span.sourceKey, "sourceKey");
+	const integrity = text(span.integrity, "integrity");
+	const unitId = text(span.unitId, "unitId");
+	const resolved = sources.get(sourceKey);
+	const descriptor = resolved?.source.units.find(unit => unit.id === unitId);
+	const unit = resolved?.units.find(unit => unit.id === unitId);
+	if (!resolved || resolved.source.integrity !== integrity || !descriptor || !unit || descriptor.unsupportedReason) {
+		throw new RequirementsPipelineError("mechanical", "Unknown, stale or unsupported evidence unit");
+	}
+	verifyRequirementsUnit(descriptor, unit);
 	return { sourceKey, integrity, unitId };
+}
+export function verifyRequirementsEvidence(value: unknown, input: RequirementsEvidencePackage): RequirementsEvidence {
+	return verifyRequirementsEvidenceInSources(value, allSources(input));
 }
 function scope(value: unknown, input: RequirementsEvidencePackage): RequirementsScope {
 	const candidate = object(value, "scope");
@@ -202,6 +214,7 @@ export function admitRequirementsCandidates(raw: unknown, input: RequirementsEvi
 	if (seenUnits.size !== source.units.length)
 		throw new RequirementsPipelineError("mechanical", "Not every original source unit was presented");
 	const seen = new Set<string>();
+	const sources = allSources(input);
 	return array(envelope.operations, "operations").map(rawOperation => {
 		const op = object(rawOperation, "operation");
 		keys(
@@ -214,7 +227,7 @@ export function admitRequirementsCandidates(raw: unknown, input: RequirementsEvi
 		seen.add(id);
 		if (op.kind !== "add" && op.kind !== "change" && op.kind !== "withdraw")
 			throw new RequirementsPipelineError("mechanical", "Unknown operation");
-		const evidence = array(op.evidence, "evidence").map(span => verifyRequirementsEvidence(span, input));
+		const evidence = array(op.evidence, "evidence").map(span => verifyRequirementsEvidenceInSources(span, sources));
 		if (
 			evidence.length &&
 			evidence.every(span => span.sourceKey === source.key && source.adoptedUnitIds?.includes(span.unitId))
@@ -225,7 +238,7 @@ export function admitRequirementsCandidates(raw: unknown, input: RequirementsEvi
 			);
 		if (!evidence.some(span => span.sourceKey === source.key) || source.origin.kind !== "human")
 			throw new RequirementsPipelineError("mechanical", "Operation lacks host-attested operator source authority");
-		const referents = array(op.referents ?? [], "referents").map(span => verifyRequirementsEvidence(span, input));
+		const referents = array(op.referents ?? [], "referents").map(span => verifyRequirementsEvidenceInSources(span, sources));
 		const predecessors = array(op.predecessorRevisionIds, "predecessorRevisionIds").map(value =>
 			text(value, "predecessor"),
 		);
@@ -253,7 +266,7 @@ export function admitRequirementsCandidates(raw: unknown, input: RequirementsEvi
 					successorSourceKey: source.key,
 					evidence: [
 						...evidence.filter(span => span.sourceKey === source.key),
-						...predecessor.evidence.map(span => verifyRequirementsEvidence(span, input)),
+						...predecessor.evidence.map(span => verifyRequirementsEvidenceInSources(span, sources)),
 					],
 				};
 			});
@@ -387,13 +400,12 @@ function citedEvidencePayload(
 	input: RequirementsEvidencePackage,
 	candidates: readonly RequirementsCandidate[],
 ): Map<string, CitedRequirementsEvidence> {
-	const sources = new Map<string, ResolvedRequirementsSource>();
-	for (const source of allSources(input)) sources.set(source.source.key, source);
+	const sources = allSources(input);
 	const cited = new Map<string, CitedRequirementsEvidence>();
 	const append = (span: RequirementsEvidence) => {
 		const identity = citedEvidenceKey(span);
 		if (cited.has(identity)) return;
-		verifyRequirementsEvidence(span, input);
+		verifyRequirementsEvidenceInSources(span, sources);
 		const unit = sources.get(span.sourceKey)!.units.find(unit => unit.id === span.unitId)!;
 		if (unit.text !== undefined) {
 			cited.set(identity, { ...span, text: unit.text });
@@ -419,7 +431,7 @@ function contextualPayload(input: RequirementsEvidencePackage) {
 		sourceIntegrity: input.source.source.integrity,
 		projectId: input.projectId,
 		owner: input.authority,
-		sources: allSources(input).map(source =>
+		sources: Array.from(allSources(input).values(), source =>
 			source.context === input.source.context && source.contextIndex !== undefined
 				? { descriptor: source.source, contextIndex: source.contextIndex }
 				: { descriptor: source.source, units: source.units },
@@ -439,20 +451,38 @@ async function call(
 	signal: AbortSignal,
 	contextual: boolean,
 ): Promise<{ raw: unknown; model: string }> {
+	signal.throwIfAborted();
 	const resolution = resolveRoleModelFull(host.settings, roles[stage], host.modelRegistry.getAll(), host.getModel());
 	const model = resolution.model;
 	if (!model) throw new RequirementsPipelineError(stage, resolution.warning ?? `Configure ${roles[stage]} model role`);
 	const images: ImageContent[] = [];
 	if (contextual) {
-		for (const source of allSources(input))
-			for (const descriptor of source.source.units) {
+		let sliceStarted = performance.now();
+		for (const source of allSources(input).values()) {
+			let unitsById: Map<string, ResolvedRequirementsSource["units"][number]> | undefined;
+			for (let index = 0; index < source.source.units.length; index++) {
+				const descriptor = source.source.units[index];
 				if (descriptor.unsupportedReason)
 					throw new RequirementsPipelineError(stage, descriptor.unsupportedReason, true);
-				const unit = source.units.find(unit => unit.id === descriptor.id);
+				let unit: ResolvedRequirementsSource["units"][number] | undefined = source.units[index];
+				if (unit?.id !== descriptor.id) {
+					if (!unitsById) {
+						unitsById = new Map();
+						for (const original of source.units)
+							if (!unitsById.has(original.id)) unitsById.set(original.id, original);
+					}
+					unit = unitsById.get(descriptor.id);
+				}
 				if (!unit || (unit.text === undefined && !unit.image))
 					throw new RequirementsPipelineError(stage, `Original unit ${descriptor.id} unavailable`, true);
-				verifyRequirementsEvidence({ sourceKey: source.source.key, integrity: source.source.integrity, unitId: descriptor.id }, input);
+				verifyRequirementsUnit(descriptor, unit);
+				if (performance.now() - sliceStarted >= 8) {
+					await new Promise<void>(resolve => setImmediate(resolve));
+					signal.throwIfAborted();
+					sliceStarted = performance.now();
+				}
 			}
+		}
 	}
 	const imageIndexes = new Map<string, number>();
 	const serialized = JSON.stringify(payload, (_key, value: unknown) => {
@@ -663,6 +693,10 @@ export function createRequirementsBatch(
 			for (const span of relation.evidence) selected.add(span.sourceKey);
 		}
 	}
+	const readSourceIntegrities: Record<string, string> = {};
+	for (const source of allSources(input).values())
+		if (!source.source.referenceOnly || selected.has(source.source.key))
+			readSourceIntegrities[source.source.key] = source.source.integrity;
 	return {
 		id: randomUUID(),
 		sourceKey: input.source.source.key,
@@ -671,11 +705,7 @@ export function createRequirementsBatch(
 		reviewRevision: `${REQUIREMENTS_FORMAT}:${input.publicationRevision}`,
 		manifest: input.source.source.units,
 		readHeads: input.readHeads,
-		readSourceIntegrities: Object.fromEntries(
-			allSources(input)
-				.filter(source => !source.source.referenceOnly || selected.has(source.source.key))
-				.map(source => [source.source.key, source.source.integrity]),
-		),
+		readSourceIntegrities,
 		authority: input.authority,
 		operations: [...operations],
 		operationIds: [...operationIds],

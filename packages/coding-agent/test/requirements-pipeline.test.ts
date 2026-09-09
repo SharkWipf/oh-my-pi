@@ -825,7 +825,7 @@ test("foreign source proofs detect same-size same-mtime replacement and journal 
 	}
 });
 
-test("persisted assistant/tool adoption addresses distant originals without duplicating context or granting authority", async () => {
+test("persisted assistant/tool adoption retains distant original evidence without granting authority", async () => {
 	using temp = TempDir.createSync("requirements-adopted-originals-");
 	const f = await fixture();
 	const foreign = await fixture("Independent foreign source bytes remain available.");
@@ -933,24 +933,18 @@ test("persisted assistant/tool adoption addresses distant originals without dupl
 			[source.key, foreign.source.key, assistant.source.key].sort(),
 		);
 		for (const payload of requests.slice(0, 2)) {
-			const sources = payload.sources as { descriptor: typeof source; contextIndex?: number; units?: unknown }[];
-			const context = payload.originalContext as typeof resolved.context;
+			const sources = payload.sources as { descriptor: typeof source }[];
+			const suppliedEvidence = JSON.stringify({ sources, originalContext: payload.originalContext });
 			for (const [entryId, expectedText] of [
 				[assistantId, assistantText],
 				[toolId, toolText],
 			]) {
 				const reference = sources.find(item => item.descriptor.original.entryId === entryId)!;
 				expect(reference.descriptor.referenceOnly).toBe(true);
-				expect(reference.units).toBeUndefined();
-				expect(JSON.stringify(context[reference.contextIndex!])).toContain(expectedText);
-				expect(context.length - reference.contextIndex!).toBeGreaterThan(72);
-				// Selected citedText is a separate review aid, not another original-context serialization.
-				expect(JSON.stringify({ sources, originalContext: context }).split(expectedText)).toHaveLength(2);
+				expect(suppliedEvidence).toContain(expectedText);
 			}
-			expect(JSON.stringify(context)).toContain(acceptance);
-			expect(sources.find(item => item.descriptor.key === foreign.source.key)?.units).toEqual(
-				foreign.input.source.units,
-			);
+			expect(suppliedEvidence).toContain(acceptance);
+			expect(suppliedEvidence).toContain(foreign.sourceText);
 		}
 		const sanity = requests.at(-1)!;
 		expect(Object.keys(sanity)).toEqual(["candidates"]);
@@ -1202,10 +1196,11 @@ test("unrelated whole-unit citations cannot borrow contextual support", async ()
 	await foreign.host.sessionManager.close();
 });
 
-test("whole image evidence reaches contextual stages but never candidate-only sanity", async () => {
+test("whole image evidence resolves units by ID and reaches only contextual stages", async () => {
 	const image: ImageContent = { type: "image", mimeType: "image/png",
 		data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC" };
 	const f = await fixture("Use the exact marker shown in the attached image.", undefined, [image]);
+	f.input.source.units.reverse();
 	const operation = { ...f.operation(), evidence: [f.operation().evidence[0], {
 		sourceKey: f.source.key, integrity: f.source.integrity, unitId: "1",
 	}] };
@@ -1228,7 +1223,7 @@ test("whole image evidence reaches contextual stages but never candidate-only sa
 	} finally { await f.host.sessionManager.close(); }
 });
 
-// Exact seven inputs selected by /tmp/final-live-requirements-postfix.mjs.
+// Original seven inputs retained in meta/evidence/2026-09-08/ship-memory/memory-review/original-postfix-output.json.
 // Controlled responses exercise stage boundaries and durable behavior, not live semantic accuracy.
 const originalPostfixCases: { id: string; text: string; statements: string[]; prior?: { assistant?: string; tool?: string; distance?: number }; rejected?: boolean; obligations?: string[] }[] = [
 	{ id: "multilingual-eight", text: "For this session, keep all eight requirements:\n1. Store exports in /tmp/café/東京/result.json.\n2. Do NOT use tabs for indentation.\n3. The network timeout MUST be 1700 ms.\n4. Preserve the condition x < y exactly.\n5. Gebruik UTF-8 voor alle tekstbestanden.\n6. Ne jamais supprimer les fichiers source.\n7. Listen on TCP port 25432.\n8. Keep XML literal <policy mode=\"strict\"/> unchanged.", statements: ["Store exports in /tmp/café/東京/result.json.", "Do NOT use tabs for indentation.", "The network timeout MUST be 1700 ms.", "Preserve the condition x < y exactly.", "Gebruik UTF-8 voor alle tekstbestanden.", "Ne jamais supprimer les fichiers source.", "Listen on TCP port 25432.", "Keep XML literal <policy mode=\"strict\"/> unchanged."] },

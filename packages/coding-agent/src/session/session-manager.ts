@@ -2772,98 +2772,108 @@ export class SessionManager {
 		return undefined;
 	}
 
-	/** Explicit processing materializes the source chronology; catalog and currentness checks never do. */
+	#requirementsSourceForKey(key: string): RequirementsSource | undefined {
+		let identity: unknown;
+		try { identity = JSON.parse(key); } catch { return undefined; }
+		if (!Array.isArray(identity) || identity.length !== 2 || typeof identity[1] !== "string") return undefined;
+		const source = this.getRequirementsSource(identity[1]);
+		return source?.key === key ? source : undefined;
+	}
+
+	#requirementsContextContainsUnits(message: AgentMessage, source: ResolvedRequirementsSource): boolean {
+		if (!("content" in message)) return false;
+		if (typeof message.content === "string") return source.units.length === 1 && source.units[0].text === message.content;
+		if (message.content.length !== source.units.length) return false;
+		return message.content.every((part, index) => {
+			const unit = source.units[index];
+			return part.type === "text" ? part.text === unit.text
+				: part.type === "image" && unit.image !== undefined && part.data === unit.image.data && part.mimeType === unit.image.mimeType;
+		});
+	}
+
+	/** Processing reuses the addressed execution window; only its selected originals are materialized. */
 	async resolveRequirementsEvidence(key: string, descriptor?: RequirementsSource, options?: { context?: boolean }): Promise<ResolvedRequirementsSource | undefined> {
 		if (options?.context === false) return this.#resolveRequirementsUnits(key, descriptor);
+		descriptor ??= this.#requirementsSourceForKey(key);
+		if (!descriptor) return undefined;
+		const locator = descriptor.locators.find(locator => locator.sessionId === this.#sessionId);
+		if (!locator) return this.#resolveRequirementsUnits(key, descriptor);
 		const generation = this.#requirementsSourceRewriteVersion;
+		const epoch = this.getRequirementsEpoch();
+		const wasApplicable = this.isRequirementsSourceApplicable(descriptor);
 		const journalLocator = { sessionId: this.#sessionId, journalPath: this.#sessionFile, entryId: "" };
 		const journalVersion = this.#requirementsJournalVersion(journalLocator);
-		const resolved = await this.#resolveRequirementsUnits(key, descriptor);
-		if (!resolved || resolved.source.referenceOnly) return resolved;
-		const locator = resolved.source.locators.find(locator => locator.sessionId === this.#sessionId);
-		const entry = locator ? this.getEntry(locator.entryId) : undefined;
-		const predecessors: (SessionMessageEntry | CustomMessageEntry)[] = [];
-		const wasApplicable = !!locator && this.isRequirementsSourceApplicable(resolved.source);
-		const visited = new Set<string>();
-		let cursor = entry?.parentId ? this.getEntry(entry.parentId) : undefined;
-		while (cursor && cursor.type !== "reset_boundary" && !visited.has(cursor.id)) {
-			visited.add(cursor.id);
-			if (cursor.type === "message" || cursor.type === "custom_message") predecessors.push(cursor);
-			cursor = cursor.parentId ? this.getEntry(cursor.parentId) : undefined;
-			if ((visited.size & 255) === 0) await Bun.sleep(0);
-		}
-		let journalEntries: Map<string, SessionMessageEntry | CustomMessageEntry> | undefined;
-		if (predecessors.length && journalLocator.journalPath) {
-			journalEntries = new Map();
+		const { path, controls, inventory } = this.#index.contextPath(undefined, locator.entryId);
+		const execution = buildSessionContextFromPath(path, undefined, controls, inventory).messages;
+		const context = structuredClone(execution);
+		const messageIndices = new Map(execution.map((message, index) => [message, index]));
+		const selected = path.filter((entry): entry is SessionMessageEntry | CustomMessageEntry => entry.type === "message" || entry.type === "custom_message");
+		const needed = new Set(selected.map(entry => entry.id));
+		needed.add(locator.entryId);
+		const readSelected = async (): Promise<Map<string, SessionMessageEntry | CustomMessageEntry>> => {
+			if (!journalLocator.journalPath) return new Map(selected.map(entry => [entry.id, entry]));
+			const entries = new Map<string, SessionMessageEntry | CustomMessageEntry>();
 			let journalId: string | undefined;
 			try {
-				await visitEntriesFromFile(journalLocator.journalPath, candidate => {
-					if (candidate.type === "session") { journalId = candidate.id; return; }
-					if (journalId === journalLocator.sessionId && visited.has(candidate.id) && (candidate.type === "message" || candidate.type === "custom_message")) journalEntries!.set(candidate.id, candidate);
-					if (journalEntries!.size === predecessors.length) return false;
+				await visitEntriesFromFile(journalLocator.journalPath, entry => {
+					if (entry.type === "session") { journalId = entry.id; return; }
+					if (journalId === journalLocator.sessionId && needed.has(entry.id) && (entry.type === "message" || entry.type === "custom_message")) entries.set(entry.id, entry);
+					if (entries.size === needed.size) return false;
 				}, this.#storage.existsSync(journalLocator.journalPath) ? this.#storage : new FileSessionStorage());
 			} catch (error) { if (!isEnoent(error)) throw error; }
-		}
-		const preceding: ResolvedRequirementsSource[] = [];
+			return entries;
+		};
+		const journalEntries = await readSelected();
+		if (journalLocator.sessionId !== this.#sessionId || epoch !== this.getRequirementsEpoch()) return undefined;
+		const resolved = await this.#resolveRequirementsUnits(key, descriptor, journalEntries);
+		if (!resolved || resolved.source.referenceOnly) return resolved;
+		const originals = new Map<string, ResolvedRequirementsSource>([[key, resolved]]);
+		resolved.context = context;
+		delete resolved.contextIndex;
+		const referents: ResolvedRequirementsSource[] = [];
 		const unavailableContext: RequirementsSource[] = [];
-		for (let index = predecessors.length - 1; index >= 0; index--) {
-			const reference = this.#requirementsDescriptor(predecessors[index], resolved.source.epoch, null);
-			const original = await this.#resolveRequirementsUnits(reference.key, reference, journalEntries);
-			if (original) preceding.push(original);
-			else unavailableContext.push({ ...reference, state: "orphaned", integrityAvailable: false, reason: "Original contextual evidence is unavailable" });
+		for (const [index, entry] of selected.entries()) {
+			const reference = this.#requirementsDescriptor(entry, resolved.source.epoch, null);
+			let original = originals.get(reference.key);
+			if (!original) {
+				original = await this.#resolveRequirementsUnits(reference.key, reference, journalEntries);
+				if (original) {
+					originals.set(reference.key, original);
+					original.context = context;
+					delete original.contextIndex;
+					referents.push(original);
+				} else unavailableContext.push({ ...reference, state: "orphaned", integrityAvailable: false, reason: "Original contextual evidence is unavailable" });
+			}
+			const contextIndex = entry.type === "message" ? messageIndices.get(entry.message) : undefined;
+			if (original && contextIndex !== undefined && this.#requirementsContextContainsUnits(context[contextIndex], original)) original.contextIndex ??= contextIndex;
 			if ((index & 255) === 0) await Bun.sleep(0);
 		}
 		const validationGeneration = this.#requirementsSourceRewriteVersion;
-		const journalChanged = journalVersion !== this.#requirementsJournalVersion(journalLocator);
-		if (generation !== validationGeneration || journalChanged) {
-			if (journalChanged && journalEntries && journalLocator.journalPath) {
-				let journalId: string | undefined;
-				const matched = new Set<string>();
-				let changed = false;
-				try {
-					await visitEntriesFromFile(journalLocator.journalPath, candidate => {
-						if (candidate.type === "session") { journalId = candidate.id; return; }
-						const original = journalEntries.get(candidate.id);
-						if (!original) return;
-						if (journalId !== journalLocator.sessionId || (candidate.type !== "message" && candidate.type !== "custom_message") ||
-							this.#requirementsOriginalFingerprint(original) !== this.#requirementsOriginalFingerprint(candidate)) { changed = true; return false; }
-						matched.add(candidate.id);
-						if (matched.size === journalEntries.size) return false;
-					}, this.#storage.existsSync(journalLocator.journalPath) ? this.#storage : new FileSessionStorage());
-				} catch (error) { if (!isEnoent(error)) throw error; changed = true; }
-				if (changed || matched.size !== journalEntries.size) return undefined;
+		if (generation !== validationGeneration || journalVersion !== this.#requirementsJournalVersion(journalLocator)) {
+			const currentEntries = await readSelected();
+			let checked = 0;
+			for (const original of originals.values()) {
+				const current = await this.#resolveRequirementsUnits(original.source.key, original.source, currentEntries);
+				if (!current || current.source.integrity !== original.source.integrity) return undefined;
+				if ((++checked & 255) === 0) await Bun.sleep(0);
 			}
-			if (generation !== validationGeneration) {
-				for (const reference of preceding) {
-					const current = await this.#resolveRequirementsUnits(reference.source.key, reference.source, journalEntries);
-					if (!current || current.source.integrity !== reference.source.integrity) return undefined;
-				}
-			}
-			const current = await this.#resolveRequirementsUnits(key, resolved.source);
-			if (!current || current.source.integrity !== resolved.source.integrity) return undefined;
 		}
-		if (validationGeneration !== this.#requirementsSourceRewriteVersion || journalLocator.sessionId !== this.#sessionId ||
+		if (validationGeneration !== this.#requirementsSourceRewriteVersion || journalLocator.sessionId !== this.#sessionId || epoch !== this.getRequirementsEpoch() ||
 			(wasApplicable && !this.isRequirementsSourceApplicable(resolved.source))) return undefined;
-		const context = [...preceding.flatMap(reference => reference.context), ...resolved.context];
-		for (const [index, reference] of preceding.entries()) { reference.context = context; reference.contextIndex = index; }
-		return { ...resolved, context, contextIndex: context.length - 1, referents: preceding, unavailableContext };
+		return { ...resolved, referents, unavailableContext };
 	}
 
 	/** Materialize only the addressed original whole units, using its existing image depot. */
 	async #resolveRequirementsUnits(key: string, descriptor?: RequirementsSource,
 		journalEntries?: ReadonlyMap<string, SessionMessageEntry | CustomMessageEntry>,
 		dependencies?: { journals: Map<string, RequirementsSource["locators"][number]>; blobs: Set<string> }): Promise<ResolvedRequirementsSource | undefined> {
-		if (!descriptor) {
-			let identity: unknown;
-			try { identity = JSON.parse(key); } catch { return undefined; }
-			if (!Array.isArray(identity) || identity.length !== 2 || typeof identity[1] !== "string") return undefined;
-			descriptor = this.getRequirementsSource(identity[1]);
-			if (descriptor?.key !== key) return undefined;
-		}
+		descriptor ??= this.#requirementsSourceForKey(key);
+		if (!descriptor) return undefined;
 		for (const locator of descriptor.locators) {
 			dependencies?.journals.set(JSON.stringify([locator.sessionId, locator.journalPath]), locator);
-			const before = journalEntries ? undefined : this.#requirementsJournalVersion(locator);
-			const entry = journalEntries ? journalEntries.get(locator.entryId) : await this.#requirementsEntry(locator);
+			const localEntries = locator.sessionId === this.#sessionId && locator.journalPath === this.#sessionFile ? journalEntries : undefined;
+			const before = localEntries?.size ? undefined : this.#requirementsJournalVersion(locator);
+			const entry = localEntries ? localEntries.get(locator.entryId) : await this.#requirementsEntry(locator);
 			const live = locator.sessionId === this.#sessionId ? this.getEntry(locator.entryId) : undefined;
 			if ((live?.type === "message" || live?.type === "custom_message") && live.requirementsInvalidated) continue;
 			if (!entry && before === null && locator.retainedBlobHash) {
@@ -2922,7 +2932,7 @@ export class SessionManager {
 			};
 			if (!manifest.length || (!source.referenceOnly && content.length !== available.length)) { source.state = "unsupported"; source.reason = "Original contains unsupported content blocks"; }
 			const units = available.map((part, index) => part.type === "text" ? { id: unitIds[index], text: part.text } : { id: unitIds[index], image: part });
-			if (!journalEntries && before !== this.#requirementsJournalVersion(locator)) {
+			if (!localEntries && before !== this.#requirementsJournalVersion(locator)) {
 				const current = await this.#requirementsEntry(locator);
 				if (!current || this.#requirementsOriginalFingerprint(current) !== this.#requirementsOriginalFingerprint(entry)) continue;
 			}
