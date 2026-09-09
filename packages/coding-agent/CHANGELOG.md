@@ -22,6 +22,16 @@
 
 - Compacted selected originals now retain their own text/image coordinates through reload and repeated compaction, without replacing an ordinarily retained expanded submission.
 - Fixed physical attribution joining original-input and expanded-delivery coverage solely by journal entry ID; reconstructed and prepared inventories now keep their distinct physical charges without inflating shared ownership.
+- Notes-backed local rollovers preserve selected originals without overriding extension-owned cuts, keep latest requests once in chronological replay, restore branch-local notebook state across resume and clear boundaries, and expose original input and provenance alongside delivered raw history.
+- Automatic snapcompact frame rescue no longer commits a smaller frame window when its text spill increases local context size; genuine reductions remain eligible even when they do not clear the headroom band.
+- Legacy archive migration now reports unavailable original source boundaries and current original-image references before replacing installed history, instead of treating a fresh suffix as a complete original baseline.
+- Automatic image-drop rescue now skips protected source entries while still removing unselected images; explicit image removal and `/shake images` continue to override preservation.
+- Automatic pruning and shaking now retain original deliveries still pending in requirements memory, independently of user-preservation eligibility, while continuing ordinary pruning of unrelated content.
+- Preserve source identity through cached message conversion, secret obfuscation, original-image encoding and URL changes, and inline rasterization. Current selected original images are not silently removed by the ordinary provider image clamp.
+- Fixed repeated snapcompact rejecting genuine reductions by counting the committed prior archive alongside fresh context in the before-state estimate; opaque reasoning remains excluded symmetrically.
+- Controlled source rewrites now publish source content together with remapped snap/native coverage and classifier validity across older and sibling compactions. Affected classifications are removed from every successful historical record; unsupported records retain their raw evidence without reactivating stale facts on resume. Manual overrides and unchanged artifact bytes are preserved.
+- Preservation previews distinguish unavailable model-percentage limits from finite zero and expose source cap blockers; large manual-reset captures use bounded lazy source enumeration.
+### Changed
 
 - Added explicit physical-context and source-coverage inspection APIs with ordered, disjoint rows, separate source quotas, one-time frame/image charges, and unknown native/opaque costs instead of invented provider totals.
 - Added the fullscreen `/context` source manager with independent filters, chronological search, scoped manual resets, classifier controls, live native settings links and separate usage/details reports. `/keep` and `/once` carry source intent and image references through interactive, ACP, RPC and collaboration submission/restoration paths.
@@ -47,11 +57,23 @@
 - Original requirements evidence remains readable when unrelated conversation entries append during resolution; addressed source rewrites and lifecycle changes still invalidate the read.
 - Exact-source requirements actions no longer wait for unrelated cold catalog enumeration. Current accepted requirements can be recalled while historical catalog coverage remains explicitly incomplete.
 - Cataloging accepted originals at new locators preserves their reviewed state after evidence refresh. Completing catalog observation refreshes the next coverage receipt without rewriting earlier request receipts.
+- Long-session footer totals, credential pins, and retained-context reconstruction now reuse the session index instead of repeatedly scanning cold history. Recent sibling branches reuse a bounded control-state checkpoint; full transcript exports still include historical messages.
+- Transcript retirement and tail updates skip already committed blocks while preserving public middle-child replacements and externally assigned child arrays.
+- Compacted selected originals now retain their own text/image coordinates through reload and repeated compaction, without replacing an ordinarily retained expanded submission.
+- Fixed physical attribution joining original-input and expanded-delivery coverage solely by journal entry ID; reconstructed and prepared inventories now keep their distinct physical charges without inflating shared ownership.
+- Ordinary turns prepare preservation policy only after finding an eligible pruning victim. Full selected-user, complete non-user, and pending-live protection still applies before mutation, including source ownership checks and minimum-savings revalidation.
+### Fixed
+
+- Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.
+### Added
+
+- Added opt-in experimental notes-backed context windows with persistent branch-local notes, searchable original session history, retained latest user requests, and a model-callable rollover tool, including in Code Mode.
 
 ## [18.1.15] - 2026-09-08
 
 ### Added
 
+- Added the `retry.waitForUsageReset` setting: when a provider reports usage-limit exhaustion with a reset time (5-hour or weekly quota windows on any provider), the session sleeps until the reset instead of failing fast past `retry.maxDelayMs`.
 - Added `advisor.maxNotesPerUpdate` setting and `WATCHDOG.yml` configuration (default `4`): allows reasoning verifiers to batch findings in a single review update without being rate-limited.
 - Headless browser tabs now freeze when a turn settles so idle animated/WebGL pages stop burning CPU/GPU, resuming automatically on next use; tabs idle past `browser.idleCloseSec` (default 30 minutes) are closed. `persist: true` on `browser.open` opts a tab out of both ([#8246](https://github.com/can1357/oh-my-pi/issues/8246) by [@H4vC](https://github.com/H4vC)).
 

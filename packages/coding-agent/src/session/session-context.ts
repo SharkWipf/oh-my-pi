@@ -10,6 +10,7 @@ import {
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import {
+	type CustomMessage,
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
@@ -17,10 +18,12 @@ import {
 	INTERRUPTED_THINKING_MESSAGE_TYPE,
 	isCustomMessageContent,
 	isEmptyErrorTurn,
+	isUserTurnInitiator,
 	normalizeCustomMessagePayload,
 	PREWALK_PLAN_MESSAGE_TYPE,
 	VIBE_MODE_CONTEXT_MESSAGE_TYPE,
 } from "./messages";
+import { CONTEXT_NOTES_ENTRY_TYPE, getContextNotes, renderContextNotes } from "./context-notes";
 import { type CompactionEntry, EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
 
 // #4470 crash artifacts had legacy frames (no shape metadata) with 17 frames,
@@ -188,6 +191,38 @@ export function getOpenAiRemoteCompactionPayload(
 	};
 }
 
+/**
+ * True for entries that represent a user-attributed request: an ordinary user
+ * message, or a custom message that initiates a user turn per the shared
+ * `isUserTurnInitiator` semantics (directly invoked `/skill:` prompts and
+ * writable-collab prompts). Notes-backed rollover retention uses this so a
+ * custom request crossing a boundary is retained exactly like an ordinary
+ * one, instead of being skipped in favor of an older plain user message.
+ */
+function isUserRequestEntry(entry: SessionEntry): boolean {
+	if (entry.type === "message") {
+		if (entry.message.role === "user") return true;
+		if (entry.message.role === "custom") return isUserTurnInitiator(entry.message as CustomMessage);
+		return false;
+	}
+	if (entry.type === "custom_message") {
+		if (!isCustomMessageContent(entry.content)) return false;
+		const normalized = normalizeCustomMessagePayload(entry);
+		const attribution = entry.attribution === undefined ? undefined : normalized.attribution;
+		return isUserTurnInitiator(
+			createCustomMessage(
+				normalized.customType,
+				normalized.content,
+				normalized.display,
+				normalized.details,
+				entry.timestamp,
+				attribution,
+			),
+		);
+	}
+	return false;
+}
+
 export function buildSessionContext(
 	entries: SessionEntry[],
 	leafId?: string | null,
@@ -263,6 +298,11 @@ export interface SessionContextControlState {
 	mode: string;
 	modeData?: Record<string, unknown>;
 	hasExplicitDefaultModel: boolean;
+	/** Current-epoch notebook and request references, never copied into a boundary. */
+	contextNotesEntry?: SessionEntry;
+	latestUserRequest?: SessionEntry;
+	/** Request visible when the latest notes-backed boundary was committed. */
+	rolloverUserRequest?: SessionEntry;
 }
 
 export function createSessionContextControlState(): SessionContextControlState {
@@ -281,6 +321,18 @@ export function cloneSessionContextControlState(state: SessionContextControlStat
 
 /** Fold exactly the persisted controls used by both full and bounded context construction. */
 export function applySessionContextControlEntry(state: SessionContextControlState, entry: SessionEntry): void {
+	if (entry.type === "reset_boundary") {
+		state.contextNotesEntry = undefined;
+		state.latestUserRequest = undefined;
+		state.rolloverUserRequest = undefined;
+	} else if (entry.type === "custom" && entry.customType === CONTEXT_NOTES_ENTRY_TYPE) {
+		if (getContextNotes([entry])) state.contextNotesEntry = entry;
+	} else if (isUserRequestEntry(entry)) {
+		state.latestUserRequest = entry;
+	} else if (entry.type === "compaction") {
+		state.rolloverUserRequest = isRecord(entry.details) && entry.details.kind === "experimental-context-rollover"
+			? state.latestUserRequest : undefined;
+	}
 	if (entry.type === "thinking_level_change") {
 		state.thinkingLevel = entry.thinkingLevel ?? "off";
 		state.configuredThinkingLevel = entry.configured ?? entry.thinkingLevel ?? undefined;
@@ -481,6 +533,7 @@ export function buildSessionContextFromPath(
 		const snapcompactArchive = snapcompact.getPreservedArchive(compaction.preserveData);
 		const representation = !remoteReplacementHistory
 			? getCompactionSourceRepresentation(compaction.preserveData) : undefined;
+		const rolloverRequest = !options?.transcript ? state.rolloverUserRequest : undefined;
 		const compactionIdx = path.findIndex(entry => entry.id === compaction.id);
 		const replayCommittedSource = () => {
 			if (!representation) return;
@@ -490,9 +543,17 @@ export function buildSessionContextFromPath(
 			if (firstKeptIdx >= 0 && firstKeptIdx < compactionIdx) {
 				for (let i = Math.max(firstKeptIdx, resetBoundaryIdx + 1); i < compactionIdx; i++) ordinary.add(path[i].id);
 			}
+			if (rolloverRequest) ordinary.add(rolloverRequest.id);
 			type ReplayPart = { order: number; entry?: SessionEntry; spans?: SourceBlockRange[]; projection?: "original"; layoutIndices: number[]; blocks?: ReturnType<typeof snapcompact.historyBlocks>; coveredIds?: string[] };
 			const parts: ReplayPart[] = [];
 			const selected = new Map<string, ReplayPart>();
+			const ordinaryParts = new Map<string, ReplayPart>();
+			for (const id of ordinary) {
+				const index = sourceOrder.get(id);
+				if (index === undefined || index <= resetBoundaryIdx || index >= compactionIdx) continue;
+				const part = { order: index, entry: path[index], layoutIndices: [] };
+				ordinaryParts.set(id, part);
+			}
 			const activeEntry = (id: string) => {
 				const index = sourceOrder.get(id);
 				return index !== undefined && index > resetBoundaryIdx && index < compactionIdx ? path[index] : undefined;
@@ -534,7 +595,12 @@ export function buildSessionContextFromPath(
 					if (part.kind === "original-image" && part.currentBlockIndex === undefined) continue;
 					const spans = part.kind === "source" ? part.spans : [{ blockIndex: part.currentBlockIndex!, start: 0, end: 0 }];
 					const entry = activeEntry(part.entryId);
-					if (!entry || (!part.projection && ordinary.has(entry.id))) continue;
+					if (!entry) continue;
+					const ordinaryPart = !part.projection ? ordinaryParts.get(entry.id) : undefined;
+					if (ordinaryPart) {
+						ordinaryPart.layoutIndices.push(layoutIndex);
+						continue;
+					}
 					const key = compactionSourceKey(part);
 					const previous = selected.get(key);
 					if (previous) {
@@ -567,10 +633,7 @@ export function buildSessionContextFromPath(
 				parts.push({ order: order === Infinity ? -1 : order, layoutIndices: [layoutIndex], blocks: indices.map(index => blocks[index]), coveredIds });
 				selected.clear();
 			}
-			for (const id of ordinary) {
-				const entry = activeEntry(id)!;
-				parts.push({ order: sourceOrder.get(id)!, entry, layoutIndices: [] });
-			}
+			for (const part of ordinaryParts.values()) parts.push(part);
 			parts.sort((left, right) => left.order - right.order);
 			const represented = new Set<string>();
 			for (const part of parts) {
@@ -634,6 +697,15 @@ export function buildSessionContextFromPath(
 
 		// Saved layout is authoritative; settings do not reselect historical output.
 
+		// The baseline request participates in the same source union as selected
+		// history. Only a legacy boundary without a layout emits it separately.
+		if (!representation && rolloverRequest) {
+			const requestIdx = sourceOrder.get(rolloverRequest.id);
+			const firstKeptIdx = sourceOrder.get(compaction.firstKeptEntryId);
+			if (requestIdx !== undefined && firstKeptIdx !== undefined && requestIdx < firstKeptIdx) {
+				appendMessage(rolloverRequest);
+			}
+		}
 		// The remote replacement payload (OpenAI remote compaction) carries the
 		// kept turns for the LLM context only; it is not rendered as visible
 		// messages. The collapsed display transcript must still emit the kept
@@ -684,6 +756,18 @@ export function buildSessionContextFromPath(
 		// No compaction - emit all messages, handle branch summaries and custom messages
 		for (const entry of path) {
 			appendMessage(entry);
+		}
+	}
+
+	if (!options?.transcript && state.contextNotesEntry) {
+		const renderedNotes = renderContextNotes([state.contextNotesEntry]);
+		if (renderedNotes.length > 0) {
+			messages.unshift(createCustomMessage(
+				CONTEXT_NOTES_ENTRY_TYPE, renderedNotes, false, undefined, state.contextNotesEntry.timestamp,
+			));
+			// The rendered notebook wrapper is not a retained source-message span.
+			messageSourceIds?.unshift(undefined);
+			if (sourceLocations) for (const location of sourceLocations) location.messageIndex++;
 		}
 	}
 

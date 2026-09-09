@@ -3,6 +3,9 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { remapCompactionSourceRepresentation } from "@oh-my-pi/pi-agent-core/compaction/source";
 import type { SourceLayoutPart, SourceRepresentation } from "@oh-my-pi/pi-ai/compaction-source";
 import { getSourceOrigin } from "@oh-my-pi/pi-ai/utils/source-origin";
+import { CONTEXT_NOTES_ENTRY_TYPE } from "@oh-my-pi/pi-coding-agent/session/context-notes";
+import { createCustomMessage, SKILL_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { buildSessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
@@ -21,6 +24,80 @@ function userContents(messages: AgentMessage[]): unknown[] {
 }
 
 describe("chronological committed source context", () => {
+	it("joins the rollover request once in source order and keeps notebook provenance aligned across resume and clear", async () => {
+		using dir = TempDir.createSync("@pi-source-notes-");
+		const session = SessionManager.create(dir.path(), dir.path());
+		try {
+			session.appendCustomEntry(CONTEXT_NOTES_ENTRY_TYPE, { version: 1, text: "PRE_CLEAR_NOTE" });
+			user(session, "pre-clear request");
+			session.appendResetBoundary();
+			const older = user(session, "older selected request");
+			const latest = user(session, "latest request remains complete");
+			session.appendCustomEntry(CONTEXT_NOTES_ENTRY_TYPE, { version: 1, text: "CURRENT_NOTE" });
+			const rollover = (tail: string) => session.appendCompaction("window boundary", undefined, tail, 1000, {
+				method: "soft", details: { kind: "experimental-context-rollover" },
+				preserveData: { sourceRepresentation: {
+					...representation([
+						{ kind: "source", entryId: older, order: 3 },
+						{ kind: "source", entryId: latest, order: 4, spans: [{ blockIndex: 0, start: 2, end: 8 }] },
+						{ kind: "source", entryId: tail, order: 6 },
+					]), throughEntryId: tail,
+				} },
+			});
+			const firstTail = session.appendMessage(makeAssistantMessage());
+			const firstBoundary = rollover(firstTail);
+			const first = session.buildSessionContext({ diagnostics: true });
+			expect(userContents(first.messages)).toEqual(["older selected request", "latest request remains complete"]);
+			expect(first.messages[0]).toMatchObject({ role: "custom", customType: CONTEXT_NOTES_ENTRY_TYPE });
+			expect(JSON.stringify(first.messages[0])).toContain("CURRENT_NOTE");
+			expect(JSON.stringify(first.messages)).not.toContain("PRE_CLEAR_NOTE");
+			expect(first.messageSourceIds?.[0]).toBeUndefined();
+			expect(first.sourceLocations?.map(location => first.messageSourceIds?.[location.messageIndex])).toEqual([older, latest, firstTail]);
+			expect(first.sourceLocations?.map(location => first.messages[location.messageIndex].role)).toEqual(["user", "user", "assistant"]);
+			session.appendCustomEntry(CONTEXT_NOTES_ENTRY_TYPE, { version: 1, text: "FUTURE_NOTE" });
+			user(session, "future request");
+			const addressed = buildSessionContext(session.getEntries(), firstBoundary, undefined, { diagnostics: true });
+			expect(addressed.messages).toEqual(first.messages);
+			expect(JSON.stringify(session.buildSessionContext().messages)).toContain("FUTURE_NOTE");
+			session.branch(firstBoundary);
+			expect(session.buildSessionContext().messages).toEqual(first.messages);
+			rollover(session.appendMessage(makeAssistantMessage()));
+			const repeated = session.buildSessionContext();
+			expect(userContents(repeated.messages)).toEqual(["older selected request", "latest request remains complete"]);
+			expect(JSON.stringify(repeated.messages[0])).toContain("CURRENT_NOTE");
+			await session.ensureOnDisk();
+			await session.flush();
+			const reopened = await SessionManager.open(session.getSessionFile()!);
+			try { expect(reopened.buildSessionContext().messages).toEqual(repeated.messages); }
+			finally { await reopened.close(); }
+			session.appendResetBoundary();
+			user(session, "fresh request");
+			expect(session.buildSessionContext().messages).toEqual([{ role: "user", content: "fresh request", timestamp: 1 }]);
+		} finally { await session.close(); }
+	});
+
+	it("keeps the latest custom request and valid notebook through plain bounded rollovers", async () => {
+		const session = SessionManager.inMemory();
+		try {
+			user(session, "older ordinary request");
+			session.appendCustomEntry(CONTEXT_NOTES_ENTRY_TYPE, { version: 1, text: "NOTE_BEFORE_CUT" });
+			session.appendMessage(createCustomMessage(SKILL_PROMPT_MESSAGE_TYPE, "latest skill request", true, undefined, "2026-09-09T00:00:00.000Z", "user"));
+			for (let index = 0; index < 2; index++) {
+				const tail = session.appendMessage(makeAssistantMessage());
+				session.appendCompaction("window boundary", undefined, tail, 1000, { details: { kind: "experimental-context-rollover" } });
+				const context = session.buildSessionContext({ diagnostics: true });
+				expect(context.messages.filter(message => message.role === "custom" && message.customType === SKILL_PROMPT_MESSAGE_TYPE))
+					.toEqual([createCustomMessage(SKILL_PROMPT_MESSAGE_TYPE, "latest skill request", true, undefined, "2026-09-09T00:00:00.000Z", "user")]);
+				expect(userContents(context.messages)).toEqual([]);
+				expect(JSON.stringify(context.messages[0])).toContain("NOTE_BEFORE_CUT");
+			}
+			session.appendCustomEntry(CONTEXT_NOTES_ENTRY_TYPE, { version: 1, text: 42 });
+			expect(JSON.stringify(session.buildSessionContext().messages[0])).toContain("NOTE_BEFORE_CUT");
+			session.appendCustomEntry(CONTEXT_NOTES_ENTRY_TYPE, { version: 1, text: "" });
+			expect(session.buildSessionContext().messages.some(message => message.role === "custom" && message.customType === CONTEXT_NOTES_ENTRY_TYPE)).toBe(false);
+		} finally { await session.close(); }
+	});
+
 	it("retains equal-content source IDs separately and unions partial selection with the untouched ordinary suffix", async () => {
 		using dir = TempDir.createSync("@pi-chronological-source-");
 		const session = SessionManager.create(dir.path(), dir.path());
