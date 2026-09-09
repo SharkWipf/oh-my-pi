@@ -89,6 +89,7 @@ import {
 	convertToLlm,
 	createCustomMessage,
 	getOriginalSourceMessage,
+	invalidateConvertedMessageArray,
 	isCustomMessageContent,
 	normalizeCustomMessagePayload,
 	stripImagesFromMessage,
@@ -2506,6 +2507,7 @@ export class SessionMaintenance {
 			const compactedMessages = this.#host.agent.state.messages;
 			if (compactedMessages !== activeMessages) {
 				activeMessages.splice(0, activeMessages.length, ...compactedMessages);
+				invalidateConvertedMessageArray(activeMessages);
 			}
 			return;
 		}
@@ -2592,6 +2594,7 @@ export class SessionMaintenance {
 		const compactedMessages = this.#host.agent.state.messages;
 		if (compactedMessages !== activeMessages) {
 			activeMessages.splice(0, activeMessages.length, ...compactedMessages);
+			invalidateConvertedMessageArray(activeMessages);
 		}
 		logger.debug("Mid-run compaction ran between provider calls", {
 			contextTokens,

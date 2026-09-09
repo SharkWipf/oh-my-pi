@@ -1220,6 +1220,12 @@ interface ConvertArrayMemo {
 let convertGeneration = 0;
 const convertArrayCache = new WeakMap<AgentMessage[], ConvertArrayMemo>();
 
+/** Forget only this array's append-only conversion receipt after a history splice.
+ * Unchanged messages retain their individually cached conversions. */
+export function invalidateConvertedMessageArray(messages: AgentMessage[]): void {
+	convertArrayCache.delete(messages);
+}
+
 registerMessageCacheInvalidator(message => {
 	convertCache.delete(message);
 	convertGeneration++;
