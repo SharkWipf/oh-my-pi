@@ -68,6 +68,8 @@
 - Exact-source requirements actions no longer wait for unrelated cold catalog enumeration. Current accepted requirements can be recalled while historical catalog coverage remains explicitly incomplete.
 - Cataloging accepted originals at new locators preserves their reviewed state after evidence refresh. Completing catalog observation refreshes the next coverage receipt without rewriting earlier request receipts.
 - Ordinary turns prepare preservation policy only after finding an eligible pruning victim. Full selected-user, complete non-user, and pending-live protection still applies before mutation, including source ownership checks and minimum-savings revalidation.
+- Added opt-in `advisor.compactBeforeGuidance`: force primary compaction before accepted advisor notes enter its context, including low-pressure, live interrupting, deferred, and idle delivery. Held guidance survives its own advisor reset but is discarded on cancellation or source/conversation invalidation. Disabled gating and silent reviews retain ordinary speculative compaction and grace behavior.
+
 ### Fixed
 
 - Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.

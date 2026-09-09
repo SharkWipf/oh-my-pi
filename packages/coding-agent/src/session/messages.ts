@@ -1225,6 +1225,12 @@ registerMessageCacheInvalidator(message => {
 	convertGeneration++;
 });
 
+/** Forget only this array's append-only conversion receipt after a history splice.
+ * Unchanged messages retain their individually cached conversions. */
+export function invalidateConvertedMessageArray(messages: AgentMessage[]): void {
+	convertArrayCache.delete(messages);
+}
+
 /** Convert one message to its LLM fragment. `interruptedNext` is true only for an
  *  assistant turn immediately followed by its interrupted-thinking marker. */
 function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {

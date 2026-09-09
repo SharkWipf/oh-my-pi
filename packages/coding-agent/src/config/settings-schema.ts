@@ -577,7 +577,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Advisor",
 			label: "Compact Before Guidance",
 			description:
-				"Run ordinary context maintenance before advisor review, respecting speculative compaction and its grace period.",
+				"Force primary compaction before accepted advisor guidance is delivered, even below the normal context threshold.",
 			condition: "advisorEnabled",
 		},
 	},

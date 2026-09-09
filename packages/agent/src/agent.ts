@@ -425,10 +425,15 @@ export class Agent {
 	#onTurnEnd?: (messages: AgentMessage[], signal?: AbortSignal, context?: AgentTurnEndContext) => Promise<void> | void;
 	#beforeModelCall?: AgentBeforeModelCall;
 	#additionalBeforeModelCalls = new Set<AgentBeforeModelCall>();
-	#asideMessageProvider?: () => AsideMessage[] | Promise<AsideMessage[]>;
+	#asideMessageProvider?: (
+		messages?: AgentMessage[],
+		signal?: AbortSignal,
+	) => AsideMessage[] | Promise<AsideMessage[]>;
 	#telemetry?: AgentLoopConfig["telemetry"];
 	#appendOnlyContext?: AppendOnlyContextManager;
-	#beforeQueuedMessageDequeueHooks = new Set<(signal?: AbortSignal) => Promise<void> | void>();
+	#beforeQueuedMessageDequeueHooks = new Set<
+		(signal?: AbortSignal, messages?: AgentMessage[]) => Promise<void> | void
+	>();
 	#beforeModelCallHooks = new Set<(signal?: AbortSignal) => Promise<void> | void>();
 
 	/** Buffered Cursor tool results with text length at time of call (for correct ordering) */
@@ -807,9 +812,13 @@ export class Agent {
 		return () => this.#listeners.delete(fn);
 	}
 
-	/** Register an independently removable hook that runs before queued messages are consumed. */
-	addBeforeQueuedMessageDequeueHook(hook: (signal?: AbortSignal) => Promise<void> | void): () => void {
-		const registration = (signal?: AbortSignal) => hook(signal);
+	/** Register an independently removable hook that runs before queued messages are consumed.
+	 * During a run, messages is the live loop context, not the mirrored state array.
+	 * History rewrites must also invalidate any append-only conversion receipt for that array. */
+	addBeforeQueuedMessageDequeueHook(
+		hook: (signal?: AbortSignal, messages?: AgentMessage[]) => Promise<void> | void,
+	): () => void {
+		const registration = (signal?: AbortSignal, messages?: AgentMessage[]) => hook(signal, messages);
 		this.#beforeQueuedMessageDequeueHooks.add(registration);
 		return () => this.#beforeQueuedMessageDequeueHooks.delete(registration);
 	}
@@ -825,19 +834,19 @@ export class Agent {
 		for (const hook of this.#beforeModelCallHooks) await hook(signal);
 	}
 
-	async #runBeforeQueuedMessageDequeueHooks(signal?: AbortSignal): Promise<void> {
-		for (const hook of this.#beforeQueuedMessageDequeueHooks) await hook(signal);
+	async #runBeforeQueuedMessageDequeueHooks(signal?: AbortSignal, messages = this.#state.messages): Promise<void> {
+		for (const hook of this.#beforeQueuedMessageDequeueHooks) await hook(signal, messages);
 	}
 
-	async #dequeueSteeringMessagesAfterHooks(signal?: AbortSignal): Promise<AgentMessage[]> {
+	async #dequeueSteeringMessagesAfterHooks(signal?: AbortSignal, messages?: AgentMessage[]): Promise<AgentMessage[]> {
 		if (signal?.aborted || this.#steeringQueue.length === 0) return [];
-		await this.#runBeforeQueuedMessageDequeueHooks(signal);
+		await this.#runBeforeQueuedMessageDequeueHooks(signal, messages);
 		return signal?.aborted ? [] : this.#dequeueSteeringMessages();
 	}
 
-	async #dequeueFollowUpMessagesAfterHooks(signal?: AbortSignal): Promise<AgentMessage[]> {
+	async #dequeueFollowUpMessagesAfterHooks(signal?: AbortSignal, messages?: AgentMessage[]): Promise<AgentMessage[]> {
 		if (signal?.aborted || this.#followUpQueue.length === 0) return [];
-		await this.#runBeforeQueuedMessageDequeueHooks(signal);
+		await this.#runBeforeQueuedMessageDequeueHooks(signal, messages);
 		return signal?.aborted ? [] : this.#dequeueFollowUpMessages();
 	}
 
@@ -893,7 +902,9 @@ export class Agent {
 	 * completions, late LSP diagnostics) drained at each step boundary. Never
 	 * aborts in-flight tools. See `AgentLoopConfig.getAsideMessages`.
 	 */
-	setAsideMessageProvider(fn: (() => AsideMessage[] | Promise<AsideMessage[]>) | undefined): void {
+	setAsideMessageProvider(
+		fn: ((messages?: AgentMessage[], signal?: AbortSignal) => AsideMessage[] | Promise<AsideMessage[]>) | undefined,
+	): void {
 		this.#asideMessageProvider = fn;
 	}
 
@@ -1484,12 +1495,12 @@ export class Agent {
 			getReasoning: () => this.#state.thinkingLevel,
 			getDisableReasoning: () => this.#state.disableReasoning,
 			getServiceTier: this.#serviceTierResolver,
-			getSteeringMessages: async signal => {
+			getSteeringMessages: async (signal, messages) => {
 				if (skipInitialSteeringPoll) {
 					skipInitialSteeringPoll = false;
 					return [];
 				}
-				return this.#dequeueSteeringMessagesAfterHooks(signal);
+				return this.#dequeueSteeringMessagesAfterHooks(signal, messages);
 			},
 			hasSteeringMessages: () => {
 				if (this.#steeringQueue.length === 0) {
@@ -1514,8 +1525,8 @@ export class Agent {
 			},
 			waitForSteeringMessages: signal => this.#waitForSteeringMessages(signal),
 			hasIrcInterrupts: this.hasIrcInterrupts,
-			getFollowUpMessages: signal => this.#dequeueFollowUpMessagesAfterHooks(signal),
-			getAsideMessages: async () => (await this.#asideMessageProvider?.()) ?? [],
+			getFollowUpMessages: (signal, messages) => this.#dequeueFollowUpMessagesAfterHooks(signal, messages),
+			getAsideMessages: async (messages, signal) => (await this.#asideMessageProvider?.(messages, signal)) ?? [],
 			onBeforeYield: () => this.#onBeforeYield?.(),
 			telemetry: this.#telemetry,
 		};

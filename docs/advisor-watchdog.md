@@ -45,11 +45,11 @@ Model selectors use normal role/model resolution, including provider-prefixed id
 
 ### Maintenance before guidance
 
-Set `advisor.compactBeforeGuidance: true` (or enable **Compact Before Guidance** in `/settings` → Model → Advisor) to let active advisors review the primary context after its ordinary maintenance boundary. The default is `false`; disabled or inactive advisors retain the ordinary upstream ordering. The setting is sampled at each turn boundary.
+Set `advisor.compactBeforeGuidance: true` (or enable **Compact Before Guidance** in `/settings` → Model → Advisor) to force primary context compaction before accepted advisor guidance reaches the primary. The default is `false`. The gate applies to every accepted severity (`nit`, `concern`, and `blocker`), including guidance emitted below the normal pressure threshold or while Auto-Compact is disabled.
 
-Continuing tool turns run ordinary mid-run maintenance before review. A successful final turn is reviewed once after agent-end maintenance, using the current transcript and current advisor roster. Queued follow-ups that the agent loop batches before a single agent-end notification are reviewed together at that final boundary. Abort, clear, branch/session changes, and disposal discard stale pending reviews. Re-enabling an advisor still seeds its cursor as described below rather than replaying old history.
+Review still runs in the ordinary upstream order. Accepted guidance waits outside primary history until compaction completes, so the summary does not consume the advice itself. Live blockers retain cooperative tool interruption: the tool result is paired first, then the primary context is compacted before the blocker is injected. Deferred notes retain their normal delivery boundary, and late idle guidance uses the same gate. The held batch survives its own compaction resetting advisor runtimes; cancellation, advisor-source replacement, conversation changes, and disposal invalidate stale guidance.
 
-This does not force compaction: existing enablement, thresholds, speculative background work, and grace-period deferral remain authoritative. Below threshold or while speculation is running within grace, review can proceed without an immediate rewrite. Advisor-private history continues to use its own existing maintenance path.
+The gate uses the configured compaction methods and existing speculative-result reuse rather than a separate summarizer. Disabled gating or a review with no accepted advice does not force maintenance; ordinary thresholds, speculative background work, and grace deferral remain unchanged. Advisor-private history continues to use its own existing maintenance path.
 
 ### Headless runs
 

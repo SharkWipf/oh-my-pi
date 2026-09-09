@@ -42,6 +42,7 @@ import {
 	ADVISOR_MAX_BUDGET_PER_UPDATE,
 	AdviseTool,
 	type AdvisorAgent,
+	type AdvisorDeliveryChannel,
 	type AdvisorConfig,
 	type AdvisorEmissionDecision,
 	AdvisorEmissionGuard,
@@ -167,6 +168,14 @@ interface ActiveAdvisor {
 	signature: string;
 }
 
+interface PendingAdvisorGuidance {
+	advisor: ActiveAdvisor;
+	note: string;
+	severity: AdvisorSeverity | undefined;
+	channel: AdvisorDeliveryChannel;
+	queuedNotes?: AdvisorNote[];
+}
+
 interface AdvisorCompactionSummaryMessage extends CompactionSummaryMessage {
 	firstKeptEntryId?: string;
 	advisorUsageAnchorStartIndex?: number;
@@ -254,6 +263,8 @@ export interface SessionAdvisorsHost {
 	clientBridge(): ClientBridge | undefined;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
+	compactBeforeGuidance(messages: AgentMessage[], signal?: AbortSignal): Promise<void>;
+	scheduleGuidanceDelivery(task: (signal: AbortSignal) => Promise<void>): void;
 	sendCustomMessage(message: CustomMessagePayload, options?: AdvisorMessageDeliveryOptions): Promise<boolean>;
 	extractQueuedAdvisorCards(): CustomMessage[];
 	dropPendingAdvisorCards(): void;
@@ -341,6 +352,9 @@ export class SessionAdvisors {
 	#advisorInterruptImmuneTurnStart: number | undefined;
 	#pendingAdvisorCardEvents = new Set<Promise<void>>();
 	#advisorYieldQueueUnsubscribe: (() => void) | undefined;
+	#pendingGuidance: PendingAdvisorGuidance[] = [];
+	#guidanceGeneration = 0;
+	#guidanceCompaction: Promise<void> | undefined;
 
 	constructor(host: SessionAdvisorsHost, options: SessionAdvisorsOptions) {
 		this.#host = host;
@@ -574,7 +588,12 @@ export class SessionAdvisors {
 	}
 
 	/** Re-primes advisor transcript views after an in-conversation history rewrite. */
-	resetAllRuntimes(reason?: string): void {
+	resetAllRuntimes(reason?: string, preserveAcceptedGuidance = false): void {
+		if (!preserveAcceptedGuidance) {
+			this.#guidanceGeneration++;
+			this.#removeGuidanceNotifications(this.#pendingGuidance);
+			this.#pendingGuidance = [];
+		}
 		this.#resetAllAdvisorRuntimes(reason);
 	}
 
@@ -697,6 +716,8 @@ export class SessionAdvisors {
 	 * so none of them inject into the new conversation.
 	 */
 	#resetAdvisorSessionState(preserveCost: boolean): void {
+		this.#guidanceGeneration++;
+		this.#pendingGuidance = [];
 		if (!preserveCost) {
 			this.#advisorCosts.clear();
 			this.#advisorSubscriptionSlugs.clear();
@@ -1239,28 +1260,53 @@ export class SessionAdvisors {
 	/** Route an already-accepted advice note to the primary. Never re-runs the
 	 *  emission guard — the note passed {@link #acceptAdvice} when it was emitted,
 	 *  so a deferred flush replays the backlog without re-filtering. */
-	#routeAdvice(advisor: ActiveAdvisor, note: string, severity?: AdvisorSeverity): void {
+	#routeAdvice(
+		advisor: ActiveAdvisor,
+		note: string,
+		severity?: AdvisorSeverity,
+		afterCompaction = false,
+		deliveryChannel?: AdvisorDeliveryChannel,
+	): void {
+		if (advisor.runtime.disposed || !this.#advisors.includes(advisor) || this.#host.isDisposed()) return;
 		// The implicit single ("default") advisor stamps no source name, so its
 		// agent-facing `<advisory>` bytes stay identical to the pre-multi-advisor path.
 		const source = advisor.slug ? advisor.name : undefined;
 		const interrupting = isInterruptingSeverity(severity);
-		const channel = resolveAdvisorDeliveryChannel({
-			severity,
-			autoResumeSuppressed: this.#advisorAutoResumeSuppressed,
-			preserveOnly: this.#preserveAdvisorAdvice,
-			// Key on the live agent-core loop, not session `isStreaming` (which also
-			// counts `#promptInFlightCount` during post-turn unwind). Only a running
-			// loop consumes a steer at its next boundary.
-			streaming: this.#host.agent.state.isStreaming && !this.#preserveTerminalYieldAdvice,
-			aborting: this.#host.abortInProgress(),
-			terminalAnswerNoQueuedWork: this.#hasTerminalTextAnswerWithoutQueuedWork(),
-			interruptImmuneTurnActive: interrupting && this.#isAdvisorInterruptImmuneTurnActive(),
-		});
+		const channel =
+			deliveryChannel ??
+			resolveAdvisorDeliveryChannel({
+				severity,
+				autoResumeSuppressed: this.#advisorAutoResumeSuppressed,
+				preserveOnly: this.#preserveAdvisorAdvice,
+				// Key on the live agent-core loop, not session `isStreaming` (which also
+				// counts `#promptInFlightCount` during post-turn unwind). Only a running
+				// loop consumes a steer at its next boundary.
+				streaming: this.#host.agent.state.isStreaming && !this.#preserveTerminalYieldAdvice,
+				aborting: this.#host.abortInProgress(),
+				terminalAnswerNoQueuedWork: this.#hasTerminalTextAnswerWithoutQueuedWork(),
+				interruptImmuneTurnActive: interrupting && this.#isAdvisorInterruptImmuneTurnActive(),
+			});
+		let pending: PendingAdvisorGuidance | undefined;
+		if (!afterCompaction && this.#host.settings.get("advisor.compactBeforeGuidance")) {
+			pending = { advisor, note, severity, channel };
+			this.#pendingGuidance.push(pending);
+			// A live steer wakes the normal cooperative tool interrupt. Its card
+			// stays queued until the dequeue hook completes the compaction barrier.
+			if (channel !== "steer" || !this.#host.agent.state.isStreaming || this.#host.planModeState()?.enabled) {
+				if (!this.#host.agent.state.isStreaming) {
+					this.#host.scheduleGuidanceDelivery(async signal => {
+						await this.flushGuidance(undefined, signal);
+					});
+				}
+				return;
+			}
+		}
 		if (channel === "aside") {
 			this.#host.yieldQueue.enqueue("advisor", { note, severity, advisor: source });
 			return;
 		}
 		const notes: AdvisorNote[] = [{ note, severity, advisor: source }];
+		if (pending) pending.queuedNotes = notes;
 		const content = formatAdvisorBatchContent(notes);
 		const details = { notes } satisfies AdvisorMessageDetails;
 		if (channel === "preserve") {
@@ -1303,7 +1349,7 @@ export class SessionAdvisors {
 		// being steered/triggered. A merely preserved card never interrupts, so
 		// arming earlier would downgrade the next `advisor.immuneTurns` worth of
 		// real concerns/blockers to skip-idle-flush asides (#5628 review).
-		this.#recordAdvisorInterruptDelivered();
+		if (!pending) this.#recordAdvisorInterruptDelivered();
 		void this.#host
 			.sendCustomMessage(
 				{ customType: "advisor", content, display: true, attribution: "agent", details },
@@ -1312,12 +1358,62 @@ export class SessionAdvisors {
 			.catch(err => logger.debug("advisor delivery failed", { err: String(err) }));
 	}
 
+	/** Force maintenance at an injection boundary, never from the advisor tool.
+	 * The local batch survives compaction resetting its executing advisor agent. */
+	flushGuidance(messages = this.#host.agent.state.messages, signal?: AbortSignal): Promise<void> | void {
+		if (this.#guidanceCompaction) return this.#guidanceCompaction;
+		if (this.#pendingGuidance.length === 0 || signal?.aborted || this.#host.abortInProgress()) return;
+		const batch = this.#pendingGuidance;
+		this.#pendingGuidance = [];
+		const generation = this.#guidanceGeneration;
+		const sessionId = this.#host.sessionManager.getSessionId();
+		this.#removeGuidanceNotifications(batch);
+		const run = async () => {
+			// Install the shared barrier before a disabled-setting flush can finish.
+			await Promise.resolve();
+			try {
+				if (this.#host.settings.get("advisor.compactBeforeGuidance")) {
+					await this.#host.compactBeforeGuidance(messages, signal);
+				}
+				if (
+					signal?.aborted ||
+					this.#host.abortInProgress() ||
+					this.#host.isDisposed() ||
+					generation !== this.#guidanceGeneration ||
+					sessionId !== this.#host.sessionManager.getSessionId()
+				)
+					return;
+				for (const entry of batch) {
+					this.#routeAdvice(entry.advisor, entry.note, entry.severity, true, entry.channel);
+				}
+			} finally {
+				this.#guidanceCompaction = undefined;
+			}
+			// Advice accepted while summarizing must pass its own barrier too.
+			await this.flushGuidance(messages, signal);
+		};
+		this.#guidanceCompaction = run();
+		return this.#guidanceCompaction;
+	}
+
+	/** Remove queued wakeups without disturbing unrelated advisor delivery. */
+	#removeGuidanceNotifications(batch: PendingAdvisorGuidance[]): void {
+		if (!batch.some(entry => entry.queuedNotes)) return;
+		for (const card of this.#host.extractQueuedAdvisorCards()) {
+			const details = card.details as AdvisorMessageDetails | undefined;
+			if (!batch.some(entry => entry.queuedNotes === details?.notes)) this.#host.agent.steer(card);
+		}
+	}
+
 	/** Re-prime every advisor's transcript view after an in-conversation history rewrite. */
 	#resetAllAdvisorRuntimes(reason?: string): void {
 		for (const a of this.#advisors) a.runtime.reset(reason);
 	}
 
 	#stopAdvisorRuntime(): void {
+		this.#guidanceGeneration++;
+		this.#removeGuidanceNotifications(this.#pendingGuidance);
+		this.#pendingGuidance = [];
 		// Detach each recorder feed BEFORE aborting its advisor agent: dispose() aborts
 		// the loop, and an abort emits a final `message_end` we must not enqueue against
 		// a closing recorder (it would reopen and resurrect an already-released file).
