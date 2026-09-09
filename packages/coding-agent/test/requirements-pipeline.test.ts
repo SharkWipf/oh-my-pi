@@ -619,6 +619,40 @@ test("literal complete-unit adoption and restoration need only fresh sanity whil
 	}
 });
 
+for (const invalidated of [false, true]) test(invalidated
+	? "human context invalidated during review cannot publish"
+	: "freshly resolved human context does not stale an independently reviewed source", async () => {
+	const f = await fixture("Earlier human context remains original evidence.");
+	const manager = f.host.sessionManager;
+	const text = "Preserve the exact newly delivered requirement.";
+	const entryId = manager.appendMessage({ role: "user", content: text, producer: { type: "human" }, timestamp: 4 });
+	const selected = (await resolveRequirementsSource(manager, manager.getRequirementsSource(entryId)!.key))!;
+	const owner = new SessionRequirements({
+		...f.host, agentStorage: null, getContext: () => ({ messages: [] }),
+		promptOperatorSource: async () => { throw new Error("Unexpected ingress"); }, isDisposed: () => false,
+	});
+	controlledProvider(f.api, payload => {
+		if (payload.candidates) {
+			if (invalidated && !payload.originalContext) manager.invalidateRequirementsSources([f.source.locators[0].entryId]);
+			return approvedReview(payload);
+		}
+		return {
+			...f.envelope(), sourceKey: selected.source.key, sourceIntegrity: selected.source.integrity,
+			manifest: selected.source.units.map(({ id, sha256, byteLength }) => ({ id, sha256, byteLength })),
+			operations: [{ ...f.operation(text), evidence: [{ sourceKey: selected.source.key, integrity: selected.source.integrity, unitId: "0" }] }],
+		};
+	});
+	try {
+		await owner.observeCommittedSources();
+		await owner.acceptDelivered(entryId);
+		await owner.processPending(selected.source.key);
+		const snapshot = owner.status({ includeLedger: true }).snapshot;
+		expect(snapshot.sources.find(source => source.key === selected.source.key)?.state).toBe(invalidated ? "failed" : "complete");
+		expect(owner.snapshotApplicable().active.map(revision => revision.statement)).toEqual(invalidated ? [] : [text]);
+		expect(owner.pendingLiveSnapshot().entryIds).toEqual(invalidated ? [entryId] : []);
+	} finally { owner.dispose(); await manager.close(); }
+});
+
 test("truncated provider output leaves the whole source pending without automatic retry loops", async () => {
 	const f = await fixture("Preserve all requirements, never an accepted prefix.");
 	let calls = 0;

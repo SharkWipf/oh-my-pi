@@ -583,14 +583,14 @@ export class SessionRequirements {
 	}
 	#recordReferencedSources(batch: RequirementsBatch, input: RequirementsEvidencePackage): void {
 		const seen = new Set<string>();
-		const visit = (resolved: ResolvedRequirementsSource) => {
+		const visit = (resolved: ResolvedRequirementsSource, contextual = false) => {
 			const { source } = resolved;
 			if (seen.has(source.key)) return;
 			seen.add(source.key);
-			// Keep selected provenance in the existing ledger, never the whole context catalog.
-			if (source.referenceOnly && batch.readSourceIntegrities[source.key] === source.integrity)
+			// Freeze selected original metadata before jobs depend on it; catalog hydration is not a later evidence change.
+			if ((contextual || source.referenceOnly) && batch.readSourceIntegrities[source.key] === source.integrity)
 				this.#storage.intakeRequirementsSource(source);
-			for (const referent of resolved.referents) visit(referent);
+			for (const referent of resolved.referents) visit(referent, true);
 		};
 		visit(input.source);
 		for (const reference of input.references) visit(reference);
@@ -637,7 +637,9 @@ export class SessionRequirements {
 					processingIntegrity = input.source.source.integrity;
 					this.#storage.authorizeRequirementsOwner(input.authority);
 					this.#authorizedOwnerSessionId = input.authority.ownerSessionId;
-					this.#storage.saveRequirementsBatch(createRequirementsBatch(input));
+					const pendingBatch = createRequirementsBatch(input);
+					this.#recordReferencedSources(pendingBatch, input);
+					this.#storage.saveRequirementsBatch(pendingBatch);
 					const batch = await extractRequirementsBatch(this.host, input, signal);
 					signal.throwIfAborted();
 					this.#assertAvailable();
