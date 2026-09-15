@@ -17,6 +17,7 @@ import type {
 	ServiceTierByFamily,
 	SimpleStreamOptions,
 	ToolChoice,
+	UserMessageProducer,
 } from "@oh-my-pi/pi-ai";
 import type { postmortem } from "@oh-my-pi/pi-utils";
 import type { AdvisorConfig } from "../advisor";
@@ -336,6 +337,8 @@ export interface AgentSessionConfig {
 
 /** Options for AgentSession.prompt(). */
 export interface PromptOptions {
+	/** Host-recorded producer, separate from billing attribution. */
+	producer?: UserMessageProducer;
 	/** Whether to expand file-based prompt templates (default: true). */
 	expandPromptTemplates?: boolean;
 	/** Image attachments. */
@@ -384,6 +387,8 @@ export interface SteerOptions {
 
 /** Options for AgentSession.sendUserMessage(). */
 export interface SendUserMessageOptions {
+	/** Host-recorded producer, separate from billing attribution. */
+	producer?: UserMessageProducer;
 	/** Queue behavior; omitted starts a turn when idle and steers while streaming. */
 	deliverAs?: "steer" | "followUp" | "aside";
 	/** Explicit billing/initiator attribution. */
