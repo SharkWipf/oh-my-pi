@@ -157,6 +157,8 @@ describe("durable manual preservation actions", () => {
 		});
 		f.storage.failDrain = true;
 		await expect(f.preservation.capturePreservedMessageOverrideReset()).rejects.toThrow("flush failed");
+		await expect(f.preservation.capturePreservedMessageOverrideReset()).rejects.toThrow("flush failed");
+		await f.manager.recoverPersistenceFromCurrentState();
 		const snapshot = await f.preservation.capturePreservedMessageOverrideReset();
 		expect(snapshot.groups[0]?.memberIds).toEqual([source]);
 		expect(f.changed).toEqual([]);

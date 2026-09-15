@@ -15,6 +15,7 @@ import {
 	type RedisSessionStorageClient,
 } from "@oh-my-pi/pi-coding-agent/session/redis-session-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { SessionWriteConflictError } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 
 interface FakeRedis extends RedisSessionStorageClient {
 	strings: Map<string, string>;
@@ -45,20 +46,25 @@ function createFakeRedis(): FakeRedis {
 			const argv = args.slice(2 + keyCount);
 			if (script.includes("OMP_WRITE_FULL")) {
 				const [fileKey, metaKey, titleKey] = keys;
-				const [content, filePath, mtimeMs, hasTitle, title] = argv;
+				const [content, filePath, mtimeMs, hasTitle, title, expectedSize] = argv;
+				const current = strings.get(fileKey);
+				const actualSize = current === undefined ? -1 : Buffer.byteLength(current, "utf8");
+				if (expectedSize !== "" && actualSize !== Number(expectedSize)) return [0, actualSize];
 				strings.set(fileKey, content);
 				getHash(metaKey).set(filePath, mtimeMs);
 				if (hasTitle === "1") getHash(titleKey).set(filePath, title);
 				else getHash(titleKey).delete(filePath);
-				return 1;
+				return [1, Buffer.byteLength(content, "utf8")];
 			}
 			if (script.includes("OMP_APPEND")) {
 				const [fileKey, metaKey] = keys;
-				const [line, filePath, mtimeMs] = argv;
+				const [line, filePath, mtimeMs, expected] = argv;
+				const actual = strings.has(fileKey) ? Buffer.byteLength(strings.get(fileKey)!) : -1;
+				if (expected !== "" && expected !== undefined && actual !== Number(expected)) return [0, actual];
 				const next = (strings.get(fileKey) ?? "") + line;
 				strings.set(fileKey, next);
 				getHash(metaKey).set(filePath, mtimeMs);
-				return Buffer.byteLength(next, "utf-8");
+				return [1, Buffer.byteLength(next, "utf-8")];
 			}
 			if (script.includes("OMP_UPDATE_TITLE")) {
 				const [metaKey, titleKey] = keys;
@@ -247,5 +253,22 @@ describe("SessionManager + RedisSessionStorage", () => {
 		const sessionFiles = sessions.map(s => s.path).sort();
 		expect(sessionFiles).toContain(aFile as string);
 		expect(sessionFiles).toContain(bFile as string);
+	});
+
+	it("rejects a stale rewrite after another Redis storage appends", async () => {
+		const redis = createFakeRedis();
+		const firstStorage = await RedisSessionStorage.create({ client: redis });
+		const first = SessionManager.create("/cwd", "/sessions/shared", firstStorage);
+		await first.ensureOnDisk();
+		const sessionFile = first.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+
+		const secondStorage = await RedisSessionStorage.create({ client: redis });
+		const second = await SessionManager.open(sessionFile, "/sessions/shared", secondStorage);
+		second.appendMessage({ role: "user", content: "durable Redis peer turn", timestamp: Date.now() });
+		await second.close();
+
+		await expect(first.rewriteEntries()).rejects.toBeInstanceOf(SessionWriteConflictError);
+		expect(redis.strings.get(`omp:sessions:file:${sessionFile}`)).toContain("durable Redis peer turn");
 	});
 });

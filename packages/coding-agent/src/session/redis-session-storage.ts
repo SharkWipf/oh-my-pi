@@ -4,6 +4,7 @@ import {
 	type SessionStorageBackend,
 	type SessionStorageIndexEntry,
 } from "./indexed-session-storage";
+import { SessionWriteConflictError } from "./session-storage";
 import type { SessionTitleUpdate } from "./session-title-slot";
 
 /**
@@ -47,6 +48,16 @@ const DEFAULT_PREFIX = "omp:sessions:";
 const DEFAULT_SCAN_COUNT = 500;
 
 const WRITE_FULL_SCRIPT = `-- OMP_WRITE_FULL
+local expected = ARGV[6]
+if expected ~= "" then
+	local actual = -1
+	if redis.call("EXISTS", KEYS[1]) == 1 then
+		actual = redis.call("STRLEN", KEYS[1])
+	end
+	if actual ~= tonumber(expected) then
+		return {0, actual}
+	end
+end
 redis.call("SET", KEYS[1], ARGV[1])
 redis.call("HSET", KEYS[2], ARGV[2], ARGV[3])
 if ARGV[4] == "1" then
@@ -54,12 +65,22 @@ if ARGV[4] == "1" then
 else
 	redis.call("HDEL", KEYS[3], ARGV[2])
 end
-return 1`;
+return {1, string.len(ARGV[1])}`;
 
 const APPEND_SCRIPT = `-- OMP_APPEND
+local expected = ARGV[4]
+if expected ~= "" then
+	local actual = -1
+	if redis.call("EXISTS", KEYS[1]) == 1 then
+		actual = redis.call("STRLEN", KEYS[1])
+	end
+	if actual ~= tonumber(expected) then
+		return {0, actual}
+	end
+end
 local size = redis.call("APPEND", KEYS[1], ARGV[1])
 redis.call("HSET", KEYS[2], ARGV[2], ARGV[3])
-return size`;
+return {1, size}`;
 
 const UPDATE_TITLE_SCRIPT = `-- OMP_UPDATE_TITLE
 redis.call("HSET", KEYS[1], ARGV[1], ARGV[2])
@@ -175,8 +196,14 @@ class RedisSessionStorageBackend implements SessionStorageBackend {
 		return Promise.all([head, tail]);
 	}
 
-	async writeFull(path: string, content: string, mtimeMs: number, title?: SessionTitleUpdate): Promise<void> {
-		await this.#client.send("EVAL", [
+	async writeFull(
+		path: string,
+		content: string,
+		mtimeMs: number,
+		title?: SessionTitleUpdate,
+		expectedSize?: number | null,
+	): Promise<void> {
+		const result = await this.#client.send("EVAL", [
 			WRITE_FULL_SCRIPT,
 			"3",
 			this.#fileKey(path),
@@ -187,11 +214,18 @@ class RedisSessionStorageBackend implements SessionStorageBackend {
 			String(mtimeMs),
 			title ? "1" : "0",
 			title ? encodeTitleMeta(title) : "",
+			expectedSize === undefined ? "" : String(expectedSize ?? -1),
 		]);
+		if (expectedSize === undefined) return;
+		const written = Array.isArray(result) && Number(result[0]) === 1;
+		if (written) return;
+		const encodedActual = Array.isArray(result) ? Number(result[1]) : Number.NaN;
+		const actualSize = encodedActual === -1 ? null : Number.isFinite(encodedActual) ? encodedActual : null;
+		throw new SessionWriteConflictError(path, expectedSize, actualSize);
 	}
 
-	async append(path: string, line: string, mtimeMs: number): Promise<void> {
-		await this.#client.send("EVAL", [
+	async append(path: string, line: string, mtimeMs: number, expectedSize?: number | null): Promise<void> {
+		const result = await this.#client.send("EVAL", [
 			APPEND_SCRIPT,
 			"2",
 			this.#fileKey(path),
@@ -199,7 +233,12 @@ class RedisSessionStorageBackend implements SessionStorageBackend {
 			line,
 			path,
 			String(mtimeMs),
+			expectedSize === undefined ? "" : String(expectedSize ?? -1),
 		]);
+		if (expectedSize === undefined || (Array.isArray(result) && Number(result[0]) === 1)) return;
+		const encodedActual = Array.isArray(result) ? Number(result[1]) : Number.NaN;
+		const actualSize = encodedActual === -1 ? null : Number.isFinite(encodedActual) ? encodedActual : null;
+		throw new SessionWriteConflictError(path, expectedSize, actualSize);
 	}
 
 	async updateSessionTitle(path: string, title: SessionTitleUpdate, mtimeMs: number): Promise<void> {

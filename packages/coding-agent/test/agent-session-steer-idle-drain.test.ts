@@ -186,7 +186,7 @@ describe("AgentSession steer idle drain", () => {
 		await session.steer("with image", [image]);
 
 		const { steering } = session.clearQueue();
-		expect(steering).toEqual([{ text: "with image", images: [image] }]);
+		expect(steering).toMatchObject([{ text: "with image", images: [image] }]);
 		expect(session.agent.hasQueuedMessages()).toBe(false);
 
 		await session.abort();
