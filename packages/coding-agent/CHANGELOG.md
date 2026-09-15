@@ -10,6 +10,13 @@
 
 ### Added
 
+- Added source-ID preservation policy APIs with independent first/recent/hard-recent limits, uniformly capped manual tool exchanges, compact source quota indexes, and compatible saved settings/classification readers.
+- Preservation limits and effective-change notifications remain compatible with revision-cached settings groups and write-before-archive legacy settings migration.
+### Fixed
+
+- Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.
+### Added
+
 - Preserved host-recorded producer identity independently of billing attribution through named user-message delivery options and staged steer, follow-up, and aside delivery.
 
 - Sloppy edits support `<SM:AFTER>` to insert new lines after an anchor without repeating or replacing it.
@@ -642,6 +649,9 @@
 
 ### Fixed
 
+- Preservation previews distinguish unavailable model-percentage limits from finite zero and expose source cap blockers; large manual-reset captures use bounded lazy source enumeration.
+- Quarantined classification records remain visibly invalidated after reload without fabricating category labels, and backfill readers skip history before the latest clear boundary.
+- Visible human custom-message journal sources retain manual protection and ordinary raw accounting without being promoted to automatic user classifications or windows.
 - Secret redaction now covers provider-visible computer actions and safety messages, tool explanations, Anthropic server-tool text, and native web-search text while preserving opaque replay data, identifiers, and original screenshots.
 - Inline snap images now expose transient, identity-bound frame estimates and prompt/tool ownership through provider normalization, separately from original images. Outgoing image mutations no longer corrupt cached frames for later requests.
 - `omp update` now refuses to overwrite shebang scripts or non-OMP executables behind foreign symlinks and reports the physical binary path it verified ([#11152](https://github.com/can1357/oh-my-pi/issues/11152)).

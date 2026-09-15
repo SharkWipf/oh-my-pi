@@ -5,6 +5,7 @@
 ### Fixed
 
 - Kept compaction source IDs and selected ranges aligned with converted messages across journal metadata and repeated sparse retention, preserving prior-summary timestamps and one-time admitted non-user charges.
+- Fixed normalized custom messages counting as zero tokens. Custom text and original images now consume their ordinary local baseline regardless of attribution or display settings.
 - Fixed ordinary source token estimates omitting assistant images and known current native text, code, logs, search context, and computer metadata. Normalized native mirrors are charged once, including after controlled source rewrites and JSON reload.
 - Fixed metadata-only computer screenshots counting as zero before source allocation. Their single image baseline replaces content-image mirrors, matching computer-result serialization.
 - Fixed normalized custom messages counting as zero tokens. Custom text and original images now consume their ordinary local baseline regardless of attribution or display settings.
