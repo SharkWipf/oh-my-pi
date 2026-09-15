@@ -135,6 +135,8 @@
 
 - Preserved background message-classifier ownership across guarded session transitions, including vetoed navigation, while adopting nested configured role aliases without changing the default `@tiny` selector or success-only classification replacement.
 - Added `goal.injectAsUserMessage` to queue objective-only ordinary user follow-ups after successful goal tool creation, retaining host tool provenance without duplicate lifecycle or `/goal` injection. Provenance survives attributed, staged queued delivery independently of billing attribution; disabling the setting leaves historical messages unchanged.
+- Added opt-in `advisor.compactBeforeGuidance`: force primary compaction before accepted advisor notes enter its context, including low-pressure, live interrupting, deferred, and idle delivery. Held guidance survives its own advisor reset but is discarded on cancellation or source/conversation invalidation. Disabled gating and silent reviews retain ordinary speculative compaction and grace behavior.
+- Preserved FORCE guidance ordering across upstream 18.2.0 staged queued-message preparation and unified advisor admission. Terminal non-blockers compact before their visible preserved card without an unsolicited primary restart; blockers still steer after paired-tool history compaction.
 
 ### Fixed
 

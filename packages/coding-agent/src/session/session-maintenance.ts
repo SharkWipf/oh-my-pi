@@ -4595,6 +4595,8 @@ export class SessionMaintenance {
 		deferred = false,
 		allowDefer = true,
 		options: {
+			/** Explicit guidance recovery bypasses the Auto-Compact toggle, not method policy. */
+			force?: boolean;
 			autoContinue?: boolean;
 			triggerContextTokens?: number;
 			/** Tokens from pending messages included in triggerContextTokens but absent from the prepared history. */
@@ -4631,7 +4633,7 @@ export class SessionMaintenance {
 		// An explicit model-requested rollover bypasses the Auto-Compact toggle;
 		// automatic threshold rollover stays gated exactly as before.
 		const explicitNewContextRequest = options.explicitNewContextRequest === true;
-		if (reason !== "idle" && !compactionSettings.enabled && !explicitNewContextRequest) {
+		if (reason !== "idle" && !compactionSettings.enabled && !explicitNewContextRequest && !options.force) {
 			return COMPACTION_CHECK_NONE;
 		}
 		if (this.#usesExperimentalContextManagement()) {
