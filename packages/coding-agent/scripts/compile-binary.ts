@@ -40,6 +40,8 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 		const output = await Bun.build({
 			entrypoints: [options.entrypoint],
 			root: options.repoRoot,
+			// Keep dependency import.meta.resolve expressions valid in bytecode builds.
+			format: "esm",
 			external: [...COMPILED_EXTERNAL_DEPENDENCIES],
 			define: {
 				"process.env.PI_COMPILED": JSON.stringify("true"),
