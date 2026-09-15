@@ -225,7 +225,7 @@ export class Tokenizer {
 			case "custom":
 			case "developer":
 			case "user": {
-				const content: string | Array<{ type: string; text?: string }> = message.content;
+				const content = message.content;
 				if (typeof content === "string") {
 					fragments.push(content);
 				} else if (Array.isArray(content)) {
@@ -280,6 +280,7 @@ export class Tokenizer {
 				}
 				break;
 			}
+			case "custom":
 			case "hookMessage":
 			case "toolResult": {
 				// Computer serializers consume the typed screenshot, not content image mirrors.
