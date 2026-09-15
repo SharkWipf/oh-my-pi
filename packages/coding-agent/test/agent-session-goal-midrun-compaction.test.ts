@@ -16,6 +16,7 @@ import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { createAssistantMessage } from "./helpers/agent-session-setup";
 
 function activeGoalState(): GoalModeState {
 	const now = Date.now();
@@ -206,6 +207,28 @@ describe("AgentSession mid-run threshold compaction", () => {
 		expect(compactSpy).toHaveBeenCalledTimes(1);
 		expect(observedContexts.length).toBeGreaterThanOrEqual(2);
 		expect(observedContexts[1].join("\n")).toContain("MID-RUN-COMPACTED");
+	});
+
+	it("delivers a compacted prefix instead of the cached pre-compaction history", async () => {
+		const { session, sessionManager, observedContexts } = await createHarness({
+			"compaction.thresholdTokens": 25_000,
+			"compaction.keepRecentTokens": 500,
+		});
+		const oldUser: AgentMessage = { role: "user", content: "OLD SOURCE ".repeat(4_000), timestamp: 1 };
+		const oldAssistant = createAssistantMessage("old response ".repeat(4_000));
+		for (const message of [oldUser, oldAssistant]) {
+			sessionManager.appendMessage(message);
+			session.agent.appendMessage(message);
+		}
+		mockCompaction("REPLACED-HISTORY-SUMMARY");
+
+		await session.prompt("work on the release");
+
+		expect(sessionManager.getBranch().filter(entry => entry.type === "compaction")).toHaveLength(1);
+		expect(observedContexts[0].join("\n")).toContain("OLD SOURCE");
+		expect(observedContexts[1].join("\n")).toContain("REPLACED-HISTORY-SUMMARY");
+		expect(observedContexts[1].join("\n")).not.toContain("OLD SOURCE");
+		expect(observedContexts[1].join("\n")).toContain("tool output");
 	});
 
 	it("compacts in place between tool-call turns during an active goal run", async () => {
