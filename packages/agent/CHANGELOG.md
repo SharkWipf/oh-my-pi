@@ -17,6 +17,7 @@
 - Local compaction preserves selected source spans chronologically without refunding selected-user cut costs; complete admitted non-user atoms are charged once before the calibrated ordinary walk. Repeated sparse retention no longer resurrects intervening omitted originals.
 - Authored images interleaved with snap archive frames keep their one-time original-image estimate instead of being priced as rasterized transcript frames.
 - Fixed repeated compaction losing messages retained by the previous compaction, including turns received while native compaction was running.
+- Original user, developer and custom images use upstream one-time baseline accounting; native logical-source visitors continue to charge current content only, separately from physical archived-frame costs.
 ### Added
 
 - Added optional queued-message preparation with cancellation-safe delivery and appended context ([#11835](https://github.com/can1357/oh-my-pi/pull/11835) by [@andrebrait](https://github.com/andrebrait)).
