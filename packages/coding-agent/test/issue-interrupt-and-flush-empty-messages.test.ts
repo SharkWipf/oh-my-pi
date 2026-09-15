@@ -89,11 +89,15 @@ describe("empty submit with queued messages", () => {
 		const controller = new InputController(ctx);
 		controller.setupEditorSubmitHandler();
 		editor.setDraft("", [image]);
-		expect(editor.composerChips().map(chip => chip.image)).toEqual([image]);
+		expect(editor.composerChips().map(chip => (chip.kind === "image" ? chip.image : undefined))).toEqual([image]);
 		await editor.onSubmit?.(editor.getExpandedText());
-		expect(prompt).toHaveBeenCalledWith("", expect.objectContaining({
-			images: [image], originalSubmission: expect.objectContaining({ text: "", images: [image] }),
-		}));
+		expect(prompt).toHaveBeenCalledWith(
+			"",
+			expect.objectContaining({
+				images: [image],
+				originalSubmission: expect.objectContaining({ text: "", images: [image] }),
+			}),
+		);
 		expect(abort).not.toHaveBeenCalled();
 		prompt.mockClear();
 		editor.setDraft("", [image]);
@@ -128,7 +132,6 @@ describe("empty submit with queued messages", () => {
 		expect(updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);
 		expect(requestRender).toHaveBeenCalledTimes(1);
 	});
-
 
 	it("drops a pending image whose marker was deleted and aborts as an empty submit", async () => {
 		// Deleting the chip token removes the attachment: an empty submit with a
