@@ -18,6 +18,7 @@
 - Transcript retirement and tail updates skip already committed blocks while preserving public middle-child replacements and externally assigned child arrays.
 ### Fixed
 
+- Killing a subagent cancels its assignment and provider requests before asynchronous shutdown hooks finish, while keeping upstream disposal idempotency, accepted-yield handling, and wake-failure notifications. Disposed sessions reject late prompts; killed or replaced workers cannot deliver late success, but the executor still notifies the original waker of cancellation.
 - Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.
 ### Breaking Changes
 

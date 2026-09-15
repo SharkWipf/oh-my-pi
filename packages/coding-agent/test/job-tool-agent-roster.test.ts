@@ -276,8 +276,9 @@ describe("hub cancel of a non-job-backed agent registration (#6315)", () => {
 
 		expect((result.details as CoordinationDetails)?.cancelled).toEqual([{ id: "Zombie", status: "cancelled" }]);
 		expect(resultText(result)).toContain("Cancelled agent Zombie");
-		// The registration is gone: dropped from the registry and lifecycle.
-		expect(registry.get("Zombie")).toBeUndefined();
+		// A terminal row keeps the transcript readable without permitting revival.
+		expect(registry.get("Zombie")).toMatchObject({ status: "aborted", session: null });
+		await expect(lifecycle.ensureLive("Zombie")).rejects.toThrow();
 		expect(lifecycle.has("Zombie")).toBe(false);
 		expect(fake.disposeCalls()).toBe(1);
 	});
@@ -302,7 +303,7 @@ describe("hub cancel of a non-job-backed agent registration (#6315)", () => {
 		expect((result.details as CoordinationDetails)?.cancelled).toEqual([{ id: "Runner", status: "cancelled" }]);
 		expect(fake.abortCalls()).toBe(1);
 		expect(fake.disposeCalls()).toBe(1);
-		expect(registry.get("Runner")).toBeUndefined();
+		expect(registry.get("Runner")).toMatchObject({ status: "aborted", session: null });
 	});
 
 	test("cancel refuses an agent spawned by someone else", async () => {
@@ -359,7 +360,7 @@ describe("hub cancel of a non-job-backed agent registration (#6315)", () => {
 		const result = await tool.execute("call", { op: "cancel", ids: ["Zombie"] });
 
 		expect((result.details as CoordinationDetails)?.cancelled).toEqual([{ id: "Zombie", status: "cancelled" }]);
-		expect(registry.get("Zombie")).toBeUndefined();
+		expect(registry.get("Zombie")).toMatchObject({ status: "aborted", session: null });
 		expect(lifecycle.has("Zombie")).toBe(false);
 		expect(fake.disposeCalls()).toBe(1);
 	});

@@ -745,6 +745,39 @@ describe("persisted subagent revival", () => {
 			IrcBus.resetGlobalForTests();
 		});
 
+		it.each(["killed", "replaced"] as const)("fences late success from a %s wake owner but delivers one cancellation", async state => {
+			const cwd = makeTempDir("@pi-revive-relay-stopped-");
+			const { ref, handle } = await reviveWithWaker(cwd);
+			const registry = AgentRegistry.global();
+			const original = registry.get(ref.id)!;
+			const finish = handle.observer()?.([wakeRecord("Main")]);
+			handle.setLastAssistantText("Late worker-authored success must not escape");
+			await AgentLifecycleManager.global().release(ref.id, original, { tombstone: true });
+			const bus = IrcBus.global();
+			// Even marking ordinary worker traffic as a relay cannot bypass the sender fence.
+			expect((await bus.send({ from: ref.id, to: "Main", body: "Unauthorized late message", wakeRelay: true })).outcome).toBe("failed");
+			let replacement: AgentRef | undefined;
+			if (state === "replaced") {
+				registry.unregister(ref.id, original);
+				replacement = registry.register({
+					id: ref.id, displayName: "replacement", kind: "sub",
+					session: createRevivedSession([]).session, status: "running",
+				});
+			}
+			const reply = bus.wait("Main", { from: ref.id }, 5000);
+			await finish?.();
+			await handle.trackedReplies[0];
+			const message = await reply;
+			expect(message?.replyTo).toBe("irc-42");
+			expect(message?.body.toLowerCase()).toContain("cancel");
+			expect(message?.body).not.toContain("worker-authored");
+			expect(await bus.wait("Main", { from: ref.id }, 20)).toBeNull();
+			if (replacement) {
+				expect(registry.get(ref.id)).toBe(replacement);
+				expect(replacement.status).toBe("running");
+			}
+		});
+
 		it("relays a no-output notice when the wake turn completes without producing anything", async () => {
 			const cwd = makeTempDir("@pi-revive-relay-empty-");
 			const { ref, handle } = await reviveWithWaker(cwd);
