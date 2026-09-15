@@ -2,6 +2,8 @@ import { beforeAll, expect, it } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentHubOverlayComponent } from "@oh-my-pi/pi-coding-agent/modes/components/agent-hub";
 import { SessionObserverRegistry } from "@oh-my-pi/pi-coding-agent/modes/session-observer-registry";
@@ -11,15 +13,20 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { runSubagentFollowUpTurn } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import { untilAborted } from "@oh-my-pi/pi-utils";
 
 beforeAll(() => initTheme());
 
-it("manager kill closes the provider request without starting yield reminders on the disposed worker", async () => {
+it.each(["hub", "lifecycle"] as const)("%s kill cancels live provider work before shutdown hooks finish", async entry => {
 	AgentLifecycleManager.resetGlobalForTests();
 	AgentRegistry.resetGlobalForTests();
 	const firstRequest = Promise.withResolvers<void>();
 	const connectionClosed = Promise.withResolvers<void>();
 	const responseBodies = new Set<ReadableStreamDefaultController<Uint8Array>>();
+	const shutdownEntered = Promise.withResolvers<void>();
+	const shutdownGate = Promise.withResolvers<void>();
+	let shutdownCalls = 0;
 	let requests = 0;
 	const server = Bun.serve({
 		hostname: "127.0.0.1",
@@ -55,17 +62,32 @@ it("manager kill closes the provider request without starting yield reminders on
 		api: "openai-completions" as const,
 	};
 	const settings = Settings.isolated({ "compaction.enabled": false, "retry.enabled": false });
+	const sessionManager = SessionManager.inMemory();
+	const modelRegistry = {
+		resolver: () => async () => "controlled-stop-key",
+		getApiKey: async () => "controlled-stop-key",
+	} as never;
+	const runtime = new ExtensionRuntime();
+	const extension = await loadExtensionFromFactory(
+		api => api.on("session_shutdown", async () => {
+			shutdownCalls++;
+			shutdownEntered.resolve();
+			await shutdownGate.promise;
+		}),
+		process.cwd(),
+		new EventBus(),
+		runtime,
+		"controlled-stop-shutdown",
+	);
 	const session = new AgentSession({
 		agent: new Agent({
 			initialState: { model, systemPrompt: ["Controlled cancellation"], messages: [], tools: [] },
 			getApiKey: () => "controlled-stop-key",
 		}),
-		sessionManager: SessionManager.inMemory(),
+		sessionManager,
 		settings,
-		modelRegistry: {
-			resolver: () => async () => "controlled-stop-key",
-			getApiKey: async () => "controlled-stop-key",
-		} as never,
+		modelRegistry,
+		extensionRunner: new ExtensionRunner([extension], runtime, process.cwd(), sessionManager, modelRegistry),
 	});
 	const registry = AgentRegistry.global();
 	const lifecycle = AgentLifecycleManager.global();
@@ -96,10 +118,18 @@ it("manager kill closes the provider request without starting yield reminders on
 				throw new Error(`Worker ended before its provider request: ${result.error ?? result.stderr}`);
 			}),
 		]);
-		hub.handleInput("x");
+		const release = entry === "lifecycle" ? lifecycle.release(id, ref, { tombstone: true }) : undefined;
+		if (entry === "hub") hub.handleInput("x");
+		await shutdownEntered.promise;
+		// This must close while the real session_shutdown extension is still blocked.
+		await untilAborted(AbortSignal.timeout(1_000), () => connectionClosed.promise);
+		const disposal = session.dispose();
+		expect(session.dispose()).toBe(disposal);
+		shutdownGate.resolve();
 		const outcome = await turn;
-		await session.dispose();
-		await connectionClosed.promise;
+		await release;
+		await disposal;
+		expect(shutdownCalls).toBe(1);
 
 		expect(outcome.aborted).toBe(true);
 		expect(outcome.exitCode).toBe(1);
@@ -110,6 +140,7 @@ it("manager kill closes the provider request without starting yield reminders on
 		expect(await session.prompt("Late callback after manager kill")).toBe(false);
 		expect(requests).toBe(1);
 	} finally {
+		shutdownGate.resolve();
 		for (const body of responseBodies) {
 			try {
 				body.close();

@@ -128,7 +128,32 @@ export class IrcBus {
 		opts?: { expectsReply?: boolean; suppressRelay?: boolean },
 	): Promise<IrcDeliveryReceipt> {
 		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
-		const receipt = await this.#deliver(message, opts);
+		return this.#send(message, opts);
+	}
+
+	/** @internal Executor-only terminal notice; accepts no worker-authored body or result. */
+	sendWakeCancellation(source: { from: string; to: string; replyTo?: string }): Promise<IrcDeliveryReceipt> {
+		return this.#send(
+			{
+				from: source.from,
+				to: source.to,
+				replyTo: source.replyTo,
+				id: Snowflake.next(),
+				ts: Date.now(),
+				wakeRelay: true,
+				body: `Wake turn was cancelled because its worker stopped or was replaced. No further answer was sent. See history://${source.from} for details.`,
+			},
+			undefined,
+			true,
+		);
+	}
+
+	async #send(
+		message: IrcMessage,
+		opts?: { expectsReply?: boolean; suppressRelay?: boolean },
+		wakeCancellation = false,
+	): Promise<IrcDeliveryReceipt> {
+		const receipt = await this.#deliver(message, opts, wakeCancellation);
 		if (receipt.outcome !== "failed") {
 			let sent = this.#lastSent.get(message.from);
 			if (!sent) {
@@ -162,10 +187,13 @@ export class IrcBus {
 	async #deliver(
 		message: IrcMessage,
 		opts?: { expectsReply?: boolean; suppressRelay?: boolean },
+		wakeCancellation = false,
 	): Promise<IrcDeliveryReceipt> {
 		const sender = this.#registry.get(message.from);
 		const senderSession = sender?.session;
-		if (!this.#senderCanDeliver(sender, senderSession)) {
+		// Executor lifecycle notices must reach the original waker even after kill.
+		// Successful replies and ordinary sender work retain the ownership fence.
+		if (!wakeCancellation && !this.#senderCanDeliver(sender, senderSession)) {
 			return { to: message.to, outcome: "failed", error: `Sender "${message.from}" is no longer active.` };
 		}
 		const ref = this.#registry.get(message.to);
@@ -223,7 +251,7 @@ export class IrcBus {
 					error: error instanceof Error ? error.message : String(error),
 				};
 			}
-			if (!this.#senderCanDeliver(sender, senderSession)) {
+			if (!wakeCancellation && !this.#senderCanDeliver(sender, senderSession)) {
 				return { to: message.to, outcome: "failed", error: `Sender "${message.from}" stopped before delivery.` };
 			}
 		}
@@ -252,7 +280,7 @@ export class IrcBus {
 			// the message so a later `wait`/`inbox` from the recipient can still
 			// pick it up. The receipt stays "failed" — the recipient has not
 			// seen it.
-			if (this.#senderCanDeliver(sender, senderSession)) this.#enqueue(message);
+			if (wakeCancellation || this.#senderCanDeliver(sender, senderSession)) this.#enqueue(message);
 			return {
 				to: message.to,
 				outcome: "failed",
