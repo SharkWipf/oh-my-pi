@@ -224,7 +224,6 @@ export class Tokenizer {
 
 		switch (message.role) {
 			case "user":
-			case "custom":
 			case "developer": {
 				// Both roles carry text and images sent to the provider.
 				const content = message.content;

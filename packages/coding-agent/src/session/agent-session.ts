@@ -10127,9 +10127,9 @@ export class AgentSession {
 		sourceInput?: RestoredQueuedMessage;
 		cancelled: boolean;
 	}> {
+		using _transition = this.#beginSessionTransition();
 		this.#messageClassifier.pause();
 		try {
-		using _transition = this.#beginSessionTransition();
 		const previousSessionFile = this.sessionFile;
 		const selectedEntry = this.sessionManager.getEntry(entryId);
 
@@ -10239,9 +10239,9 @@ export class AgentSession {
 		leafId: string,
 		sessionId: string,
 	): Promise<{ cancelled: boolean; sessionFile: string | undefined }> {
+		using _transition = this.#beginSessionTransition();
 		this.#messageClassifier.pause();
 		try {
-		using _transition = this.#beginSessionTransition();
 		const previousSessionFile = this.sessionFile;
 		if (!this.sessionManager.getSessionFile()) {
 			throw new Error("Cannot branch /btw: session is not persisted");
@@ -10435,9 +10435,9 @@ export class AgentSession {
 		 */
 		askReanswerCommitted?: boolean;
 	}> {
+		using _transition = this.#beginSessionTransition();
 		this.#messageClassifier.pause();
 		try {
-		using _transition = this.#beginSessionTransition();
 		await this.#bash.flushPending();
 		const oldLeafId = this.sessionManager.getLeafId();
 

@@ -80,6 +80,13 @@
 
 - Preserved host-recorded producer identity independently of billing attribution through named user-message delivery options and staged steer, follow-up, and aside delivery.
 
+- Added nonblocking user-message classification with eleven independent saved category facts, selected-message reclassification, bounded missing-only backfill, per-row status updates, and isolated cancellation. Classifier jobs validate active source/branch ownership before saving and require explicit backfill after restart.
+### Fixed
+
+- Preserved background message-classifier ownership across guarded session transitions, including vetoed navigation, while adopting nested configured role aliases without changing the default `@tiny` selector or success-only classification replacement.
+- Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.
+### Added
+
 - Sloppy edits support `<SM:AFTER>` to insert new lines after an anchor without repeating or replacing it.
 - Fixed eligible full OpenAI Responses request-body timeouts by retrying once after conservative local tool-result elision, while preserving assistant/user history, unsafe partial output, and existing stateful retries ([#11878](https://github.com/can1357/oh-my-pi/pull/11878) by [@hellofrommorgan](https://github.com/hellofrommorgan)).
 - User append instructions (`APPEND_SYSTEM.md`, `--append-system-prompt`) now render under their own `## User Instructions` heading whenever generated blocks precede them, instead of trailing the `## MCP Server Instructions` section and reading as server-supplied, unverified content ([#11832](https://github.com/can1357/oh-my-pi/pull/11832) by [@iacore](https://github.com/iacore)).
