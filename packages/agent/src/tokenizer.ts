@@ -281,6 +281,7 @@ export class Tokenizer {
 				}
 				break;
 			}
+			case "custom":
 			case "hookMessage":
 			case "toolResult": {
 				// Computer serializers consume the typed screenshot, not content image mirrors.
