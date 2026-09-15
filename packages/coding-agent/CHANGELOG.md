@@ -22,6 +22,8 @@
 
 ### Fixed
 
+- Compaction receipts now distinguish actual Anthropic/OpenAI native methods from the configured preference, inventory native summaries and opaque state without double-charging fallback wrappers, and show configured/calibrated targets plus unknown native cost inline for manual and automatic compaction. Anthropic request usage remains a separate old-context anchor; prepared snapshots remain explicitly unconfirmed.
+- Preserved upstream whole-group retention, eligible Anthropic AUTO routing, lazy frame emission accounting, revision-aware tool-schema estimates, and durable manual/speculative publication alongside source-aware diagnostic receipts.
 - Notes-backed local rollovers preserve selected originals without overriding extension-owned cuts, keep latest requests once in chronological replay, restore branch-local notebook state across resume and clear boundaries, and expose original input and provenance alongside delivered raw history.
 - Automatic snapcompact frame rescue no longer commits a smaller frame window when its text spill increases local context size; genuine reductions remain eligible even when they do not clear the headroom band.
 - Legacy archive migration now reports unavailable original source boundaries and current original-image references before replacing installed history, instead of treating a fresh suffix as a complete original baseline.

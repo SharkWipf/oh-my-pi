@@ -55,9 +55,19 @@ Those custom roles are then transformed into LLM-facing messages in `convertToLl
 
 while `custom` messages pass through as developer messages with their raw content (no template).
 
-Native replay also requires a matching provider and a Responses-family API on the active model. A separate native compaction endpoint does not give a Chat Completions or Anthropic encoder the ability to consume its output.
+OpenAI native replay requires a matching provider and a Responses-family API on the active model. Anthropic native summaries replay through eligible Anthropic endpoints, preserving native summary and encrypted state; other providers receive readable fallback text. A separate native endpoint does not give an incompatible encoder the ability to consume its output.
 
 Disabling future native compaction does not disable normal replay of an existing payload. Compaction preparation has a separate, stricter reuse policy: local summarization must re-expand the original messages rather than treat an opaque placeholder as a readable summary.
+
+## Compaction diagnostics
+
+Manual and automatic success dividers use the committed receipt: the actual native/local method, configured ordinary target (and calibration when different), and before-to-after local quantities. An opaque native payload shows the known subtotal **plus unknown**, never a complete after-context size inferred from the request that processed the old context. Anthropic compaction request input usage is a separately labelled provider anchor.
+
+`/context details` keeps recorded-at-compaction, current reconstruction, and the last actual OMP-prehook prepared request separate. The recorded settings/model/target remain frozen after live settings change. Prepared means observed after OMP transforms, not confirmed sent; opening the panel does not rerun hooks or rendering. Inventory order and structural counts describe the OMP Context, not a claim about final provider wire folding or the placement of Anthropic file metadata.
+
+Native summary text has aggregate coverage, encrypted state has unknown cost, and retained originals keep source identity. Original images use the generic image baseline; archive frames use the historical generic frame estimate unless a real renderer receipt exists, while live inline frames use their captured renderer estimate. Shared frames are charged once. Rejected lazy frames are not read or counted as images, and chronological text overflow is inventoried where it is emitted. Selection quotas overlap and are not an additive provider invoice.
+
+The ordinary retained suffix follows upstream whole-group fit, including its newest oversized-group exception. Missing selected users are added chronologically without refunding ordinary user cost; admitted complete non-user units cost ordinary budget. Eligible Anthropic AUTO compaction at 55,000 or more input tokens retains these source/accounting contracts without adding a separate allocator or new limits.
 
 ## Compaction pipeline
 
