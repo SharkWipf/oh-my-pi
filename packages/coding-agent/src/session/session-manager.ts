@@ -660,7 +660,9 @@ class SessionEntryIndex {
 		return { path, controls: fold.controls };
 	}
 
-	clear(): void {
+	constructor(private readonly onChange: () => void) {}
+
+	clear(notify = true): void {
 		this.#entriesById.clear();
 		this.#messagesByPersistenceKey.clear();
 		this.#children.clear();
@@ -670,17 +672,20 @@ class SessionEntryIndex {
 		this.#assistantUsage = emptyUsageStatistics();
 		this.#fold = this.#emptyFold();
 		this.#boundaryFold = undefined;
+		if (notify) this.onChange();
 	}
 
-	rebuild(entries: readonly SessionEntry[]): void {
-		this.clear();
+	rebuild(entries: readonly SessionEntry[], leafId?: string | null, notify = true): void {
+		this.clear(false);
 		this.#rebuilding = true;
-		for (const entry of entries) this.insert(entry);
+		for (const entry of entries) this.insert(entry, false);
 		this.#rebuilding = false;
+		if (leafId !== undefined) this.#leaf = leafId;
 		this.branchFold();
+		if (notify) this.onChange();
 	}
 
-	insert(entry: SessionEntry): void {
+	insert(entry: SessionEntry, notify = true): void {
 		this.#entriesById.set(entry.id, entry);
 		this.#leaf = entry.id;
 		if (entry.type === "message") {
@@ -709,6 +714,7 @@ class SessionEntryIndex {
 			if (entry.parentId === this.#fold.id) this.#foldEntry(entry);
 			else if (entry.type === "compaction" || entry.type === "reset_boundary") this.branchFold();
 		}
+		if (notify) this.onChange();
 	}
 
 	has(id: string): boolean {
@@ -757,7 +763,9 @@ class SessionEntryIndex {
 	}
 
 	setLeaf(id: string | null): void {
+		if (id === this.#leaf) return;
 		this.#leaf = id;
+		this.onChange();
 	}
 
 	childrenOf(parentId: string | null): SessionEntry[] {
@@ -955,7 +963,8 @@ export class SessionManager {
 	#hasTitleSlot = true;
 	#entries: SessionEntry[] = [];
 	#requirementsSourceRewriteVersion = 0;
-	#index = new SessionEntryIndex();
+	#sourceChangeCallbacks = new Set<() => void>();
+	#index = new SessionEntryIndex(() => this.#notifySourceChanged());
 	#requirementsEpochCache?: Map<string, number>;
 	#requirementsDependencyJournals?: Map<string, RequirementsSource["locators"][number]>;
 	#requirementsDependencyBlobs?: Set<string>;
@@ -988,6 +997,29 @@ export class SessionManager {
 	 * in-memory (pre-blob-externalization) entry, so inline images survive.
 	 */
 	onEntryAppended?: (entry: SessionEntry) => void;
+
+	/**
+	 * Invalidate derived source views on journal/ancestry mutation. This is not a
+	 * durability or snapshot-publication event: listeners must only invalidate;
+	 * read the final source state after the owning mutator returns.
+	 */
+	subscribeSourceChanges(callback: () => void): () => void {
+		this.#sourceChangeCallbacks.add(callback);
+		return () => {
+			this.#sourceChangeCallbacks.delete(callback);
+		};
+	}
+
+	#notifySourceChanged(): void {
+		if (this.#sourceChangeCallbacks.size === 0) return;
+		for (const callback of [...this.#sourceChangeCallbacks]) {
+			try {
+				callback();
+			} catch (error) {
+				logger.warn("Session source change listener failed", { error: String(error) });
+			}
+		}
+	}
 
 	#turnBudgetTotal: number | null = null;
 	#turnBudgetHard = false;
@@ -3981,9 +4013,9 @@ export class SessionManager {
 				)
 			: [];
 		const leaf = this.#index.leafId();
-		this.#index.rebuild(this.#entries);
-		this.#index.setLeaf(leaf);
+		this.#index.rebuild(this.#entries, leaf, false);
 		onAffected?.(affected);
+		this.#notifySourceChanged();
 		if (!this.#persist || !this.#sessionFile) return;
 		await this.#rewriteAtomically();
 	}
@@ -4099,7 +4131,7 @@ export class SessionManager {
 		return this.#index.get(id);
 	}
 
-	/** All direct children of an entry. */
+	/** All direct children of an entry, or roots when parentId is null. */
 	getChildren(parentId: string | null): SessionEntry[] {
 		return this.#index.childrenOf(parentId);
 	}
@@ -4176,6 +4208,7 @@ export class SessionManager {
 			changed = true;
 		}
 
+		if (changed) this.#notifySourceChanged();
 		return changed;
 	}
 

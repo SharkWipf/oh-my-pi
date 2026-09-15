@@ -326,6 +326,7 @@ describe("selector navigation keybindings", () => {
 				onSelect: id => selected.push(id),
 				onCancel: () => {},
 			});
+			await selector.ready;
 
 			selector.handleInput(CTRL_P);
 			selector.handleInput("\n");

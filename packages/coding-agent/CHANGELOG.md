@@ -197,6 +197,7 @@
 
 ### Fixed
 
+- Kept Esc-Esc rewind cancellable and viewport-bounded while including persisted skill/custom requests and image-only prompts in user-turn navigation; root sibling lookup stays indexed, empty returned drafts replace stale editor text, and deferred replay preserves upstream model-substitution and execution-artifact warnings.
 - Fixed Perplexity sign-in for SSO-only accounts in `/login` and the setup wizard with isolated browser sign-in and automatic session capture, supporting both secure-prefixed and unprefixed session cookies without manual cookie copying. ([#12064](https://github.com/can1357/oh-my-pi/pull/12064) by [@lance0](https://github.com/lance0))
 - Mid-run compaction no longer sends the pre-compaction history to the next provider call when the live message array is rewritten in place.
 - Collab guests now receive the host's goodbye even when the relay closes the room right behind it, and a fully sent snapshot no longer holds later frames behind transport backpressure.
@@ -775,6 +776,8 @@
 - Manual source-state updates now publish complete metadata batches without serializing cold history; file-backed publication preserves the original journal bytes and stages the copy asynchronously.
 - Atomic session replacement now surfaces failed EPERM rollback instead of reporting success and preserves a newer target when the original operation loses its commit guard.
 - Fixed cumulative usage remaining stale after supported in-place session-entry rewrites; derived controls and credential pins are refreshed without moving the selected branch.
+- Esc-Esc rewind now paints its cancellable loading surface before collecting the cold branch through cooperative parent/ID traversal, then indexes source entries cooperatively and constructs transcript renderers only when its source-anchored viewport needs them. Reopening unchanged history reuses the index; journal rewrites and branch changes invalidate it. Sibling paths use indexed child lookups instead of rebuilding the whole session tree for each step.
+- Grouped Read cards now refresh their display at render time, avoiding quadratic display rebuilding while replaying long read runs. Rewind retains the bounded visible window rather than constructing empty assistant prefixes throughout a read run.
 - `omp update` now refuses to overwrite shebang scripts or non-OMP executables behind foreign symlinks and reports the physical binary path it verified ([#11152](https://github.com/can1357/oh-my-pi/issues/11152)).
 - The startup update notice counts every change in a release: bullets written above a `###` heading now count under `Other`, and `+`/`*` markers and lightly indented bullets count like `-`.
 - Fixed Codex Astra retaining its larger window after disabling Extended Context, including cached models; explicit model overrides still take precedence.

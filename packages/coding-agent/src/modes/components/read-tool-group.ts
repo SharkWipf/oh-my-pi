@@ -342,6 +342,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	#usageBatchByToolCallId = new Map<string, string>();
 	#text: Text;
 	#expanded = false;
+	#displayDirty = true;
 	#toolActivityVisible = true;
 	#showContentPreview: boolean;
 	// A read group accretes entries across multiple assistant completions for as
@@ -364,11 +365,14 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		this.#showContentPreview = options.showContentPreview ?? false;
 		this.#text = new Text("", 0, 0);
 		this.addChild(this.#text);
-		this.#updateDisplay();
 	}
 
 	override render(width: number): readonly string[] {
 		if (!this.#toolActivityVisible) return [];
+		if (this.#displayDirty) {
+			this.#updateDisplay();
+			this.#displayDirty = false;
+		}
 		return super.render(width);
 	}
 	isTranscriptBlockFinalized(): boolean {
@@ -418,7 +422,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		};
 		entry.path = rawPath;
 		this.#entries.set(toolCallId, entry);
-		this.#updateDisplay();
+		this.#displayDirty = true;
 	}
 
 	/**
@@ -438,12 +442,12 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		]);
 		this.#entries.clear();
 		for (const [key, value] of reordered) this.#entries.set(key, value);
-		this.#updateDisplay();
+		this.#displayDirty = true;
 	}
 	/** Remove one call without discarding successful siblings in the shared group. */
 	removeEntry(toolCallId: string): boolean {
 		if (!this.#entries.delete(toolCallId)) return this.#entries.size === 0;
-		this.#updateDisplay();
+		this.#displayDirty = true;
 		return this.#entries.size === 0;
 	}
 
@@ -482,7 +486,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			entry.codeStartLine = displayContent?.startLine;
 			entry.codeLineNumbers = displayContent?.lineNumbers;
 		}
-		this.#updateDisplay();
+		this.#displayDirty = true;
 	}
 
 	/**
@@ -516,22 +520,22 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			timestamp,
 			turnElapsedMs,
 		});
-		this.#updateDisplay();
+		this.#displayDirty = true;
 		return true;
 	}
 
 	setArgsComplete(_toolCallId?: string): void {
-		this.#updateDisplay();
+		this.#displayDirty = true;
 	}
 
 	setExecutionStarted(_toolCallId?: string): void {
-		this.#updateDisplay();
+		this.#displayDirty = true;
 	}
 
 	setExpanded(expanded: boolean): void {
 		if (this.#expanded !== expanded) this.#blockVersion++;
 		this.#expanded = expanded;
-		this.#updateDisplay();
+		this.#displayDirty = true;
 	}
 
 	setToolActivityVisible(visible: boolean): void {
