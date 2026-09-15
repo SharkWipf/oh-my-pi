@@ -214,6 +214,24 @@ Provider defaults vs per-model overrides:
 - `compat` is deep-merged for nested routing blocks (`openRouterRouting`, `vercelGatewayRouting`,
   `extraBody`, and `whenThinking`).
 
+## Usage costs and time-based pricing
+
+OMP estimates token costs from the selected provider/model's catalog pricing, preferring server-reported monetary costs when available. Completed messages retain their recorded costs: crossing a pricing boundary, switching models, or reopening a session does not reprice accumulated usage.
+
+For the first-party `deepseek` provider, the catalog follows [DeepSeek's official pricing](https://api-docs.deepseek.com/quick_start/pricing):
+
+- Peak hours are **Monday–Friday, 01:00–04:00 and 06:00–10:00 UTC** (start inclusive, end exclusive). All other times, including weekends, cost **50% of peak rates**.
+- Flash pricing covers `deepseek-flash` and the retired-but-still-accepted `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` ids, all billed at the Flash card. Peak rates per million tokens are $0.30 uncached input, $0.006 cached input, and $1.20 output.
+- `deepseek-v4-pro` initially uses peak rates of $1.32 uncached input, $0.044 cached input, and $3.96 output per million tokens. From **2026-09-14 04:00 UTC**, its estimates use the Flash rate card, with the same peak/off-peak schedule.
+
+Local estimates use the assistant message's **request-start timestamp** to choose both the rate card and tariff for the whole request. This is OMP's estimation convention: DeepSeek's pricing page does not specify how its server bills a request spanning a boundary. A request whose timestamp cannot be recovered is left unpriced rather than estimated against a tariff chosen from the wall clock.
+
+The status line's `cost` segment appends **↑** for peak or **↓** for off-peak pricing on the **currently active provider/model**, using the current wall clock. It refreshes at tariff boundaries even while idle; the arrow is not a label for the accumulated session total. Models without scheduled pricing, including explicit flat-price overrides, show no arrow.
+
+An explicit model `cost` in `models.yml`, including `modelOverrides`, is a flat-price override and disables inherited time-based pricing for that model. Omitting `cost` preserves catalog pricing. `models.yml` does **not** accept a `timeBased` schedule; that metadata belongs to the catalog's [KDL pricing rules](../packages/catalog/src/compat/rules/README.md#time-based-pricing).
+
+A custom model in `models.yml` that omits `cost` inherits its reference row's card, schedule included. That lookup is keyed by model id and prefers the row with the widest limits, so `deepseek-v4-flash` resolves to a reseller's flat card while `deepseek-flash` resolves to the scheduled first-party one. Discovered proxy and gateway models are the opposite case: their pricing is provider-specific and rarely matches the bundled catalog, so discovery keeps them at a local-unknown zero cost and no tariff applies to them.
+
 ## Runtime discovery integration
 
 ### Implicit Ollama discovery
@@ -265,7 +283,7 @@ When `litellm` is active (for example through `LITELLM_API_KEY` or stored auth),
 
 Runtime discovery probes LiteLLM management metadata in order: `GET /model_group/info`, `GET /v2/model/info`, `GET /model/info`, and `GET /v1/model/info`. The configured key must be authorized to read at least one of these routes; on deployments that restrict management endpoints, grant the route through LiteLLM's `allowed_routes` access controls or use a master/admin key for discovery.
 
-If every metadata route is unavailable, discovery falls back to the OpenAI-compatible `GET /models` list. A forbidden or failed metadata request is logged once with its endpoint and status; `404` is treated as an absent route. Rich metadata maps per-model context, capability, and upstream-provider fields. OpenAI-backed models use LiteLLM's Responses route so reasoning summaries remain available; mixed-provider groups stay on Chat Completions. Bare fallback ids use the known OpenAI model families for routing and bundled reference metadata when available. Models absent from the bundled catalog can therefore have unknown context and pricing after fallback.
+If every metadata route is unavailable, discovery falls back to the OpenAI-compatible `GET /models` list. A forbidden or failed metadata request is logged once with its endpoint and status; `404` is treated as an absent route. Both paths exclude models explicitly marked with known task-specific LiteLLM modes: `audio_speech`, `audio_transcription`, `batch`, `embedding`, `guardrail`, `image_edit`, `image_generation`, `moderation`, `ocr`, `rerank`, `search`, `vector_store`, and `video_generation`. Missing, null, and unrecognized modes remain selectable so router aliases continue to work. Rich metadata maps per-model context, capability, and upstream-provider fields. OpenAI-backed models use LiteLLM's Responses route so reasoning summaries remain available; mixed-provider groups stay on Chat Completions. Bare fallback ids use the known OpenAI model families for routing and bundled reference metadata when available. Models absent from the bundled catalog can therefore have unknown context and pricing after fallback.
 
 ### Explicit provider discovery
 
@@ -466,6 +484,10 @@ Both surfaces keep provider-prefixed concrete models visible and selectable.
 
 Selecting a provider row stores its explicit `provider/modelId`.
 
+The table's `images` column reports what the transport will actually send, so a model whose images are
+stripped (`compat.stripImageInput`, see [Image handling](#compatibility-and-routing-fields)) shows `no`
+even when its spec declares `input: [text, image]`; `--json` keeps the declared `input`.
+
 ## Context promotion (model-level fallback chains)
 
 Context promotion is an overflow recovery mechanism for small-context variants (for example `*-spark`) that automatically promotes to a larger-context sibling when the API rejects a request with a context length error.
@@ -544,7 +566,20 @@ Request shaping:
 - `supportsLongPromptCacheRetention` — host honors `prompt_cache_retention: "24h"` on the Responses API. Default: auto (api.openai.com).
 - `supportsImageDetailOriginal` — allow the Responses API's nonstandard `detail: "original"` image
   mode where the endpoint supports it.
+- `supportsConfigurationUpdate` — let the Responses API change `reasoning.effort` mid-session through a `configuration_update` input item while the request-level effort stays pinned for prompt caching (GPT-6 Astra). Default: auto (`true` for `gpt-6-astra` on every host, `false` otherwise). Set `false` for custom `openai-responses` / `openai-codex-responses` endpoints that reject the item type with HTTP 400; effort changes are then sent as the top-level `reasoning.effort` and no update items are emitted.
 - `extraBody` — extra top-level fields merged into every request body (gateway hints, controller selectors, etc.).
+
+Image handling:
+
+- `stripImageInput` — drop image parts before an `openai-completions` request is encoded (including the OpenRouter chat fallback, `PI_OPENROUTER_RESPONSES=0`). The catalog's
+  class rules set it for model lines that endpoints commonly serve as text-only (e.g. the DeepSeek class),
+  independently of the provider's own `input` declaration, so a model can declare `input: [text, image]`
+  and still send no image. Per-model `compat` is deep-merged over those rules and wins: set
+  `stripImageInput: false` for an id whose endpoint really accepts `image_url` — a vision-augmenting
+  proxy, for example. Default: auto (catalog class and provider rules). The Responses and Anthropic/Google
+  encoders ship the modalities the model declares, as does the `pi-native` transport (it forwards the
+  original context to the gateway, so the guard never runs client-side and the `images` column reports
+  the declared `input`).
 
 Reasoning / thinking:
 
