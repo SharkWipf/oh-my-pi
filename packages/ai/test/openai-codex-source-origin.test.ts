@@ -1,5 +1,4 @@
 import { afterEach, expect, test, vi } from "bun:test";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { createCodexModel } from "./helpers";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import {
@@ -18,7 +17,7 @@ import {
 	setSourceOrigin,
 } from "../src/utils/source-origin";
 
-const model = getBundledModel<"openai-codex-responses">("openai-codex", "gpt-5.4");
+const model = createCodexModel("gpt-5.4", { input: ["text", "image"], supportsComputerUse: true });
 const usage = {
 	input: 0,
 	output: 0,
