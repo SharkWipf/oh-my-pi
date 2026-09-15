@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Realigned native preservation with upstream whole-group ordinary retention and automatic eligible Anthropic compaction at 55,000 input tokens. Anthropic summaries and encrypted state replay verbatim as aggregate history, followed by chronological selected source atoms and the ordinary tail; selected original images remain source-addressed.
+- Native V2 excludes identified summary/archive migrations from ordinary user retention without relying on their wording. Complete admitted non-user inputs remain full logical atoms; Codex V1 requires an explicit supported endpoint.
 - Fixed native compaction conflating selected original submissions with their delivered expansions. Both projections retain their own text/image coverage and survive native history reload without changing ordinary allocation.
 - Fixed normalized custom messages counting as zero tokens. Custom text and original images now consume their ordinary local baseline regardless of attribution or display settings.
 - Fixed ordinary source token estimates omitting assistant images and known current native text, code, logs, search context, and computer metadata. Normalized native mirrors are charged once, including after controlled source rewrites and JSON reload.

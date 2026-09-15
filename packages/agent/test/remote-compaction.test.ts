@@ -832,7 +832,7 @@ describe("remote compaction input forwarding", () => {
 
 describe("requestCompactionV2Streaming", () => {
 	test("retains bundled Codex serialized users in the replacement context within budget", async () => {
-		const model = getBundledModel<"openai-codex-responses">("openai-codex", "gpt-5.4");
+		const model = getBundledModel<"openai-codex-responses">("openai-codex", "gpt-5.5");
 		const body = await buildTransformedCodexRequestBody(
 			model,
 			{

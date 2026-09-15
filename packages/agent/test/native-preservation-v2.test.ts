@@ -91,7 +91,7 @@ describe("native V2 protected source union", () => {
 	});
 
 	test("original image survives partial ordinary retention once and reload retains exact text/image origins", async () => {
-		const spec = getBundledModel<"openai-codex-responses">("openai-codex", "gpt-5.4");
+		const spec = getBundledModel<"openai-codex-responses">("openai-codex", "gpt-5.5");
 		if (!spec) throw Error("missing bundled Codex model");
 		const model = buildModel<"openai-codex-responses">({ ...spec, api: "openai-codex-responses" });
 		const message: Message = { role: "user", content: [{ type: "text", text: "ABCDEFGHIJKLMNOP" }, { type: "image", mimeType: "image/png", data: "aW1hZ2U=" }], timestamp: 0 };
