@@ -5,6 +5,11 @@
 ### Added
 
 - Added guarded transient inline-rendering facts to source-origin metadata. Known clone operations preserve them; changed blocks, unknown hook output, and persisted metadata cannot retain stale physical attribution.
+### Fixed
+
+- Preserve Anthropic source and original-image origins through text, tool exchanges, compaction replay, and cache-control copies. Native compaction blocks retain aggregate provenance rather than claiming exact original-source content.
+- Preserve local source and original-image provenance through Codex, OpenAI, and Azure ordinary request builders, native replay, one-to-many tool emissions, and clone/filter operations without adding provider-wire fields.
+- Prevent a mapped full native snapshot from duplicating its existing input prefix; arbitrary in-place or replacement request hooks retain authority and invalidate unsupported source attribution.
 
 ### Fixed
 

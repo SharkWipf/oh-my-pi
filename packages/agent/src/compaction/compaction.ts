@@ -35,6 +35,7 @@ import type { InputItem as CodexInputItem } from "@oh-my-pi/pi-ai/providers/open
 import { convertTools } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { buildResponsesInput, resolveOpenAICompatPolicy } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { stripOpenAIResponsesOutputOnlyStatusesForReplay } from "@oh-my-pi/pi-ai/utils";
+import { bindMessageSource, cloneWithSourceOrigins, combineSourceOrigins, getSourceOrigin, mergeSourceHistory, setSourceOrigin } from "@oh-my-pi/pi-ai/utils/source-origin";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
@@ -61,6 +62,7 @@ import {
 	shouldUseCompactionV2Streaming,
 	storeCompactionV2PreserveData,
 	V2_RETAINED_MESSAGE_TOKEN_BUDGET,
+	unionNativeUserHistory,
 } from "./compaction-v2-streaming";
 import type { CompactionEntry, SessionEntry } from "./entries";
 import { NativeCompactionError } from "./errors";
@@ -73,6 +75,8 @@ import {
 } from "./messages";
 import {
 	buildOpenAiNativeHistory,
+	buildCompleteNativeAtomItems,
+	composeOpenAiHistoricalInput,
 	getPreservedOpenAiRemoteCompactionData,
 	isOpenAiRemoteCompactionApi,
 	requestOpenAiRemoteCompaction,
@@ -1760,7 +1764,7 @@ function buildOpenAiResponsesCompactionInput(
 		nativeInput.push(item);
 	}
 	return stripOpenAIResponsesOutputOnlyStatusesForReplay(
-		previousReplacementHistory ? [...previousReplacementHistory, ...nativeInput] : nativeInput,
+		previousReplacementHistory ? mergeSourceHistory(previousReplacementHistory, nativeInput) : nativeInput,
 	);
 }
 
@@ -1818,6 +1822,63 @@ function formatRemoteCompactionSummary(inputTokens: number): string {
  * @param preparation - Pre-calculated preparation from prepareCompaction()
  * @param customInstructions - Optional custom focus for the summary
  */
+function nativeSelectedMessages(preparation: CompactionPreparation, tokenizer: Tokenizer): { messages: Message[]; nonUserSourceIds: string[]; nonUserTokens: number } {
+	const selected: Message[] = [];
+	const sourceIds = new Set<string>();
+	const nonUserSourceIds: string[] = [];
+	let nonUserTokens = 0;
+	for (const source of preparation.selectedSources ?? []) {
+		const original = source.message;
+		if (original.role !== "user" && original.role !== "assistant" && original.role !== "toolResult" && original.role !== "developer") continue;
+		const sourceKey = compactionSourceKey(source);
+		if (sourceIds.has(sourceKey)) continue;
+		sourceIds.add(sourceKey);
+		if (original.role !== "user") {
+			nonUserTokens += tokenizer.countMessage(original);
+			nonUserSourceIds.push(source.entryId);
+		}
+		bindMessageSource(original, source.entryId, source.order, source.projection);
+		const materialized = materializeCompactionSourceMessage(original, original.role === "user" ? source.spans : undefined);
+		if (!materialized || (materialized.role !== "user" && materialized.role !== "assistant" && materialized.role !== "toolResult" && materialized.role !== "developer")) continue;
+		const message = cloneWithSourceOrigins(materialized);
+		// A response delta belongs to this selected atom; a full snapshot also contains
+		// unrelated history and must never be admitted through its carrier.
+		if (message.role !== "assistant" || message.providerPayload?.type !== "openaiResponsesHistory" || message.providerPayload.dt !== true) {
+			if ("providerPayload" in message) delete message.providerPayload;
+		} else {
+			setSourceOrigin(message, combineSourceOrigins([message, ...message.providerPayload.items]));
+		}
+		selected.push(message);
+	}
+	return { messages: selected, nonUserSourceIds, nonUserTokens };
+}
+/** Union source spans before Anthropic conversion; complete non-user atoms stay indivisible. */
+function anthropicSourceHistory(ordinary: readonly SourceMessage<AgentMessage>[], selected: readonly CompactionSelectedSource[], fallback: AgentMessage[]): AgentMessage[] {
+	if (selected.length === 0) return fallback;
+	const sources = new Map(ordinary.map(source => [compactionSourceKey(source), source]));
+	for (const source of selected) {
+		const key = compactionSourceKey(source);
+		const previous = sources.get(key);
+		if (source.message.role !== "user" || !previous || !source.spans || !previous.spans) {
+			sources.set(key, { ...source, spans: source.message.role === "user" && !previous ? source.spans : undefined });
+			continue;
+		}
+		const spans: SourceBlockRange[] = [];
+		for (const span of [...previous.spans, ...source.spans].sort((a, b) => a.blockIndex - b.blockIndex || a.start - b.start)) {
+			const last = spans.at(-1);
+			if (last && last.blockIndex === span.blockIndex && span.start <= last.end) last.end = Math.max(last.end, span.end);
+			else spans.push({ ...span });
+		}
+		sources.set(key, { ...source, spans });
+	}
+	const result: AgentMessage[] = [];
+	for (const source of [...sources.values()].sort((a, b) => a.order - b.order)) {
+		const message = materializeCompactionSourceMessage(source.message, source.spans);
+		if (message) result.push(message);
+	}
+	return ordinary.length === 0 ? [...result, ...fallback] : result;
+}
+
 export async function compact(
 	preparation: CompactionPreparation,
 	model: Model,
@@ -1888,6 +1949,8 @@ export async function compact(
 		settings.remoteEnabled !== false && previousSummary && !previousNativeHistory
 			? createCompactionSummaryMessage(previousSummary, tokensBefore, new Date().toISOString())
 			: undefined;
+	if (previousSummaryMigrationMessage) setSourceOrigin(previousSummaryMigrationMessage, { kind: "synthetic", reason: "previous-summary" });
+	if (snapcompactArchiveMigrationMessage) setSourceOrigin(snapcompactArchiveMigrationMessage, { kind: "synthetic", reason: "previous-archive" });
 
 	let preserveData = withAnthropicCompactionPreserveData(
 		withOpenAiRemoteCompactionPreserveData(previousPreserveData, undefined),
@@ -1900,7 +1963,19 @@ export async function compact(
 		...turnPrefixMessages,
 		...recentMessages,
 	];
+	// Bind before cloning/conversion, then freeze the same operation for V2 and its V1 fallback.
+	for (const source of [...(preparation.sourcesToSummarize ?? []), ...(preparation.turnPrefixSources ?? []), ...(preparation.recentSources ?? [])]) {
+		const message = source.message;
+		if (message.role === "user" || message.role === "assistant" || message.role === "toolResult" || message.role === "developer") bindMessageSource(message, source.entryId, source.order, source.projection);
+	}
+	const nativeSelection = nativeSelectedMessages(preparation, new Tokenizer(model));
+	const { nonUserSourceIds, nonUserTokens } = nativeSelection;
+	const frozenMessages = cloneWithSourceOrigins((summaryOptions.convertToLlm ?? defaultConvertToLlm)(remoteMessages));
+	const selectedMessages = cloneWithSourceOrigins((summaryOptions.convertToLlm ?? defaultConvertToLlm)(nativeSelection.messages));
+	const selectedUsers = selectedMessages.filter(message => message.role === "user");
+	const selectedNonUsers = selectedMessages.filter(message => message.role !== "user");
 	let usedRemoteCompaction = false;
+	let nativeRetentionTarget: CompactionResult["retentionTarget"];
 	let nativeCompactionError: unknown;
 	if (
 		settings.remoteEnabled !== false &&
@@ -1912,7 +1987,7 @@ export async function compact(
 			previousRemoteCompaction?.provider === model.provider
 				? previousRemoteCompaction.replacementHistory
 				: undefined;
-		const messages = (summaryOptions.convertToLlm ?? defaultConvertToLlm)(remoteMessages);
+		const messages = cloneWithSourceOrigins(frozenMessages);
 		const remoteSystemPrompt = summaryOptions.remoteSystemPrompt ?? [SUMMARIZATION_SYSTEM_PROMPT];
 		let codexBody: OpenAICodexCompactionBody | undefined;
 		let remoteHistory: Array<Record<string, unknown>>;
@@ -1957,6 +2032,25 @@ export async function compact(
 		}
 		if (remoteHistory.length > 0) {
 			try {
+				const serializeSelection = async (selection: Message[]): Promise<Array<Record<string, unknown>>> => {
+					if (!selection.length) return [];
+					const items = isCodexResponsesModel(model)
+						? (await buildTransformedCodexRequestBody(model, { systemPrompt: remoteSystemPrompt, messages: cloneWithSourceOrigins(selection), tools: summaryOptions.tools }, {
+							reasoning: resolveCompactionEffort(model, summaryOptions.thinkingLevel), forceReasoningOff: summaryOptions.thinkingLevel === ThinkingLevel.Off,
+							responsesLite: model.useResponsesLite,
+						})).input
+						: buildOpenAiResponsesCompactionInput(cloneWithSourceOrigins(selection), model, undefined);
+					return (Array.isArray(items) ? items : []).filter((item): item is Record<string, unknown> => isRecord(item) && getSourceOrigin(item)?.kind === "source");
+				};
+				const userCandidates = await serializeSelection(selectedUsers);
+				const nonUserItems = buildCompleteNativeAtomItems(await serializeSelection(selectedNonUsers), selectedNonUsers);
+				const ordinaryInput = remoteHistory;
+				const preservation = { userCandidates, nonUserSourceIds, nonUserItems, nonUserTokens, ordinaryInput };
+				const nonUserIds = new Set(nonUserSourceIds);
+				remoteHistory = unionNativeUserHistory(mergeSourceHistory(nonUserItems, remoteHistory.filter(item => {
+					const origin = getSourceOrigin(item);
+					return origin?.kind !== "source" || !origin.parts.some(part => nonUserIds.has(part.entryId));
+				})), userCandidates);
 				const instructions = codexBody
 					? typeof codexBody.instructions === "string"
 						? codexBody.instructions
@@ -1975,6 +2069,7 @@ export async function compact(
 					model.contextWindow,
 					instructions,
 					tools,
+					nonUserIds,
 				);
 				if (trimmed.rewrittenOutputs > 0) {
 					logger.info("Rewrote trailing tool outputs before OpenAI V2 remote compaction", {
@@ -1990,6 +2085,7 @@ export async function compact(
 					sessionId: summaryOptions.sessionId,
 					promptCacheKey: summaryOptions.promptCacheKey,
 					retainedMessageBudget: settings.v2RetainedMessageBudget,
+					preservation,
 				};
 				const request = codexBody
 					? buildCompactionV2RequestFromBody(model, { ...codexBody, input: trimmed.input }, requestOptions)
@@ -2010,6 +2106,7 @@ export async function compact(
 					{ signal },
 				);
 				preserveData = { ...preserveData, ...storeCompactionV2PreserveData(remote, model) };
+				nativeRetentionTarget = remote.retentionTarget;
 				usedRemoteCompaction = true;
 			} catch (err) {
 				// A user/session abort is a cancellation, not a remote failure —
@@ -2035,12 +2132,12 @@ export async function compact(
 				: previousV2Compaction?.provider === model.provider
 					? previousV2Compaction.replacementHistory
 					: undefined;
-		const remoteHistory = buildOpenAiNativeHistory(
-			(summaryOptions.convertToLlm ?? defaultConvertToLlm)(remoteMessages),
+		const remoteHistory = composeOpenAiHistoricalInput(buildOpenAiNativeHistory(
+			cloneWithSourceOrigins(frozenMessages),
 			model,
 			previousReplacementHistory,
 			openAiCompatSupportsImageDetailOriginal(model),
-		);
+		), buildOpenAiNativeHistory(cloneWithSourceOrigins(selectedUsers), model), selectedNonUsers);
 		if (remoteHistory.length > 0) {
 			try {
 				const remote = await withAuth(
@@ -2107,7 +2204,10 @@ export async function compact(
 		// diverging from the cached live prefix (and possibly dropping below
 		// the trigger). Manually built preparations with no input at all fall
 		// back to the current time.
-		const firstReplayed = messagesToSummarize[0] ?? turnPrefixMessages[0] ?? recentMessages[0];
+		const historicalMessages = anthropicSourceHistory(
+			[...(preparation.sourcesToSummarize ?? []), ...(preparation.turnPrefixSources ?? []), ...(preparation.recentSources ?? [])],
+			preparation.selectedSources ?? [], [...messagesToSummarize, ...turnPrefixMessages, ...recentMessages]);
+		const firstReplayed = historicalMessages[0];
 		const previousSummaryAt =
 			firstReplayed !== undefined ? new Date(firstReplayed.timestamp - 1).toISOString() : new Date().toISOString();
 		const previousSummaryMessage = previousSummaryForCompaction
@@ -2127,15 +2227,11 @@ export async function compact(
 				})
 			: undefined;
 		const convertToLlm = summaryOptions.convertToLlm ?? defaultConvertToLlm;
-		const retainedTail = convertToLlm(recentMessages);
-		const messages = [
-			...convertToLlm([
-				...(previousSummaryMessage ? [previousSummaryMessage] : []),
-				...messagesToSummarize,
-				...turnPrefixMessages,
-			]),
-			...retainedTail,
-		];
+		const retainedTail = convertToLlm(anthropicSourceHistory(preparation.recentSources ?? [], preparation.selectedSources ?? [], recentMessages));
+		const messages = cloneWithSourceOrigins(convertToLlm([
+			...(previousSummaryMessage ? [previousSummaryMessage] : []),
+			...historicalMessages,
+		]));
 		try {
 			const remote = await requestAnthropicNativeCompaction(
 				model,
@@ -2282,9 +2378,10 @@ export async function compact(
 	let finalPreserveData = previousSnapcompactArchive
 		? snapcompact.stripPreservedArchive(preserveData)
 		: preserveData;
-	if (!usedRemoteCompaction && preparation.sourcePreserveData) {
+	if ((!usedRemoteCompaction || nativeSummary !== undefined) && preparation.sourcePreserveData) {
 		finalPreserveData = { ...finalPreserveData, ...preparation.sourcePreserveData };
 	}
+	if (nativeSummary !== undefined) nativeRetentionTarget = preparation.retentionTarget;
 
 	return {
 		summary,
@@ -2293,6 +2390,7 @@ export async function compact(
 		tokensBefore,
 		details: { readFiles, modifiedFiles } as CompactionDetails,
 		preserveData: finalPreserveData,
+		...(nativeRetentionTarget ? { retentionTarget: nativeRetentionTarget } : {}),
 	};
 }
 
