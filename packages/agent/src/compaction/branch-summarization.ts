@@ -193,6 +193,7 @@ function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
 		case "compaction":
 			return createCompactionSummaryMessage(entry.summary, entry.tokensBefore, entry.timestamp, {
 				shortSummary: entry.shortSummary,
+				diagnostics: entry.diagnostics,
 			});
 
 		// These don't contribute to conversation content

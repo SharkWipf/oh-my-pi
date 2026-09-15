@@ -21,7 +21,7 @@ const agent = new Agent({
 	},
 });
 
-agent.subscribe((event) => {
+agent.subscribe(event => {
 	if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
 		// Stream just the new text chunk
 		process.stdout.write(event.assistantMessageEvent.delta);
@@ -41,6 +41,18 @@ The agent works with `AgentMessage`, a flexible type that can include:
 - Custom app-specific message types via declaration merging
 
 LLMs only understand `user`, `assistant`, and `toolResult`. The `convertToLlm` function bridges this gap by filtering and transforming messages before each LLM call.
+
+### Compaction source coverage
+
+`@oh-my-pi/pi-agent-core/compaction/source` exports the local `SourceRepresentation`
+descriptor stored in `preserveData.sourceRepresentation`. Source IDs and block/range
+coordinates identify retained content; generated summaries remain aggregates.
+`remapCompactionSourceRepresentation` applies known positional source edits without
+rerendering historical artifacts. Journal owners must apply it to every referencing
+compaction leaf in the same rewrite that publishes source changes. Snapshot and
+archive offsets stay historical; only intact ranges retain exact current coverage.
+Explicit image deletion removes the corresponding original-image reference.
+These descriptors are local metadata, never provider wire fields.
 
 ### Message Flow
 
@@ -195,7 +207,11 @@ await agent.prompt({ role: "user", content: "Hello", timestamp: Date.now() });
 await agent.continue();
 ```
 
-`Tokenizer.countMessage` includes a local baseline of 1,200 tokens per original image in user, developer, tool-result, and hook messages. The baseline is exported as `IMAGE_TOKEN_ESTIMATE` from `@oh-my-pi/pi-agent-core/tokenizer`. It is not a provider invoice: image detail, dimensions, and model-specific billing remain provider-owned. A projection using a different effective image estimate must replace the included baseline (add only the difference), not charge the image again. Snapcompact frames retain their separate frame estimate.
+`Tokenizer.countMessage` counts normalized custom-message text regardless of attribution or display settings, and includes a local baseline of 1,200 tokens per original image in user, developer, custom, assistant, tool-result, and hook messages. The baseline is exported as `IMAGE_TOKEN_ESTIMATE` from `@oh-my-pi/pi-agent-core/tokenizer`. It is not a provider invoice: image detail, dimensions, and model-specific billing remain provider-owned. A projection using a different effective image estimate must replace the included baseline (add only the difference), not charge the image again. Snapcompact frames retain their separate frame estimate.
+
+Computer tool results count the screenshot in their typed provider metadata as one image, even when no content image is present. Content-image mirrors are not charged separately because computer-result serialization consumes the metadata screenshot instead. This baseline applies to both ordinary estimates and the compaction floor.
+
+Current native response deltas contribute their known original logical text, code, logs, search context, and generated/interpreter images through the shared typed source projection. Actual ingress correspondence prevents charging normalized content mirrors again, including after source replacement, deletion, and reload. Opaque state, unknown extensions, and full-history snapshots are not parsed as original source content.
 
 ### State Management
 
@@ -220,7 +236,7 @@ await agent.waitForIdle(); // Wait for completion
 ### Events
 
 ```typescript
-const unsubscribe = agent.subscribe((event) => {
+const unsubscribe = agent.subscribe(event => {
 	console.log(event.type);
 });
 unsubscribe();
@@ -271,8 +287,8 @@ Handle custom types in `convertToLlm`:
 
 ```typescript
 const agent = new Agent({
-	convertToLlm: (messages) =>
-		messages.flatMap((m) => {
+	convertToLlm: messages =>
+		messages.flatMap(m => {
 			if (m.role === "notification") return []; // Filter out
 			return [m];
 		}),
@@ -357,7 +373,7 @@ const context: AgentContext = {
 
 const config: AgentLoopConfig = {
 	model: getModel("openai", "gpt-4o"),
-	convertToLlm: (msgs) => msgs.filter((m) => ["user", "assistant", "toolResult"].includes(m.role)),
+	convertToLlm: msgs => msgs.filter(m => ["user", "assistant", "toolResult"].includes(m.role)),
 };
 
 const userMessage = { role: "user", content: "Hello", timestamp: Date.now() };
@@ -373,6 +389,7 @@ for await (const event of agentLoopContinue(context, config)) {
 ```
 
 ## Run-level telemetry
+
 Every `invoke_agent` produces two values alongside the OTEL spans:
 
 - **`AgentRunSummary`** — chat / tool / usage / cost / error counters bucketed
@@ -444,10 +461,7 @@ Callers that drive the loop multiple times (verify pass, benchmark harness)
 fold N summaries with `aggregateAgentRunSummaries` / `aggregateAgentRunCoverage`:
 
 ```typescript
-import {
-	aggregateAgentRunSummaries,
-	aggregateAgentRunCoverage,
-} from "@oh-my-pi/pi-agent";
+import { aggregateAgentRunSummaries, aggregateAgentRunCoverage } from "@oh-my-pi/pi-agent";
 
 const summaries: AgentRunSummary[] = [];
 const coverages: AgentRunCoverage[] = [];

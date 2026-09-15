@@ -5,6 +5,7 @@ export interface SourceRange {
 	end: number;
 }
 
+/** Text uses UTF-16 offsets; an original image occupies one atomic [0, 1) unit. */
 export interface SourceBlockRange extends SourceRange {
 	blockIndex: number;
 }
@@ -22,6 +23,8 @@ export interface SourceMessage<TMessage> {
 	order: number;
 	message: TMessage;
 	atomicGroup?: SourceAtomicGroup;
+	/** Actual ordinary coverage of a previously sparse source; message remains ORIGINAL. */
+	spans?: SourceBlockRange[];
 }
 
 export interface SourceCoverageRun {
@@ -35,7 +38,11 @@ export interface SourceCoverageRun {
 	current?: SourceBlockRange;
 	/** Coordinates into the owning archive's retained normalized text. */
 	normalized?: SourceRange;
+	/** Included output slice of one normalized raw unit; offsets relative to its complete normalized output. */
+	normalizedUnit?: SourceRange & { length: number };
 	status: "exact-current" | "historical-not-current" | "unknown";
+	/** Frozen operation membership, independent of overlapping policy quota reasons. */
+	contribution?: "ordinary" | "selected-user" | "manual-nonuser";
 }
 
 export type SourceLayoutPart =
@@ -58,6 +65,8 @@ export type SourceLayoutPart =
 			order: number;
 			/** Current source blocks/ranges; absence means the complete original atom member. */
 			spans?: SourceBlockRange[];
+			/** Frozen ownership of this whole emitted part; mixed spans use per-run coverage instead. */
+			contribution?: SourceCoverageRun["contribution"];
 		}
 	| {
 			kind: "gap";
@@ -71,6 +80,9 @@ export type SourceLayoutPart =
 /** Stored once in existing compaction preserveData.sourceRepresentation. */
 export interface SourceRepresentation {
 	version: 1;
+	/** When present, layout is the complete emitted history through this captured
+	 * source entry; only later entries use the ordinary live suffix. */
+	throughEntryId?: string;
 	coverage: SourceCoverageRun[];
 	/** Physical order; ranges name archive.text, frame indices name archive.frames. */
 	layout: SourceLayoutPart[];

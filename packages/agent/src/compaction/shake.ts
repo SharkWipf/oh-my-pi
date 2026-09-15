@@ -12,6 +12,7 @@
  */
 
 import type { TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type { SourceRewrite } from "@oh-my-pi/pi-ai/compaction-source";
 import type { Tokenizer } from "../tokenizer";
 import type { AgentMessage } from "../types";
 import type { CustomMessageEntry, SessionEntry, SessionMessageEntry } from "./entries";
@@ -25,6 +26,8 @@ import {
 } from "./tool-protection";
 
 export interface ShakeConfig {
+	/** Current policy-admitted source members, including complete assistant/tool atoms. */
+	protectedSourceEntryIds?: Pick<ReadonlySet<string>, "has">;
 	/** Keep the most recent context tokens (across all entries) intact. */
 	protectTokens: number;
 	/** Only shake when total estimated savings meets this threshold. */
@@ -341,7 +344,7 @@ export function collectShakeRegions(entries: SessionEntry[], tokenizer: Tokenize
 	const regions: ShakeRegion[] = [];
 	for (let i = 0; i < n; i++) {
 		const entry = entries[i];
-		if (i < boundaryIndex) continue;
+		if (i < boundaryIndex || config.protectedSourceEntryIds?.has(entry.id)) continue;
 		const toolResult = getToolResultMessage(entry);
 		// Useless-flagged results carry no information once consumed; they are
 		// eligible even inside the protect-recent window.
@@ -465,11 +468,48 @@ export function applyShakeRegion(region: ShakeRegion, replacement: string): void
  * that splicing one region never shifts the offsets of another in the same text
  * block; tool-result regions are independent.
  */
-export function applyShakeRegions(items: Array<{ region: ShakeRegion; replacement: string }>): void {
+export function applyShakeRegions(
+	items: Array<{ region: ShakeRegion; replacement: string }>,
+	rewrite?: (maps: readonly SourceRewrite[], apply: () => void) => void,
+): void {
 	const ordered = [...items].sort((a, b) => {
 		const aStart = a.region.kind === "block" ? a.region.start : -1;
 		const bStart = b.region.kind === "block" ? b.region.start : -1;
 		return bStart - aStart;
 	});
-	for (const { region, replacement } of ordered) applyShakeRegion(region, replacement);
+	const apply = () => {
+		for (const { region, replacement } of ordered) applyShakeRegion(region, replacement);
+	};
+	if (!rewrite) return apply();
+	const maps = new Map<string, SourceRewrite>();
+	for (const { region, replacement } of items) {
+		let map = maps.get(region.entry.id);
+		if (!map) {
+			map = { entryId: region.entry.id, blocks: [] };
+			maps.set(region.entry.id, map);
+		}
+		if (region.kind === "toolResult") {
+			const message = region.entry.message as ToolResultMessage;
+			const replacementIndex = message.content.findIndex(block => block.type === "text" && block.text.length > 0);
+			let newBlockIndex = 0;
+			map.blocks = message.content.map((block, oldBlockIndex) => {
+				if (block.type !== "text") return { oldBlockIndex, newBlockIndex: newBlockIndex++ };
+				if (oldBlockIndex !== replacementIndex) return { oldBlockIndex, newBlockIndex: null };
+				return { oldBlockIndex, newBlockIndex: newBlockIndex++, textEdits: [{ start: 0, end: block.text.length, replacementLength: replacement.length }] };
+			});
+		} else {
+			// String-form content is source block zero; -1 is only the region slot sentinel.
+			const blockIndex = Math.max(0, region.blockIndex);
+			let block = map.blocks!.find(candidate => candidate.oldBlockIndex === blockIndex);
+			if (!block) {
+				block = { oldBlockIndex: blockIndex, newBlockIndex: blockIndex, textEdits: [] };
+				map.blocks!.push(block);
+			}
+			block.textEdits!.push({ start: region.start, end: region.end, replacementLength: replacement.length });
+		}
+	}
+	for (const map of maps.values()) {
+		for (const block of map.blocks!) block.textEdits?.sort((a, b) => a.start - b.start);
+	}
+	rewrite([...maps.values()], apply);
 }
