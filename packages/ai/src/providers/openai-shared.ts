@@ -2716,7 +2716,13 @@ export function applyReasoningSummaryTextDone(
 	part.text = text;
 	const pending = pendingReasoningEnvelopes.get(block);
 	if (!pending && (!text || text === previous)) return;
-	const display = (pending?.prefix ?? "") + decodeReasoningEnvelope(text);
+	const previousDisplay = decodeReasoningEnvelope(previous);
+	const prefix =
+		pending?.prefix ??
+		(block.thinking.endsWith(previousDisplay)
+			? block.thinking.slice(0, block.thinking.length - previousDisplay.length)
+			: "");
+	const display = prefix + decodeReasoningEnvelope(text);
 	pendingReasoningEnvelopes.delete(block);
 	if (display.startsWith(block.thinking)) {
 		const delta = display.slice(block.thinking.length);
