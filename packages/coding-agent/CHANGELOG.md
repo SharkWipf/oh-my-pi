@@ -213,6 +213,7 @@
 
 - Kept Esc-Esc rewind cancellable and viewport-bounded while including persisted skill/custom requests and image-only prompts in user-turn navigation; root sibling lookup stays indexed, empty returned drafts replace stale editor text, and deferred replay preserves upstream model-substitution and execution-artifact warnings.
 - Compiled executables now start correctly when bundled dependencies use `import.meta.resolve`, while retaining precompiled bytecode.
+- JavaScript eval now settles pending tool calls after their originating cell finishes or fails, preserving retained promises and attributing late errors to the original cell without losing kernel state.
 - Fixed Perplexity sign-in for SSO-only accounts in `/login` and the setup wizard with isolated browser sign-in and automatic session capture, supporting both secure-prefixed and unprefixed session cookies without manual cookie copying. ([#12064](https://github.com/can1357/oh-my-pi/pull/12064) by [@lance0](https://github.com/lance0))
 - Mid-run compaction no longer sends the pre-compaction history to the next provider call when the live message array is rewritten in place.
 - Collab guests now receive the host's goodbye even when the relay closes the room right behind it, and a fully sent snapshot no longer holds later frames behind transport backpressure.

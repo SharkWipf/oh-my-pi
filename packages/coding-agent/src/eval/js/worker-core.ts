@@ -10,7 +10,6 @@ import type {
 } from "./worker-protocol";
 
 interface PendingTool {
-	runId: string;
 	resolve(value: unknown): void;
 	reject(error: Error): void;
 }
@@ -18,7 +17,6 @@ interface PendingTool {
 interface ActiveRun {
 	runId: string;
 	filename: string;
-	pendingTools: Map<string, PendingTool>;
 	/** Rejections floated by this run's cell code, captured before its result was sent. */
 	floatingRejections: unknown[];
 }
@@ -116,6 +114,9 @@ export class WorkerCore {
 	#transport: Transport;
 	#runtime: JsRuntime | null = null;
 	#runs = new Map<string, ActiveRun>();
+	// Tool replies can arrive after their originating cell has finished.
+	#pendingTools = new Map<string, PendingTool>();
+	#toolRejectionOrigins = new WeakMap<Error, { runId: string; filename: string }>();
 	#recentCellFiles = new Set<string>();
 	#unsubscribe: () => void;
 	#uninstallRejectionGuard: () => void;
@@ -163,12 +164,14 @@ export class WorkerCore {
 	 * cell activity and must keep the default fatal path.
 	 */
 	#consumeRejection(reason: unknown): boolean {
+		const origin = reason instanceof Error ? this.#toolRejectionOrigins.get(reason) : undefined;
+		let owner = origin ? this.#runs.get(origin.runId) : undefined;
+		let recent = origin?.filename;
 		const stack = reason instanceof Error && typeof reason.stack === "string" ? reason.stack : undefined;
-		if (stack) {
+		if (!origin && stack) {
 			// The stack can name several cells (helper defined by an earlier cell,
 			// called from the live one); the outermost matching frame is the caller
 			// that owns the floating promise.
-			let owner: ActiveRun | undefined;
 			let ownerIndex = -1;
 			for (const run of this.#runs.values()) {
 				const index = stack.lastIndexOf(run.filename);
@@ -177,28 +180,29 @@ export class WorkerCore {
 					owner = run;
 				}
 			}
-			if (owner) {
-				owner.floatingRejections.push(reason);
-				return true;
-			}
-			let recent: string | undefined;
-			let recentIndex = -1;
-			for (const filename of this.#recentCellFiles) {
-				const index = stack.lastIndexOf(filename);
-				if (index > recentIndex) {
-					recentIndex = index;
-					recent = filename;
+			if (!owner) {
+				let recentIndex = -1;
+				for (const filename of this.#recentCellFiles) {
+					const index = stack.lastIndexOf(filename);
+					if (index > recentIndex) {
+						recentIndex = index;
+						recent = filename;
+					}
 				}
 			}
-			if (recent) {
-				this.#transport.send({
-					type: "log",
-					level: "warn",
-					msg: "Unhandled rejection from a finished eval cell (missing await?)",
-					meta: { filename: recent, error: errorPayload(reason) },
-				});
-				return true;
-			}
+		}
+		if (owner) {
+			owner.floatingRejections.push(reason);
+			return true;
+		}
+		if (recent) {
+			this.#transport.send({
+				type: "log",
+				level: "warn",
+				msg: "Unhandled rejection from a finished eval cell (missing await?)",
+				meta: { filename: recent, error: errorPayload(reason) },
+			});
+			return true;
 		}
 		if (this.#options.mode === "isolated" && this.#runs.size > 0) {
 			// Dedicated eval worker: during a live run, a rejection without a cell
@@ -350,7 +354,7 @@ export class WorkerCore {
 	}
 
 	async #runOne(runId: string, code: string, filename: string, snapshot: SessionSnapshot): Promise<void> {
-		const active: ActiveRun = { runId, filename, pendingTools: new Map(), floatingRejections: [] };
+		const active: ActiveRun = { runId, filename, floatingRejections: [] };
 		this.#runs.set(runId, active);
 		const hooks: RuntimeHooks = {
 			onText: chunk => this.#transport.send({ type: "text", runId, chunk }),
@@ -385,7 +389,6 @@ export class WorkerCore {
 		const active: ActiveRun = {
 			runId: msg.runId,
 			filename: `tool-${msg.runId}`,
-			pendingTools: new Map(),
 			floatingRejections: [],
 		};
 		this.#runs.set(msg.runId, active);
@@ -451,37 +454,40 @@ export class WorkerCore {
 	async #callTool(active: ActiveRun, name: string, args: unknown, identity?: RuntimeCallIdentity): Promise<unknown> {
 		const id = `tc-${active.runId}-${crypto.randomUUID()}`;
 		const { promise, resolve, reject } = Promise.withResolvers<unknown>();
-		active.pendingTools.set(id, { runId: active.runId, resolve, reject });
+		this.#pendingTools.set(id, { resolve, reject });
 		try {
 			this.#transport.send({ type: "tool-call", id, runId: active.runId, name, args, identity });
 		} catch (error) {
 			// Non-serializable args (DataCloneError from postMessage / IPC send).
 			// No reply will ever arrive; fail this call instead of stranding a
 			// pending entry until close.
-			active.pendingTools.delete(id);
+			this.#pendingTools.delete(id);
 			reject(error);
 		}
-		return await promise;
+		try {
+			return await promise;
+		} catch (error) {
+			// Remote errors may have no eval frame; keep ownership without changing their stack.
+			if (error instanceof Error) {
+				this.#toolRejectionOrigins.set(error, { runId: active.runId, filename: active.filename });
+			}
+			throw error;
+		}
 	}
 
 	#deliverToolReply(id: string, reply: ToolReply): void {
-		for (const active of this.#runs.values()) {
-			const pending = active.pendingTools.get(id);
-			if (!pending) continue;
-			active.pendingTools.delete(id);
-			if (reply.ok) pending.resolve(reply.value);
-			else pending.reject(errorFromPayload(reply.error));
-			return;
-		}
+		const pending = this.#pendingTools.get(id);
+		if (!pending) return;
+		this.#pendingTools.delete(id);
+		if (reply.ok) pending.resolve(reply.value);
+		else pending.reject(errorFromPayload(reply.error));
 	}
 
 	#close(): void {
-		for (const active of this.#runs.values()) {
-			for (const pending of active.pendingTools.values()) {
-				pending.reject(new ToolError("JS worker closed"));
-			}
-			active.pendingTools.clear();
+		for (const pending of this.#pendingTools.values()) {
+			pending.reject(new ToolError("JS worker closed"));
 		}
+		this.#pendingTools.clear();
 		this.#runs.clear();
 		this.#runtime?.dispose?.();
 		this.#runtime = null;
@@ -492,12 +498,10 @@ export class WorkerCore {
 	}
 
 	dispose(): void {
-		for (const active of this.#runs.values()) {
-			for (const pending of active.pendingTools.values()) {
-				pending.reject(new ToolError("JS worker closed"));
-			}
-			active.pendingTools.clear();
+		for (const pending of this.#pendingTools.values()) {
+			pending.reject(new ToolError("JS worker closed"));
 		}
+		this.#pendingTools.clear();
 		this.#runs.clear();
 		this.#runtime?.dispose?.();
 		this.#runtime = null;
