@@ -2,7 +2,7 @@ import {
 	remapCompactionSourceRepresentation,
 	type SourceRewrite,
 } from "@oh-my-pi/pi-agent-core/compaction/source";
-import { bindMessageSource, remapNativeItemOrigins } from "@oh-my-pi/pi-ai/utils/source-origin";
+import { bindMessageSource, exportItemOrigins, remapNativeItemOrigins } from "@oh-my-pi/pi-ai/utils/source-origin";
 import {
 	buildPreservedUserMessageClassifierInputFromLookup,
 	preservedUserMessageClassifierInputsEqual,
@@ -91,6 +91,9 @@ export function rewriteSessionSources(
 			if (originals.has(entry.id) && entry.type === "message" && entry.message.role === "assistant" && entry.message.providerPayload?.type === "openaiResponsesHistory" && entry.message.providerPayload.contentBlocks?.length) {
 				// Consume construction correspondence before the first mutation can shift content positions.
 				bindMessageSource(entry.message, entry.id, order);
+				const payload = entry.message.providerPayload;
+				payload.origins = exportItemOrigins(payload.items);
+				delete payload.contentBlocks;
 			}
 			for (const child of childrenOf(entry.id)) pending.push({ entry: child, order: order + 1 });
 		}

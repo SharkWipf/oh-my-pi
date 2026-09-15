@@ -343,6 +343,7 @@ describe("SessionManager cross-process rewrite freshness", () => {
 			await second.close();
 
 			await expect(first.rewriteEntries()).rejects.toBeInstanceOf(SessionWriteConflictError);
+			await expect(first.recoverPersistenceFromCurrentState()).rejects.toBeInstanceOf(SessionPersistenceIndeterminateError);
 
 			const reopened = await SessionManager.open(sessionFile, tempDir.path(), new FileSessionStorage(), {
 				suppressBreadcrumb: true,
@@ -864,6 +865,8 @@ describe("SessionManager atomic entry batches", () => {
 		// Valid JSONL with noncanonical whitespace exposes any full-prefix rewrite.
 		const rawPrefix = (await storage.readText(sessionFile)).replaceAll("\n", " \t\n");
 		storage.writeTextSync(sessionFile, rawPrefix);
+		// Adopt the deliberately changed physical prefix before starting a fresh CAS transaction.
+		await manager.setSessionFile(sessionFile);
 		expectedIds.push(manager.appendCustomEntry("before-batch"));
 		armed = true;
 		const batch = manager.appendEntriesAtomically(() => {
