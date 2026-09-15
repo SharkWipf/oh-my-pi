@@ -3,10 +3,8 @@ import { type } from "@oh-my-pi/omptype";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ToolCall, ToolResultMessage, Usage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
 import { ChatTranscriptBuilder } from "@oh-my-pi/pi-coding-agent/modes/components/chat-transcript-builder";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-coding-agent/modes/components/read-tool-group";
-import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
@@ -371,47 +369,64 @@ describe("EventController mixed assistant text/tool rendering", () => {
 		const firstPath = "first-delayed-read.ts";
 		const secondPath = "second-delayed-read.ts";
 		const readA: ToolCall = {
-			type: "toolCall", id: TOOL_CALL_A_ID, name: "read", arguments: { path: firstPath },
+			type: "toolCall",
+			id: TOOL_CALL_A_ID,
+			name: "read",
+			arguments: { path: firstPath },
 		};
 		const readB: ToolCall = {
-			type: "toolCall", id: TOOL_CALL_B_ID, name: "read", arguments: { path: secondPath },
+			type: "toolCall",
+			id: TOOL_CALL_B_ID,
+			name: "read",
+			arguments: { path: secondPath },
 		};
 		const intro = { type: "text" as const, text: INTRO_MARKER };
 		try {
 			await controller.handleEvent({ type: "message_start", message: assistantMessage([]) });
 			const firstRead = assistantMessage([intro, readA]);
 			await controller.handleEvent({
-				type: "message_update", message: firstRead,
+				type: "message_update",
+				message: firstRead,
 				assistantMessageEvent: { type: "toolcall_end", contentIndex: 1, toolCall: readA, partial: firstRead },
 			});
 			const emptyMiddle = assistantMessage([intro, readA, { type: "text", text: "" }]);
 			await controller.handleEvent({
-				type: "message_update", message: emptyMiddle,
+				type: "message_update",
+				message: emptyMiddle,
 				assistantMessageEvent: { type: "text_start", contentIndex: 2, partial: emptyMiddle },
 			});
 			const bothReads = assistantMessage([...emptyMiddle.content, readB]);
 			await controller.handleEvent({
-				type: "message_update", message: bothReads,
+				type: "message_update",
+				message: bothReads,
 				assistantMessageEvent: { type: "toolcall_end", contentIndex: 3, toolCall: readB, partial: bothReads },
 			});
 			for (const read of [readA, readB]) {
 				await controller.handleEvent({
-					type: "tool_execution_start", toolCallId: read.id, toolName: read.name, args: read.arguments,
+					type: "tool_execution_start",
+					toolCallId: read.id,
+					toolName: read.name,
+					args: read.arguments,
 				});
 				await controller.handleEvent({
-					type: "tool_execution_end", toolCallId: read.id, toolName: read.name, isError: false,
+					type: "tool_execution_end",
+					toolCallId: read.id,
+					toolName: read.name,
+					isError: false,
 					result: { content: [{ type: "text", text: "file contents" }] },
 				});
 			}
 			// The separator acquires visible content only after both read cards exist.
 			const middle = assistantMessage([intro, readA, { type: "text", text: MIDDLE_MARKER }, readB]);
 			await controller.handleEvent({
-				type: "message_update", message: middle,
+				type: "message_update",
+				message: middle,
 				assistantMessageEvent: { type: "text_end", contentIndex: 2, content: MIDDLE_MARKER, partial: middle },
 			});
 			const completed = assistantMessage([...middle.content, { type: "text", text: FINAL_MARKER }]);
 			await controller.handleEvent({
-				type: "message_update", message: completed,
+				type: "message_update",
+				message: completed,
 				assistantMessageEvent: { type: "text_end", contentIndex: 4, content: FINAL_MARKER, partial: completed },
 			});
 			await controller.handleEvent({ type: "message_end", message: completed });
@@ -421,9 +436,18 @@ describe("EventController mixed assistant text/tool rendering", () => {
 				replay.rebuild([
 					{ type: "message", id: "assistant", parentId: null, timestamp: "2026-09-15", message: completed },
 					...[readA, readB].map(read => ({
-						type: "message" as const, id: read.id, parentId: null, timestamp: "2026-09-15",
-						message: { role: "toolResult" as const, toolCallId: read.id, toolName: read.name,
-							content: [{ type: "text" as const, text: "file contents" }], isError: false, timestamp: 1 },
+						type: "message" as const,
+						id: read.id,
+						parentId: null,
+						timestamp: "2026-09-15",
+						message: {
+							role: "toolResult" as const,
+							toolCallId: read.id,
+							toolName: read.name,
+							content: [{ type: "text" as const, text: "file contents" }],
+							isError: false,
+							timestamp: 1,
+						},
 					})),
 				]);
 				for (const container of [chatContainer, replay.container]) {
@@ -551,8 +575,14 @@ describe("EventController mixed assistant text/tool rendering", () => {
 		for (const grep of greps) {
 			const preceding = assistantMessage([...content]);
 			await controller.handleEvent({
-				type: "message_update", message: preceding,
-				assistantMessageEvent: { type: "thinking_end", contentIndex: content.length - 1, content: "", partial: preceding },
+				type: "message_update",
+				message: preceding,
+				assistantMessageEvent: {
+					type: "thinking_end",
+					contentIndex: content.length - 1,
+					content: "",
+					partial: preceding,
+				},
 			} as Extract<AgentSessionEvent, { type: "message_update" }>);
 			content.push(grep.call);
 			const withTool = assistantMessage([...content]);
