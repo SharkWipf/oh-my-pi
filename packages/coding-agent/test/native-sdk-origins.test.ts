@@ -76,7 +76,7 @@ describe("native SDK transform origins", () => {
 
 	it("redacts typed provider-visible metadata without changing opaque replay state", () => {
 		const secret = "FABRICATED_SECRET_92837";
-		const text = `quoted \"text\" \\ Ω <|channel|> ${secret}`;
+		const text = `quoted "text" \\ Ω <|channel|> ${secret}`;
 		const opaque = {
 			encrypted_content: secret,
 			signature: secret,
