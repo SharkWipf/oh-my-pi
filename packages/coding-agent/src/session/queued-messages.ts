@@ -7,10 +7,9 @@ function queuedTextContent(message: AgentMessage): string | undefined {
 	if (!("content" in message)) return undefined;
 	const content = message.content;
 	if (typeof content === "string") return content;
-	for (const part of content) {
-		if (part.type === "text") return part.text;
-	}
-	return undefined;
+	let text = "";
+	for (const part of content) if (part.type === "text") text += part.text;
+	return text;
 }
 
 function queuedImageContent(message: AgentMessage): ImageContent[] | undefined {
@@ -95,5 +94,16 @@ export function queueChipText(message: AgentMessage): string {
 
 /** Converts a queued user message to editor-restorable content. */
 export function toRestoredQueuedMessage(message: AgentMessage): RestoredQueuedMessage {
-	return { text: queueChipText(message), images: queuedImageContent(message) };
+	const original = (message.role === "user" || message.role === "custom") ? message.originalSubmission : undefined;
+	return {
+		text: original?.text ?? queueChipText(message),
+		images: original ? original.images : queuedImageContent(message),
+		...(message.role === "user" || message.role === "custom"
+			? {
+					originalSubmission: original,
+					imageLinks: original ? original.imageLinks : message.imageLinks,
+					compactionOverride: original?.compactionOverride ?? message.compactionOverride,
+				}
+			: {}),
+	};
 }

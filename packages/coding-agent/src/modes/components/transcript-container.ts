@@ -142,6 +142,10 @@ export interface TranscriptViewportSpan {
 /** Owns transcript order, live capacity, and ordered immutable retirement. */
 export class TranscriptContainer extends Container {
 	#entries: TranscriptEntry[] = [];
+	// First occurrence preserves removeChild semantics even when a component is reused.
+	#entryByComponent = new Map<Component, TranscriptEntry>();
+	#trackedChildren: Component[] | undefined;
+	#entriesDirty = false;
 	#frontier = 0;
 	#nextBatchId = 1;
 	#offered: Offered | undefined;
@@ -158,10 +162,43 @@ export class TranscriptContainer extends Container {
 	/** Block spans of the last `renderViewport` output, for click hit-testing. */
 	#lastViewportSpans: TranscriptViewportSpan[] = [];
 
+	constructor() {
+		super();
+		this.#trackOwnedChildren();
+	}
+
+	override get children(): Component[] {
+		return this.#trackedChildren ?? super.children;
+	}
+
+	override set children(children: Component[]) {
+		if (children === this.children) return;
+		super.children = children;
+		// The caller may retain the assigned array and mutate it without our proxy.
+		// Preserve that alias contract by comparing unowned arrays on every read.
+		this.#trackedChildren = undefined;
+		this.#entriesDirty = true;
+	}
+
+	#trackOwnedChildren(): void {
+		this.#trackedChildren = new Proxy(super.children, {
+			defineProperty: (target, property, descriptor) => {
+				this.#entriesDirty = true;
+				return Reflect.defineProperty(target, property, descriptor);
+			},
+			deleteProperty: (target, property) => {
+				this.#entriesDirty = true;
+				return Reflect.deleteProperty(target, property);
+			},
+		});
+		this.#entriesDirty = false;
+	}
+
 	override addChild(component: Component): void {
+		this.#syncEntries();
 		if (isToolActivityComponent(component)) component.setToolActivityVisible(this.#toolActivityVisible);
 		super.addChild(component);
-		this.#entries.push({
+		const entry: TranscriptEntry = {
 			component,
 			state: "active",
 			mode: blockMode(component),
@@ -169,20 +206,33 @@ export class TranscriptContainer extends Container {
 			renderedStableByWidth: new Map(),
 			emitted: 0,
 			stableFrozen: false,
-		});
+		};
+		this.#entries.push(entry);
+		if (!this.#entryByComponent.has(component)) this.#entryByComponent.set(component, entry);
 	}
 
 	override removeChild(component: Component): void {
-		if (this.children.indexOf(component) < 0 || !this.canRemoveBlock(component)) return;
-		super.removeChild(component);
-		this.#entries = this.#entries.filter(candidate => candidate.component !== component);
-		this.#frontier = Math.min(this.#frontier, this.#entries.length);
+		this.#syncEntries();
+		const index = this.#removableIndex(component);
+		if (index < 0) return;
+		super.removeChildAt(index);
+		this.#entries.splice(index, 1);
+		let next: TranscriptEntry | undefined;
+		for (let candidate = index; candidate < this.#entries.length; candidate++) {
+			if (this.#entries[candidate]!.component !== component) continue;
+			next = this.#entries[candidate];
+			break;
+		}
+		if (next) this.#entryByComponent.set(component, next);
+		else this.#entryByComponent.delete(component);
 		this.#childStartRows.delete(component);
 	}
 
 	override clear(): void {
 		super.clear();
 		this.#entries = [];
+		this.#entryByComponent.clear();
+		this.#trackOwnedChildren();
 		this.#frontier = 0;
 		this.#offered = undefined;
 		this.#childStartRows.clear();
@@ -230,13 +280,19 @@ export class TranscriptContainer extends Container {
 	/** Whether a transient block may be discarded without leaving tape history. */
 	canRemoveBlock(component: Component): boolean {
 		this.#syncEntries();
-		const index = this.#entries.findIndex(entry => entry.component === component);
-		if (index < 0) return false;
-		const entry = this.#entries[index]!;
-		if (entry.state === "committed" || entry.emitted > 0) return false;
-		if (this.#offered?.kind === "commit" && index < this.#offered.end) return false;
-		if (this.#offered?.kind === "append" && index === this.#offered.entry) return false;
-		return true;
+		return this.#removableIndex(component) >= 0;
+	}
+
+	#removableIndex(component: Component): number {
+		const entry = this.#entryByComponent.get(component);
+		if (!entry || entry.state === "committed" || entry.emitted > 0) return -1;
+		for (let index = this.#frontier; index < this.#entries.length; index++) {
+			if (this.#entries[index] !== entry) continue;
+			if (this.#offered?.kind === "commit" && index < this.#offered.end) return -1;
+			if (this.#offered?.kind === "append" && index === this.#offered.entry) return -1;
+			return index;
+		}
+		return -1;
 	}
 
 	/** Lifecycle state per block in transcript order (diagnostics and tests). */
@@ -259,7 +315,11 @@ export class TranscriptContainer extends Container {
 
 	/** Whether visible active capacity and live-block memory permit another admission. */
 	canAdmit(rows: number): boolean {
-		const active = this.#entries.filter(entry => entry.state === "active").length;
+		this.#syncEntries();
+		let active = 0;
+		for (let index = this.#frontier; index < this.#entries.length; index++) {
+			if (this.#entries[index]!.state === "active") active++;
+		}
 		return Math.max(0, Math.trunc(rows)) > active && this.#liveCount() < MAX_LIVE_BLOCKS;
 	}
 
@@ -840,13 +900,16 @@ export class TranscriptContainer extends Container {
 	}
 
 	#syncEntries(): void {
+		if (this.#trackedChildren && !this.#entriesDirty) return;
+		const children = super.children;
+		this.#entriesDirty = false;
 		if (
-			this.#entries.length === this.children.length &&
-			this.#entries.every((entry, index) => entry.component === this.children[index])
+			this.#entries.length === children.length &&
+			this.#entries.every((entry, index) => entry.component === children[index])
 		)
 			return;
-		const existing = new Map(this.#entries.map(entry => [entry.component, entry]));
-		this.#entries = this.children.map(
+		const existing = this.#entryByComponent;
+		this.#entries = children.map(
 			component =>
 				existing.get(component) ?? {
 					component,
@@ -858,6 +921,10 @@ export class TranscriptContainer extends Container {
 					stableFrozen: false,
 				},
 		);
+		this.#entryByComponent = new Map();
+		for (const entry of this.#entries) {
+			if (!this.#entryByComponent.has(entry.component)) this.#entryByComponent.set(entry.component, entry);
+		}
 		this.#frontier = this.#entries.findIndex(entry => entry.state !== "committed");
 		if (this.#frontier < 0) this.#frontier = this.#entries.length;
 	}

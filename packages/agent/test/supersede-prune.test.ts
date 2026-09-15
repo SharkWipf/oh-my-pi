@@ -667,3 +667,55 @@ describe("cache-stable boundary — warm prefix protection", () => {
 		expect(resultMessage(result2).prunedAt).toBeDefined(); // at/after boundary, in tail -> pruned
 	});
 });
+
+describe("lazy source protection", () => {
+	for (const pass of ["stale", "threshold"] as const) {
+		test(pass + " acquires protection only for an eligible candidate and never mutates before it resolves", async () => {
+			const [call, result] = uselessPair("grep", BIG_TEXT, T0);
+			const tail = textEntry("Finished", T0 + 1_000);
+			const entries = [call, result, tail];
+			const prune = (prepare: () => Promise<Pick<ReadonlySet<string>, "has">>, keepBoundaryId?: string) =>
+				pass === "stale"
+					? pruneSupersededToolResults(entries, tokenizer, cfg({ pruneUseless: true, keepBoundaryId, now: T0 + 2_000 }), undefined, prepare)
+					: pruneToolOutputs(entries, tokenizer, { protectTokens: 0, minimumSavings: 0, protectedTools: [], pruneUseless: true, keepBoundaryId }, undefined, prepare);
+			const failure = new Error("source scope was replaced");
+			const rejectProtection = async () => { throw failure; };
+
+			// The only possible victim is summarized away: source preparation can be unavailable.
+			expect(await prune(rejectProtection, tail.id)).toEqual({ prunedCount: 0, tokensSaved: 0 });
+			expect(resultText(result)).toBe(BIG_TEXT);
+			await expect(prune(rejectProtection)).rejects.toBe(failure);
+			expect(resultText(result)).toBe(BIG_TEXT);
+
+			const protection = Promise.withResolvers<ReadonlySet<string>>();
+			const pending = prune(() => protection.promise);
+			expect(resultText(result)).toBe(BIG_TEXT);
+			protection.resolve(new Set([result.id]));
+			expect(await pending).toEqual({ prunedCount: 0, tokensSaved: 0 });
+			expect(resultText(result)).toBe(BIG_TEXT);
+
+			expect((await prune(async () => new Set<string>())).prunedCount).toBe(1);
+			expect(resultText(result)).toBe(USELESS_NOTICE);
+		});
+	}
+
+	test("rechecks minimum savings after admitting complete protected source units", async () => {
+		const first = uselessPair("grep", BIG_TEXT, T0);
+		const second = uselessPair("grep", BIG_TEXT, T0 + 1_000);
+		const entries = [...first, ...second];
+		const config = {
+			protectTokens: 0,
+			minimumSavings: tokenizer.countMessage(resultMessage(first[1])) + 1,
+			protectedTools: [],
+			pruneUseless: true,
+		};
+		const protectedResult = await pruneToolOutputs(entries, tokenizer, config, undefined, async () => new Set([first[1].id]));
+		expect(protectedResult).toEqual({ prunedCount: 0, tokensSaved: 0 });
+		expect(resultText(first[1])).toBe(BIG_TEXT);
+		expect(resultText(second[1])).toBe(BIG_TEXT);
+		expect((await pruneToolOutputs(entries, tokenizer, config, undefined, async () => new Set<string>())).prunedCount).toBe(2);
+		expect(resultText(first[1])).toBe(USELESS_NOTICE);
+		expect(resultText(second[1])).toBe(USELESS_NOTICE);
+	});
+});
+

@@ -224,6 +224,7 @@ export class Tokenizer {
 
 		switch (message.role) {
 			case "user":
+			case "custom":
 			case "developer": {
 				// Both roles carry text and images sent to the provider.
 				const content = message.content;
@@ -310,10 +311,7 @@ export class Tokenizer {
 							if (block.type === "text") fragments.push(block.text);
 							else {
 								const origin = getSourceOrigin(block);
-								const originalImage =
-									origin?.kind === "source" &&
-									origin.parts.length > 0 &&
-									origin.parts.every(part => part.representation === "original-image");
+								const originalImage = origin?.kind === "source" && origin.parts.length > 0 && origin.parts.every(part => part.representation === "original-image");
 								extra += originalImage ? IMAGE_TOKEN_ESTIMATE : snapcompact.FRAME_TOKEN_ESTIMATE;
 							}
 						}

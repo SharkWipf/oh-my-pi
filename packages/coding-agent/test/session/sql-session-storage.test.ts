@@ -97,6 +97,100 @@ describe("SqlSessionStorage (SQLite backend)", () => {
 		await client.end();
 	});
 
+	it("atomic suffixes preserve UTF-8 prefix bytes and indexed title across reload", async () => {
+		const { client, storage } = await createSqlite();
+		try {
+			const path = "/sessions/atomic.jsonl";
+			const prefix = serializeTitleSlot({ title: "Old", source: "auto", updatedAt: "t1" }) + "préfix\n";
+			await storage.writeText(path, prefix);
+			await storage.updateSessionTitle(path, { title: "Current", source: "user", updatedAt: "t2" });
+			await Promise.all([storage.appendTextAtomic(path, "α\nβ\n"), storage.appendTextAtomic(path, "γ\n")]);
+			const rows = await client.unsafe("SELECT content FROM omp_session_files WHERE path = ?", [path]);
+			expect(rows[0].content).toBe(prefix + "α\nβ\nγ\n");
+			const reloaded = await SqlSessionStorage.create({ client });
+			expect(storage.statSync(path).size).toBe(Buffer.byteLength(prefix + "α\nβ\nγ\n"));
+			expect(reloaded.statSync(path).size).toBe(storage.statSync(path).size);
+			expect(JSON.parse((await reloaded.readText(path)).split("\n")[0])).toMatchObject({
+				title: "Current",
+				source: "user",
+				updatedAt: "t2",
+			});
+			await expect(storage.appendTextAtomic("/missing.jsonl", "suffix\n")).rejects.toMatchObject({ code: "ENOENT" });
+			expect((await SqlSessionStorage.create({ client })).existsSync("/missing.jsonl")).toBe(false);
+		} finally {
+			await client.end();
+		}
+	});
+
+	it("atomic suffix failure cannot mistake an unchanged matching tail for a lost acknowledgement", async () => {
+		const client = new SQL("sqlite::memory:");
+		const failure = new Error("append acknowledgement failed");
+		let fail: "before" | "after" | undefined;
+		const wrapped: SqlSessionStorageClient = {
+			options: { adapter: "sqlite" },
+			async unsafe(query, values) {
+				const mode = fail;
+				fail = undefined;
+				if (mode === "before") throw failure;
+				const rows = await client.unsafe(query, values);
+				if (mode === "after") throw failure;
+				return rows;
+			},
+		};
+		try {
+			const storage = await SqlSessionStorage.create({ client: wrapped });
+			const path = "/sessions/ack.jsonl";
+			const suffix = "é\n";
+			await storage.writeText(path, "prefix\n" + suffix);
+			const before = storage.statSync(path);
+			fail = "before";
+			await expect(storage.appendTextAtomic(path, suffix)).rejects.toBe(failure);
+			expect(storage.statSync(path)).toEqual(before);
+			expect(await storage.readText(path)).toBe("prefix\n" + suffix);
+			fail = "after";
+			await storage.appendTextAtomic(path, suffix);
+			expect(await storage.readText(path)).toBe("prefix\n" + suffix + suffix);
+			expect(storage.statSync(path).size).toBe(before.size + Buffer.byteLength(suffix));
+			await storage.drain();
+		} finally {
+			await client.end();
+		}
+	});
+
+	it("atomic suffix rechecks currentness after waiting for its path", async () => {
+		const { client, storage } = await createSqlite();
+		try {
+			const path = "/sessions/guarded.jsonl";
+			await storage.writeText(path, "prefix\n");
+			const before = storage.statSync(path);
+			let current = true;
+			const append = storage.appendTextAtomic(path, "stale\n", { commitGuard: () => current });
+			current = false;
+			await append;
+			expect(await storage.readText(path)).toBe("prefix\n");
+			expect(storage.statSync(path)).toEqual(before);
+		} finally {
+			await client.end();
+		}
+	});
+
+	it("atomic suffix does not overwrite the index of a newer queued replacement", async () => {
+		const { client, storage } = await createSqlite();
+		try {
+			const path = "/sessions/newer.jsonl";
+			await storage.writeText(path, "old");
+			const append = storage.appendTextAtomic(path, "suffix");
+			await Promise.resolve();
+			storage.writeTextSync(path, "new");
+			await append;
+			await storage.drain();
+			expect(await storage.readText(path)).toBe("new");
+			expect(storage.statSync(path).size).toBe(3);
+		} finally {
+			await client.end();
+		}
+	});
+
 	it("flags='w' truncates both mirror and SQL row", async () => {
 		const { client, storage } = await createSqlite();
 		await storage.writeText("/sessions/p/keep.jsonl", "old content\n");

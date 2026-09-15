@@ -1,7 +1,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { Tokenizer } from "@oh-my-pi/pi-agent-core/tokenizer";
 import type { UserMessage } from "@oh-my-pi/pi-ai";
-import { createCustomMessage, isCustomMessageContent, normalizeCustomMessagePayload } from "./messages";
+import { createCustomMessage, getOriginalSourceMessage, isCustomMessageContent, normalizeCustomMessagePayload } from "./messages";
 import { PreservedMessageIndex, type PolicyKind, type PolicyLimit, type PolicyRange } from "./preserved-message-index";
 import {
 	PRESERVED_USER_MESSAGE_CATEGORIES,
@@ -419,7 +419,10 @@ export class PreservedMessageQuery {
 	#entry(position: number): SessionMessageEntry | undefined {
 		const index = position + this.#offset;
 		const entry = index < this.#baseLength ? this.#entries[index] : this.#appended[index - this.#baseLength];
-		if (entry?.type === "message") return entry;
+		if (entry?.type === "message") {
+			const message = entry.message.role === "user" ? getOriginalSourceMessage(entry.message) : entry.message;
+			return message === entry.message ? entry : { ...entry, message };
+		}
 		if (entry?.type !== "custom_message" || !isCustomMessageContent(entry.content)) return undefined;
 		const normalized = normalizeCustomMessagePayload(entry);
 		if (!normalized.display || normalized.attribution !== "user") return undefined;

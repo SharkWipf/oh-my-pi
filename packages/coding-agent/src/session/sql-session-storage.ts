@@ -72,6 +72,8 @@ interface DialectQueries {
 	replaceIfSize: string;
 	/** Insert if missing; otherwise append the new chunk to existing content. Used for `writeLine`. */
 	upsertAppend: string;
+	/** Append only when the existing UTF-8 byte length matches. */
+	appendIfSize: string;
 	/** Update indexed title metadata without rewriting the JSONL body. */
 	updateTitle: string;
 	/** Delete a single row by path. */
@@ -157,6 +159,7 @@ function buildQueries(adapter: SqlSessionStorageAdapter, table: string): Dialect
 			upsertAppend:
 				`INSERT INTO ${table} (path, content, mtime_ms) VALUES (?, ?, ?) ` +
 				`ON DUPLICATE KEY UPDATE content = CONCAT(content, VALUES(content)), mtime_ms = VALUES(mtime_ms)`,
+			appendIfSize: `UPDATE ${table} SET content = CONCAT(content, ?), mtime_ms = ? WHERE path = ? AND length(content) = ?`,
 			updateTitle: `UPDATE ${table} SET title = ?, title_source = ?, title_updated_at = ?, mtime_ms = ? WHERE path = ?`,
 			delete: `DELETE FROM ${table} WHERE path = ?`,
 			rename: `UPDATE ${table} SET path = ?, mtime_ms = ? WHERE path = ?`,
@@ -214,6 +217,9 @@ function buildQueries(adapter: SqlSessionStorageAdapter, table: string): Dialect
 			`INSERT INTO ${table} (path, content, mtime_ms) ` +
 			`VALUES (${placeholder(1)}, ${placeholder(2)}, ${placeholder(3)}) ` +
 			`ON CONFLICT (path) DO UPDATE SET content = ${tableQualifier} || excluded.content, mtime_ms = excluded.mtime_ms`,
+		appendIfSize:
+			`UPDATE ${table} SET content = content || ${placeholder(1)}, mtime_ms = ${placeholder(2)} ` +
+			`WHERE path = ${placeholder(3)} AND ${byteLengthExpr} = ${placeholder(4)} RETURNING path`,
 		updateTitle: `UPDATE ${table} SET title = ${placeholder(1)}, title_source = ${placeholder(2)}, title_updated_at = ${placeholder(3)}, mtime_ms = ${placeholder(4)} WHERE path = ${placeholder(5)}`,
 		delete: `DELETE FROM ${table} WHERE path = ${placeholder(1)}`,
 		rename: `UPDATE ${table} SET path = ${placeholder(1)}, mtime_ms = ${placeholder(2)} WHERE path = ${placeholder(3)}`,
@@ -397,8 +403,20 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 		]);
 	}
 
-	async append(path: string, line: string, mtimeMs: number): Promise<void> {
-		await this.#client.unsafe(this.#q.upsertAppend, [path, line, mtimeMs]);
+	async append(path: string, line: string, mtimeMs: number, expectedSize?: number | null): Promise<void> {
+		if (expectedSize === undefined) {
+			await this.#client.unsafe(this.#q.upsertAppend, [path, line, mtimeMs]);
+			return;
+		}
+		const result = expectedSize === null
+			? await this.#client.unsafe(this.#q.insertIfMissing, [path, line, mtimeMs, null, null, null])
+			: await this.#client.unsafe(this.#q.appendIfSize, [line, mtimeMs, path, expectedSize]);
+		const written = this.#adapter === "mysql" ? result.affectedRows === 1 : result.length === 1;
+		if (written) return;
+		const current = await this.readFull(path);
+		const actualSize = current === null ? null : Buffer.byteLength(current, "utf8");
+		if (line.length === 0 && actualSize === expectedSize) return;
+		throw new SessionWriteConflictError(path, expectedSize, actualSize);
 	}
 
 	async truncate(path: string, mtimeMs: number): Promise<void> {

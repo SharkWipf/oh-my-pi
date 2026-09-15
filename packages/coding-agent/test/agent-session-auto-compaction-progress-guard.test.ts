@@ -1652,29 +1652,36 @@ describe("AgentSession auto-compaction progress guard", () => {
 
 	it("auto-continues (no warning) when the image-drop tier frees an image-only tail", async () => {
 		activateOngoingGoal("image-drop-rescue");
-		// Elide cannot touch image content (collectShakeRegions skips image-only
-		// tool results and user-message images), so the rescue's second tier drops
-		// attached images — the automated `/shake images` remedy — and re-tests
-		// the recovery band before the guard is allowed to pause.
-		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		// Use real, unselected images: automatic rescue must rewrite the source and
+		// active prompt, not merely call a public forwarding method.
+		const image = {
+			type: "image" as const,
+			mimeType: "image/png",
+			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6mQAAAABJRU5ErkJggg==",
+		};
+		const imageEntryId = sessionManager.appendMessage({
+			role: "user", content: [{ ...image }, { ...image }], timestamp: Date.now(),
+		});
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+		const sourceImageCount = () => {
+			const entry = sessionManager.getEntry(imageEntryId);
+			if (entry?.type !== "message" || entry.message.role !== "user") throw new Error("Missing image source");
+			return Array.isArray(entry.message.content) ? entry.message.content.filter(block => block.type === "image").length : 0;
+		};
+		const continuationImageCounts: number[] = [];
+		vi.spyOn(session.agent, "prompt").mockImplementation(async () => {
+			const images = session.messages.flatMap(message =>
+				"content" in message && Array.isArray(message.content) ? message.content.filter(block => block.type === "image") : [],
+			);
+			continuationImageCounts.push(images.length);
+		});
 		vi.spyOn(session.agent, "continue").mockResolvedValue();
-		let imagesDropped = false;
 		vi.spyOn(session, "getContextUsage").mockImplementation(() =>
-			imagesDropped
+			sourceImageCount() === 0
 				? { tokens: 1000, contextWindow: 200000, percent: 0.5 }
 				: { tokens: 190000, contextWindow: 200000, percent: 95 },
 		);
-		// Nothing elide-eligible in the oversized tail.
-		vi.spyOn(session, "shake").mockResolvedValue({
-			mode: "elide",
-			toolResultsDropped: 0,
-			blocksDropped: 0,
-			tokensFreed: 0,
-		});
-		const dropSpy = vi.spyOn(session, "dropImages").mockImplementation(async () => {
-			imagesDropped = true;
-			return { removed: 2 };
-		});
+		expect(sourceImageCount()).toBe(2);
 
 		const notices = collectNotices();
 
@@ -1690,15 +1697,9 @@ describe("AgentSession auto-compaction progress guard", () => {
 		await compactionDone;
 		await session.waitForIdle();
 
-		expect(dropSpy).toHaveBeenCalledTimes(1);
-		expect(promptSpy).toHaveBeenCalledTimes(1);
-		const noProgress = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes(NO_PROGRESS_FRAGMENT));
-		expect(noProgress.length).toBe(0);
-		const recovery = notices.filter(
-			n => n.source === NOTICE_SOURCE && n.message.includes("dropped 2 attached images"),
-		);
-		expect(recovery.length).toBe(1);
-		expect(recovery[0].level).toBe("info");
+		expect(sourceImageCount()).toBe(0);
+		expect(continuationImageCounts).toEqual([0]);
+		expect(notices.filter(notice => notice.source === NOTICE_SOURCE && notice.level === "warning")).toEqual([]);
 		// A rescued pass must not stamp the dead-end warning on the entry.
 		const compactionEntry = sessionManager
 			.getEntries()

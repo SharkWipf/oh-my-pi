@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Added a protected indexed child-removal seam and overridable child-array accessors so transcript containers can track public mutations without rescanning committed history.
 ### Added
 
 - `Editor.deleteCharForward()` exposes the `tui.editor.deleteCharForward` operation to hosts that resolve the chord themselves, applying the same transient-state teardown the key dispatch does (pending character jump, spelling-assist popup) and routing through Vim's `x` in Normal and Visual modes.

@@ -12,6 +12,67 @@
 
 - Added source-ID preservation policy APIs with independent first/recent/hard-recent limits, uniformly capped manual tool exchanges, compact source quota indexes, and compatible saved settings/classification readers.
 - Preservation limits and effective-change notifications remain compatible with revision-cached settings groups and write-before-archive legacy settings migration.
+- Added concise frozen compaction target/results and a separate `/context details` inventory for recorded, reconstructed and actual-prepared contexts, with ordered source coverage, one-time image/frame charges, explicit estimate/unknown labels and backend-independent request observation.
+- Added nonblocking user-message classification with eleven independent saved category facts, selected-message reclassification, bounded missing-only backfill, per-row status updates, and isolated cancellation. Classifier jobs validate active source/branch ownership before saving and require explicit backfill after restart.
+- Added independent living requirements memory under `/memory requirements`, with original human-source capture, source-backed extraction, separate fidelity/coverage review and fresh candidate-only sanity checks, durable lineage, complete active recall, and explicit coverage-gap and quarantine recovery controls. Ordinary memory backends remain independently selectable.
+- Added `--start-without-memory`, future-only memory bypass, and clean retry retaining only explicitly selected original human inputs. Recovery cancels queued work without flushing or consolidating learned memory and reports already-submitted remote writes as non-revocable.
+- Requirements capacity is evaluated at the actual prepared provider-request boundary, after physical transforms and inband tool encoding, using emitted system/context frame estimates. Requests retain every applicable statement, reject known irreducible overflow or stale snapshots before provider execution, and report invalidated physical estimates as unknown rather than silently truncating requirements.
+- Quarantined requirement bodies no longer leak through unresolved conflict recall; source evidence and conflict lineage remain inspectable.
+- Disabled or bypassed requirements no longer pin original user history during ordinary compaction; enabling requirements still protects unresolved current delivery IDs until processing or explicit gap passage.
+- Revalidated local and scoped foreign requirement evidence before provider dispatch, including original depot availability. Warm checks reuse journal/depot metadata rather than rereading complete histories; changed evidence reopens coverage and requires fresh review rather than automatically reviving historical records.
+
+### Fixed
+
+- Compaction receipts now distinguish actual Anthropic/OpenAI native methods from the configured preference, inventory native summaries and opaque state without double-charging fallback wrappers, and show configured/calibrated targets plus unknown native cost inline for manual and automatic compaction. Anthropic request usage remains a separate old-context anchor; prepared snapshots remain explicitly unconfirmed.
+- Preserved upstream whole-group retention, eligible Anthropic AUTO routing, lazy frame emission accounting, revision-aware tool-schema estimates, and durable manual/speculative publication alongside source-aware diagnostic receipts.
+- Notes-backed local rollovers preserve selected originals without overriding extension-owned cuts, keep latest requests once in chronological replay, restore branch-local notebook state across resume and clear boundaries, and expose original input and provenance alongside delivered raw history.
+- Automatic snapcompact frame rescue no longer commits a smaller frame window when its text spill increases local context size; genuine reductions remain eligible even when they do not clear the headroom band.
+- Legacy archive migration now reports unavailable original source boundaries and current original-image references before replacing installed history, instead of treating a fresh suffix as a complete original baseline.
+- Automatic image-drop rescue now skips protected source entries while still removing unselected images; explicit image removal and `/shake images` continue to override preservation.
+- Automatic pruning and shaking now retain original deliveries still pending in requirements memory, independently of user-preservation eligibility, while continuing ordinary pruning of unrelated content.
+- Preserve source identity through cached message conversion, secret obfuscation, original-image encoding and URL changes, and inline rasterization. Current selected original images are not silently removed by the ordinary provider image clamp.
+- Fixed repeated snapcompact rejecting genuine reductions by counting the committed prior archive alongside fresh context in the before-state estimate; opaque reasoning remains excluded symmetrically.
+- Controlled source rewrites now publish source content together with remapped snap/native coverage and classifier validity across older and sibling compactions. Affected classifications are removed from every successful historical record; unsupported records retain their raw evidence without reactivating stale facts on resume. Manual overrides and unchanged artifact bytes are preserved.
+- Preservation previews distinguish unavailable model-percentage limits from finite zero and expose source cap blockers; large manual-reset captures use bounded lazy source enumeration.
+### Changed
+
+- Long-session footer totals, credential pins, and retained-context reconstruction now reuse the session index instead of repeatedly scanning cold history. Recent sibling branches reuse a bounded control-state checkpoint; full transcript exports still include historical messages.
+- Transcript retirement and tail updates skip already committed blocks while preserving public middle-child replacements and externally assigned child arrays.
+- Added independent living requirements memory under `/memory requirements`, with original human-source capture, source-backed extraction, separate fidelity/coverage review and fresh candidate-only sanity checks, durable lineage, complete active recall, and explicit coverage-gap and quarantine recovery controls. Ordinary memory backends remain independently selectable.
+- Added `--start-without-memory`, future-only memory bypass, and clean retry retaining only explicitly selected original human inputs. Recovery cancels queued work without flushing or consolidating learned memory and reports already-submitted remote writes as non-revocable.
+
+### Fixed
+
+- Compaction now appends its frozen result once and awaits durable publication before installing live context or resetting provider state. Persistence recovery reuses the same journal entry; stale branch results cannot install, while valid same-branch suffixes survive.
+- Ordinary compaction and handoff no longer capture or render a separate requirements snapshot; pending live source IDs join the existing selection synchronously and invalidate the normal publication fence when their generation changes.
+- Human `/keep` and `/once` inputs retain exact typed text, original PNG/image bytes and links through queue dequeue, durable journal reload, branch/edit and tree-navigation restoration. Original metadata is accepted-delivery journal data, independent of V2 capture IDs and readiness.
+- Controlled representation rewrites retain accepted original text/images on the first mutation and atomically update current content, positional coverage and affected classifier records without moving physical archive offsets or erasing unrelated manual state.
+- Automatic pruning and shaking retain original deliveries still pending in requirements memory, independently of user-preservation eligibility, while continuing ordinary pruning of unrelated content.
+- Fixed physical compaction inventories omitting native image references, screenshots and generated images, and misclassifying source-identified original images as archive frames. Inline ordinary/added/shared totals now identify their once-counted physical partition separately from overlapping policy quotas.
+- Fixed ACP cancellation during initial durable source capture: cancelled input no longer resumes into a provider request or delivered user message when capture completes.
+- Fixed long-session startup stalls from requirements history intake. Disabled requirements no longer build a cold backlog; enabled cataloging yields after the first terminal paint and uses indexed, batched source storage. Status distinguishes unobserved history from known coverage holes, while explicit backfill, original capture, branch cancellation, and request-time evidence checks remain intact.
+- Fixed requirements adoption of earlier assistant and tool output: review now resolves exact original journal/block evidence without granting it human authority or duplicating the conversation. Extractor and evidence-review instructions explain shared-context descriptors, standalone units, and deduplicated image positions. Referent provenance survives reload and fork; known rewrite maps preserve unchanged evidence, while changed or unavailable evidence reopens the adopting human source for review.
+- Packaged requirements extraction, evidence review, candidate-only sanity, and recall instructions as static prompt assets, preserving the provider-facing instructions and evidence payloads.
+- Requirements extraction now copies source-local manifests and complete-unit byte ranges. Evidence review receives exact locally decoded cited text and checks source coverage independently of candidate count, while candidate-only sanity remains isolated.
+- Removed redundant full-ledger reads from warm requirements branch changes. Owner fencing updates persisted state directly, unchanged reconciliation uses indexed source checks, and required original-evidence verification remains intact.
+- Ordinary ACP/RPC/SDK input and preservation menus no longer perform requirements capture, source-depot writes or requirements observation waits. Manual override publication retains its atomic journal and post-flush ownership checks.
+- Secret redaction now covers provider-visible computer actions and safety messages, tool explanations, Anthropic server-tool text, and native web-search text while preserving opaque replay data, identifiers, and original screenshots.
+- Inline snap images now expose transient, identity-bound frame estimates and prompt/tool ownership through provider normalization, separately from original images. Outgoing image mutations no longer corrupt cached frames for later requests.
+- Automatic image-drop rescue now skips protected source entries while still removing unselected images; explicit image removal and `/shake images` continue to override preservation.
+- Preserve source identity through cached message conversion, secret obfuscation, original-image encoding and URL changes, and inline rasterization. Current selected original images are not silently removed by the ordinary provider image clamp.
+- Fixed repeated snapcompact rejecting genuine reductions by counting the committed prior archive alongside fresh context in the before-state estimate; opaque reasoning remains excluded symmetrically.
+- Controlled source rewrites now publish source content together with remapped snap/native coverage and classifier validity across older and sibling compactions. Affected classifications are removed from every successful historical record; unsupported records retain their raw evidence without reactivating stale facts on resume. Manual overrides and unchanged artifact bytes are preserved.
+- Preservation previews distinguish unavailable model-percentage limits from finite zero and expose source cap blockers; large manual-reset captures use bounded lazy source enumeration.
+- Quarantined classification records remain visibly invalidated after reload without fabricating category labels, and backfill readers skip history before the latest clear boundary.
+- Visible human custom-message journal sources retain manual protection and ordinary raw accounting without being promoted to automatic user classifications or windows.
+- Fixed repeated snapcompact rejecting genuine reductions by counting the committed prior archive alongside fresh context in the before-state estimate; opaque reasoning remains excluded symmetrically.
+### Changed
+
+- Long-session footer totals, credential pins, and retained-context reconstruction now reuse the session index instead of repeatedly scanning cold history. Recent sibling branches reuse a bounded control-state checkpoint; full transcript exports still include historical messages.
+- Transcript retirement and tail updates skip already committed blocks while preserving public middle-child replacements and externally assigned child arrays.
+- Compacted selected originals now retain their own text/image coordinates through reload and repeated compaction, without replacing an ordinarily retained expanded submission.
+- Fixed physical attribution joining original-input and expanded-delivery coverage solely by journal entry ID; reconstructed and prepared inventories now keep their distinct physical charges without inflating shared ownership.
+- Ordinary turns prepare preservation policy only after finding an eligible pruning victim. Full selected-user, complete non-user, and pending-live protection still applies before mutation, including source ownership checks and minimum-savings revalidation.
 ### Fixed
 
 - Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.
@@ -649,11 +710,16 @@
 
 ### Fixed
 
+- Classifier requests now use named boolean categories instead of ordinal bit strings, with complete response validation and unchanged packed v1 saved facts. Instructions require every applicable overlapping category and assess each instruction's scope independently.
 - Preservation previews distinguish unavailable model-percentage limits from finite zero and expose source cap blockers; large manual-reset captures use bounded lazy source enumeration.
 - Quarantined classification records remain visibly invalidated after reload without fabricating category labels, and backfill readers skip history before the latest clear boundary.
 - Visible human custom-message journal sources retain manual protection and ordinary raw accounting without being promoted to automatic user classifications or windows.
 - Secret redaction now covers provider-visible computer actions and safety messages, tool explanations, Anthropic server-tool text, and native web-search text while preserving opaque replay data, identifiers, and original screenshots.
 - Inline snap images now expose transient, identity-bound frame estimates and prompt/tool ownership through provider normalization, separately from original images. Outgoing image mutations no longer corrupt cached frames for later requests.
+- Fixed invalidated source preparation surfacing as an operational failure during automatic pruning after branch/session changes or disposal. Both pruning passes retain their initiating scope; genuine storage errors still propagate.
+- Manual source-state updates now publish complete metadata batches without serializing cold history; file-backed publication preserves the original journal bytes and stages the copy asynchronously.
+- Atomic session replacement now surfaces failed EPERM rollback instead of reporting success and preserves a newer target when the original operation loses its commit guard.
+- Fixed cumulative usage remaining stale after supported in-place session-entry rewrites; derived controls and credential pins are refreshed without moving the selected branch.
 - `omp update` now refuses to overwrite shebang scripts or non-OMP executables behind foreign symlinks and reports the physical binary path it verified ([#11152](https://github.com/can1357/oh-my-pi/issues/11152)).
 - The startup update notice counts every change in a release: bullets written above a `###` heading now count under `Other`, and `+`/`*` markers and lightly indented bullets count like `-`.
 - Fixed Codex Astra retaining its larger window after disabling Extended Context, including cached models; explicit model overrides still take precedence.

@@ -10,6 +10,7 @@ import type {
 	Context,
 	Effort,
 	ImageContent,
+	OriginalSubmission,
 	Message,
 	MessageAttribution,
 	Model,
@@ -17,7 +18,6 @@ import type {
 	ServiceTierByFamily,
 	SimpleStreamOptions,
 	ToolChoice,
-	UserMessageProducer,
 } from "@oh-my-pi/pi-ai";
 import type { postmortem } from "@oh-my-pi/pi-utils";
 import type { AdvisorConfig } from "../advisor";
@@ -41,7 +41,9 @@ import type { ConfiguredThinkingLevel } from "../thinking";
 import type { ToolSession } from "../tools";
 import type { XdevState } from "../tools/xdev";
 import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
+import type { UserMessageProducer } from "@oh-my-pi/pi-ai";
 import type { SessionManager } from "./session-manager";
+
 
 /** Maximum time the interactive shutdown path waits for Mnemopi consolidation. */
 export const SHUTDOWN_CONSOLIDATE_BUDGET_MS = 1_500;
@@ -337,6 +339,10 @@ export interface AgentSessionConfig {
 
 /** Options for AgentSession.prompt(). */
 export interface PromptOptions {
+	imageLinks?: (string | undefined)[];
+	compactionOverride?: "keep" | "exclude";
+	/** Original host input, preserved across expansion, queue delivery and retry. */
+	originalSubmission?: OriginalSubmission;
 	/** Host-recorded producer, separate from billing attribution. */
 	producer?: UserMessageProducer;
 	/** Whether to expand file-based prompt templates (default: true). */
@@ -363,6 +369,9 @@ export interface PromptOptions {
  *  before it reached the agent (an abort or usage preflight denial raced turn
  *  setup), so it was never persisted to the session. */
 export interface DroppedPrompt {
+	originalSubmission?: OriginalSubmission;
+	imageLinks?: (string | undefined)[];
+	compactionOverride?: "keep" | "exclude";
 	/** The prompt exactly as typed, before template/command expansion. */
 	text: string;
 	/** Image attachments submitted with the prompt. */
@@ -371,6 +380,10 @@ export interface DroppedPrompt {
 
 /** Options for AgentSession.followUp(). */
 export interface FollowUpOptions {
+	imageLinks?: (string | undefined)[];
+	compactionOverride?: "keep" | "exclude";
+	originalSubmission?: OriginalSubmission;
+	producer?: UserMessageProducer;
 	/** Enqueue as a hidden developer message instead of a user follow-up. */
 	synthetic?: boolean;
 	/** Whether to expand file-based prompt templates (default: true). */
@@ -381,14 +394,20 @@ export interface FollowUpOptions {
 
 /** Options for AgentSession.steer(). */
 export interface SteerOptions {
+	originalSubmission?: OriginalSubmission;
+	producer?: UserMessageProducer;
+	imageLinks?: (string | undefined)[];
+	compactionOverride?: "keep" | "exclude";
 	/** Explicit billing/initiator attribution. */
 	attribution?: MessageAttribution;
 }
 
 /** Options for AgentSession.sendUserMessage(). */
 export interface SendUserMessageOptions {
-	/** Host-recorded producer, separate from billing attribution. */
+	originalSubmission?: OriginalSubmission;
 	producer?: UserMessageProducer;
+	imageLinks?: (string | undefined)[];
+	compactionOverride?: "keep" | "exclude";
 	/** Queue behavior; omitted starts a turn when idle and steers while streaming. */
 	deliverAs?: "steer" | "followUp" | "aside";
 	/** Explicit billing/initiator attribution. */
@@ -405,6 +424,7 @@ export interface HandoffResult {
 export interface SessionHandoffOptions {
 	autoTriggered?: boolean;
 	signal?: AbortSignal;
+
 }
 
 /** Result from cycleModel(). */
@@ -497,4 +517,10 @@ export interface ResetSessionContextResult {
 }
 
 /** Queued user content restored to the editor. */
-export type RestoredQueuedMessage = { text: string; images?: ImageContent[] };
+export type RestoredQueuedMessage = {
+	text: string;
+	images?: ImageContent[];
+	originalSubmission?: OriginalSubmission;
+	imageLinks?: (string | undefined)[];
+	compactionOverride?: "keep" | "exclude";
+};

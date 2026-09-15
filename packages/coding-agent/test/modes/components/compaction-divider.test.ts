@@ -25,12 +25,11 @@ function makeComponent(images?: ImageContent[]): CompactionSummaryMessageCompone
 }
 
 describe("CompactionSummaryMessageComponent", () => {
-	it("collapsed: a single full-width divider carrying the expand affordance", () => {
+	it("collapsed: a single full-width divider hides the summary body", () => {
 		const lines = makeComponent().render(80);
 		expect(lines.length).toBe(3); // breathing room above and below the rule
 		const rule = Bun.stripANSI(lines[1]);
 		expect(rule).toContain("compacted");
-		expect(rule).toContain("ctrl+o");
 		// The rule spans the full width and hides the summary body.
 		expect(Bun.stringWidth(rule)).toBe(80);
 		expect(rule).not.toContain(SUMMARY);
@@ -46,7 +45,6 @@ describe("CompactionSummaryMessageComponent", () => {
 		const rule = Bun.stripANSI(component.render(80)[1]);
 		expect(rule).toContain("remote-compacted");
 		expect(rule).toContain("256K→20K");
-		expect(rule).toContain("ctrl+o");
 	});
 
 	it("labels a handoff-method compaction as handed-off", () => {
@@ -80,11 +78,6 @@ describe("CompactionSummaryMessageComponent", () => {
 		expect(text).toContain(SUMMARY);
 		expect(text).toContain("tokens");
 		expect(text).toContain("1 snapcompact frame attached");
-	});
-
-	it("degrades to a bare label when the viewport is too narrow for a framed rule", () => {
-		const lines = makeComponent().render(10);
-		expect(Bun.stripANSI(lines[1])).toContain("compacted");
 	});
 
 	it("honors the same-reference render cache and busts it on expansion toggle", () => {

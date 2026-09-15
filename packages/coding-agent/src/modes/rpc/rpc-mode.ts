@@ -10,6 +10,7 @@
  * - Events: AgentSessionEvent objects streamed as they occur
  * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
  */
+import type { OriginalSubmission } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { $env, isRecord, logger, Snowflake } from "@oh-my-pi/pi-utils";
@@ -157,6 +158,7 @@ export async function runRpcSkillCommand(
 	invocation: RpcSkillInvocation,
 	streamingBehavior: "steer" | "followUp" = "steer",
 	prebuilt?: BuiltSkillPromptMessage,
+	originalSubmission?: OriginalSubmission,
 ): Promise<boolean> {
 	const built = prebuilt ?? (await buildSkillPromptMessage(invocation.skill, invocation, "user"));
 	return session.promptCustomMessage(
@@ -167,7 +169,7 @@ export async function runRpcSkillCommand(
 			details: built.details,
 			attribution: "user",
 		},
-		{ streamingBehavior },
+		{ streamingBehavior, producer: { type: "human" }, originalSubmission },
 	);
 }
 
@@ -183,6 +185,7 @@ export async function dispatchRpcSkillPrompt(input: {
 	id: string | undefined;
 	session: RpcSkillCommandSession;
 	message: string;
+	originalSubmission?: OriginalSubmission;
 	streamingBehavior: "steer" | "followUp" | undefined;
 	output: (obj: object) => void;
 	onError: (error: Error) => void;
@@ -195,10 +198,13 @@ export async function dispatchRpcSkillPrompt(input: {
 	// keep that error contract by awaiting it before answering. The expensive
 	// promptCustomMessage pipeline (usage preflight, compaction, provider
 	// calls) is what moves behind the acknowledgement.
+	const originalSubmission =
+		input.originalSubmission ?? { text: input.message };
 	const built = await buildSkillPromptMessage(invocation.skill, invocation, "user");
 	watchAndReportLocalOnlyPromptResult({
 		id: input.id,
-		startPrompt: () => runRpcSkillCommand(input.session, invocation, input.streamingBehavior ?? "steer", built),
+		startPrompt: () =>
+			runRpcSkillCommand(input.session, invocation, input.streamingBehavior ?? "steer", built, originalSubmission),
 		output: input.output,
 		onError: input.onError,
 		extensionUserMessageTracker: input.extensionUserMessageTracker,
@@ -213,7 +219,8 @@ export async function tryRunRpcSkillCommand(
 ): Promise<RpcSkillCommandResult | false> {
 	const invocation = resolveRpcSkillInvocation(session, text);
 	if (!invocation) return false;
-	await runRpcSkillCommand(session, invocation, streamingBehavior);
+	const originalSubmission = { text };
+	await runRpcSkillCommand(session, invocation, streamingBehavior, undefined, originalSubmission);
 	return { agentInvoked: true };
 }
 
@@ -1183,10 +1190,12 @@ export async function runRpcMode(
 			// =================================================================
 
 			case "prompt": {
+				const originalSubmission = { text: command.message, images: command.images };
 				const skillResult = await dispatchRpcSkillPrompt({
 					id,
 					session,
 					message: command.message,
+					originalSubmission,
 					streamingBehavior: command.streamingBehavior,
 					output,
 					onError: promptError => output(error(id, "prompt", promptError.message)),
@@ -1215,7 +1224,8 @@ export async function runRpcMode(
 					if ("prompt" in builtinResult) {
 						watchAndReportLocalOnlyPromptResult({
 							id,
-							startPrompt: () => session.prompt(builtinResult.prompt, { images: command.images }),
+							startPrompt: () =>
+								session.prompt(builtinResult.prompt, { images: command.images, originalSubmission }),
 							output,
 							onError: promptError => output(error(id, "prompt", promptError.message)),
 							extensionUserMessageTracker,
@@ -1237,6 +1247,7 @@ export async function runRpcMode(
 					startPrompt: () =>
 						session.prompt(command.message, {
 							images: command.images,
+							originalSubmission,
 							streamingBehavior: command.streamingBehavior,
 						}),
 					output,

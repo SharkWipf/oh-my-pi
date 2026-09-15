@@ -20,6 +20,13 @@ For a prepared provider `Context`, `getInlineFrameAccounting(image)` and `getInl
 Count the transformed system-prompt stub and emitted text, not the replaced prompt. When starting from `Tokenizer.countMessages`, replace each inline image baseline with its frame estimate by adding only `estimatedTokens - IMAGE_TOKEN_ESTIMATE`. Irreducible prompt accounting includes only the `system`/`context` frames and notes, not ordinary history or tool-result frames.
 
 Facts use the existing source-origin sidecar and survive explicit image-normalization and blob-decoration clones. Arbitrary untracked clones, changed image/text fields, invalidated hook output, and persisted/reloaded origin maps do not provide current inline facts. Inspect the actual prepared pre-hook context; do not infer ownership from equal text or treat missing facts as a known zero cost.
+## Long-session runtime reads
+
+`SessionManager` keeps cumulative usage in its existing journal index. `getUsageStatistics()` includes task and background model usage; `getAssistantUsageStatistics()` is the top-level assistant-only subtotal displayed by the footer. Branch navigation does not reset either cumulative total.
+
+Credential pins and retained-context controls use one active branch fold and one reset/compaction checkpoint. Recent sibling branches reuse that checkpoint; navigating to unrelated older history may still require a full ancestry walk. `buildSessionContext({ transcript: true })` intentionally retains full-history export semantics. No historical messages are evicted by these optimizations.
+
+After modifying persisted entries in place, call `await sessionManager.rewriteEntries()` before reading derived state. It rebuilds the index while preserving the selected leaf, including for in-memory sessions. Returned credential maps and usage snapshots may be changed without changing the index.
 
 ## Memory backends
 
@@ -57,3 +64,16 @@ The result separates selected users `P`, complete admitted non-user atoms `N`, a
 Visible user-attributed `custom_message` journal entries support manual state as non-user `N` sources. Their current durable content is normalized through the existing custom-message helper while retaining the journal ID; they never enter automatic user windows, hard-recent, or classification. Hidden and agent-attributed custom injections do not become manual user rows.
 
 Saved manual overrides and successful eleven-bit classification metadata keep their established v1 codecs. Settings compose layers before interpreting legacy paired message-zero limits; opening settings does not write normalized values.
+
+## Physical context inspection
+
+`/context details` opens the ordered classified inventory separately from the ordinary usage view. Recorded compaction, current reconstruction, and the last actual-prepared request remain distinct snapshots. The detail view lists fixed prompts/tools/context/skills, summary and gap text, retained and post-compaction content, native payloads, raster frames and original images with source coverage, structural counts, controls and qualified token quantities. Manual and automatic compact summaries use concise ordinary/added/shared results and the method’s actual target.
+
+`AgentSession.getCompactionDiagnostics("current")` materializes the reconstructed inventory only when requested; `getSourceRepresentationDetails(sourceId)` inspects current versus captured source spans without tokenizing the inventory. Neither operation runs on policy toggles or footer updates. Source quota membership and estimates are separate from disjoint physical charges: overlap does not refund quota, and a shared frame is charged once.
+Original and delivered projections of the same journal entry remain separate physical occurrences when their bytes differ. Coverage joins match the projection as well as source identity; source quota membership still refers to the journal source, not an extra bill for each projection.
+
+`getCompactionDiagnostics("recorded")` reads frozen facts from the existing atomic compaction record. It includes the initiating model, settings, fixed counts, source reasons and quotas, and actual ordinary target/calibration, complete non-user precharge and residual allocation. Legacy records without facts remain unavailable, not reconstructed with today’s settings. Settings changes and reload do not rewrite historical facts.
+
+`getPreparedCompactionDiagnostics()` reads the last compact inventory observed at the existing post-inband `beforeModelCall` boundary on the current history owner. It works with memory disabled, never reruns preparation, retains no request Context or image bytes, and returns an independent copy to explicit viewers. The label is actual-prepared, not confirmed sent: later provider hooks, dispatch, acceptance and billing remain unobserved. Boundary-time settings and installed archive settings remain separate.
+
+Text tokenizer quantities, generic local image estimates, actual inline-renderer estimates and unknown native/opaque costs are labeled separately. Archive identity is not a historical renderer price; absent historical pricing stays explicitly unavailable. Original-image identity takes precedence over legacy summary-role guesses, and its physical correction replaces the base estimate once. Native file references, screenshots and generated images retain a baseline image estimate even when pixel bytes are unavailable; remaining unmeasurable metadata stays unknown. None of these local quantities is a provider invoice.

@@ -1,4 +1,8 @@
 import * as fs from "node:fs";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { CompactionDiagnostics } from "@oh-my-pi/pi-agent-core/compaction/diagnostics";
+import { getCompactionSourceRepresentation, type SourceRewrite } from "@oh-my-pi/pi-agent-core/compaction/source";
+
 import * as path from "node:path";
 import type {
 	AssistantMessage,
@@ -39,7 +43,18 @@ import {
 	sanitizeRehydratedOpenAIResponsesAssistantMessage,
 	stripInternalDetailsFields,
 } from "./messages";
-import { type BuildSessionContextOptions, buildSessionContext, type SessionContext } from "./session-context";
+import {
+	applySessionContextControlEntry,
+	type BuildSessionContextOptions,
+	buildSessionContext,
+	buildSessionContextFromPath,
+	cloneSessionContextControlState,
+	createSessionContextControlState,
+	getOpenAiRemoteCompactionPayload,
+	type SessionContext,
+	type SessionContextControlState,
+	type SessionContextSourceInventory,
+} from "./session-context";
 import {
 	type BranchSummaryEntry,
 	type CompactionEntry,
@@ -86,9 +101,11 @@ import {
 } from "./session-paths";
 import { prepareEntryForPersistence } from "./session-persistence";
 import { loadPinnedSessionIds, sortPinnedFirst } from "./session-pins";
+import { rewriteSessionSources } from "./session-source-rewrite";
 import {
 	FileSessionStorage,
 	MemorySessionStorage,
+	SessionWriteConflictError,
 	type SessionStorage,
 	type SessionStorageWriter,
 } from "./session-storage";
@@ -99,6 +116,7 @@ import {
 	normalizeWorkspaceDirectory,
 } from "./session-workspace";
 import { recordSessionTitle } from "./title-index";
+import { sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 
 const JSONL_SUFFIX_LENGTH = ".jsonl".length;
 const DRAFT_ONLY_SESSION_MARKER = ".draft-only-session";
@@ -400,6 +418,23 @@ function orderedByTimestamp(a: SessionTreeNode, b: SessionTreeNode): number {
 	return new Date(a.entry.timestamp).getTime() - new Date(b.entry.timestamp).getTime();
 }
 
+interface BranchModelUsage {
+	entry: ModelUsageEntry;
+	position: number;
+	previous?: BranchModelUsage;
+}
+
+interface SessionBranchFold {
+	id: string | null;
+	controls: SessionContextControlState;
+	pins: Map<string, { hash: string; lastUsedAt: number }>;
+	entryCount: number;
+	latestCompaction: CompactionEntry | null;
+	hasToolResults: boolean;
+	modelUsage?: BranchModelUsage;
+	modelUsageStart: number;
+	sourceContext?: { compactionId: string; path: SessionEntry[]; inventory: SessionContextSourceInventory };
+}
 /**
  * Maintains the derived views over a session's entry list: id lookup, the
  * parent→children adjacency, the resolved label map, the active leaf, and the
@@ -408,27 +443,225 @@ function orderedByTimestamp(a: SessionTreeNode, b: SessionTreeNode): number {
  */
 class SessionEntryIndex {
 	#entriesById = new Map<string, SessionEntry>();
+	#messagesByPersistenceKey = new Map<string, SessionMessageEntry | SessionMessageEntry[]>();
 	#children = new Map<string | null, SessionEntry[]>();
 	#labels = new Map<string, string>();
 	#leaf: string | null = null;
 	#usage = emptyUsageStatistics();
+	#assistantUsage = emptyUsageStatistics();
+	// One branch fold and one applicable boundary checkpoint, never one per message.
+	// Older unrelated branches may replay ancestry; only recent siblings share this checkpoint.
+	#fold = this.#emptyFold();
+	#boundaryFold: SessionBranchFold | undefined;
+	#rebuilding = false;
+
+	#emptyFold(): SessionBranchFold {
+		return {
+			id: null,
+			controls: createSessionContextControlState(),
+			pins: new Map(),
+			entryCount: 0,
+			latestCompaction: null,
+			hasToolResults: false,
+			modelUsageStart: 0,
+		};
+	}
+
+	#cloneFold(fold: SessionBranchFold): SessionBranchFold {
+		const pins = new Map<string, { hash: string; lastUsedAt: number }>();
+		for (const [provider, pin] of fold.pins) pins.set(provider, { ...pin });
+		return { ...fold, controls: cloneSessionContextControlState(fold.controls), pins };
+	}
+
+	#foldEntry(entry: SessionEntry): void {
+		const position = this.#fold.entryCount++;
+		if (entry.type === "compaction") {
+			this.#fold.latestCompaction = entry;
+			this.#fold.modelUsageStart = this.#fold.modelUsage ? this.#modelUsageWindowStart(entry, position) : position + 1;
+		} else if (entry.type === "reset_boundary") {
+			this.#fold.modelUsageStart = position + 1;
+		} else if (entry.type === "model_usage") {
+			this.#fold.modelUsage = { entry, position, previous: this.#fold.modelUsage };
+		} else if (entry.type === "message" && entry.message.role === "toolResult") {
+			this.#fold.hasToolResults = true;
+		}
+		applySessionContextControlEntry(this.#fold.controls, entry);
+		if (entry.type === "credential_pin") {
+			this.#fold.pins.set(entry.provider, { hash: entry.hash, lastUsedAt: new Date(entry.timestamp).getTime() });
+		} else if (entry.type === "message" && entry.message.role === "assistant") {
+			const pin = this.#fold.pins.get(entry.message.provider);
+			if (pin) pin.lastUsedAt = Math.max(pin.lastUsedAt, entry.message.timestamp);
+		}
+		this.#fold.id = entry.id;
+		if (entry.type === "reset_boundary" || entry.type === "compaction") {
+			this.#boundaryFold = this.#cloneFold(this.#fold);
+		}
+	}
+
+	// Preserve the statistics window: include metadata immediately before firstKept.
+	#modelUsageWindowStart(compaction: CompactionEntry, position: number): number {
+		let cursor: SessionEntry | undefined = compaction;
+		const seen = new Set<string>();
+		while (cursor && cursor.id !== compaction.firstKeptEntryId && !seen.has(cursor.id)) {
+			seen.add(cursor.id);
+			cursor = cursor.parentId ? this.#entriesById.get(cursor.parentId) : undefined;
+			position--;
+		}
+		if (!cursor || cursor.id !== compaction.firstKeptEntryId) return this.#fold.entryCount;
+		let previous = cursor.parentId ? this.#entriesById.get(cursor.parentId) : undefined;
+		while (previous && !seen.has(previous.id)) {
+			if (
+				previous.type === "message" ||
+				previous.type === "custom_message" ||
+				previous.type === "branch_summary" ||
+				previous.type === "compaction" ||
+				previous.type === "reset_boundary"
+			) break;
+			seen.add(previous.id);
+			position--;
+			previous = previous.parentId ? this.#entriesById.get(previous.parentId) : undefined;
+		}
+		return position;
+	}
+
+	activeModelUsageEntries(): readonly ModelUsageEntry[] {
+		const fold = this.branchFold();
+		const entries: ModelUsageEntry[] = [];
+		for (let usage = fold.modelUsage; usage && usage.position >= fold.modelUsageStart; usage = usage.previous) {
+			entries.push(usage.entry);
+		}
+		return entries.reverse();
+	}
+
+	branchFold(fromId: string | null = this.#leaf): SessionBranchFold {
+		if (this.#fold.id === fromId) return this.#fold;
+		const pending: SessionEntry[] = [];
+		const seen = new Set<string>();
+		let cursor = fromId ? this.#entriesById.get(fromId) : undefined;
+		while (cursor && !seen.has(cursor.id) && cursor.id !== this.#fold.id && cursor.id !== this.#boundaryFold?.id) {
+			seen.add(cursor.id);
+			pending.push(cursor);
+			cursor = cursor.parentId ? this.#entriesById.get(cursor.parentId) : undefined;
+		}
+		if (cursor?.id === this.#boundaryFold?.id && this.#boundaryFold) this.#fold = this.#cloneFold(this.#boundaryFold);
+		else if (!cursor || cursor.id !== this.#fold.id) this.#fold = this.#emptyFold();
+		for (let i = pending.length - 1; i >= 0; i--) this.#foldEntry(pending[i]);
+		return this.#fold;
+	}
+
+	assistantUsageSnapshot(): UsageStatistics {
+		return { ...this.#assistantUsage };
+	}
+
+	#sourceContextPath(compaction: CompactionEntry, fold: SessionBranchFold): NonNullable<SessionBranchFold["sourceContext"]> {
+		if (fold.sourceContext?.compactionId === compaction.id) return fold.sourceContext;
+		const representation = getCompactionSourceRepresentation(compaction.preserveData)!;
+		const ancestry = this.pathTo(compaction.id);
+		let reset = -1;
+		let firstKept = -1;
+		let through = -1;
+		for (let i = 0; i < ancestry.length; i++) {
+			const entry = ancestry[i];
+			if (entry.type === "reset_boundary") reset = i;
+			if (entry.id === compaction.firstKeptEntryId) firstKept = i;
+			if (entry.id === representation.throughEntryId) through = i;
+		}
+		const referenced = new Set<string>();
+		for (const part of representation.layout) if ("entryId" in part) referenced.add(part.entryId);
+		for (const run of representation.coverage) referenced.add(run.entryId);
+		const request = fold.controls.rolloverUserRequest;
+		if (request) referenced.add(request.id);
+		const path: SessionEntry[] = [];
+		const before = new Map<string, number>();
+		const orders = new Map<string, number>();
+		let total = 0;
+		for (let i = Math.max(0, reset); i < ancestry.length; i++) {
+			const entry = ancestry[i];
+			const ordinary = representation.throughEntryId ? through >= 0 && i > through : firstKept >= 0 && i >= firstKept;
+			if (i === reset || entry.id === compaction.id || i === through || ordinary || referenced.has(entry.id)) {
+				path.push(entry);
+				before.set(entry.id, total);
+				orders.set(entry.id, i);
+			}
+			if (entry.type === "message" || entry.type === "custom_message") total++;
+		}
+		const sourceContext = { compactionId: compaction.id, path, inventory: { before, orders, total } };
+		fold.sourceContext = sourceContext;
+		if (this.#boundaryFold?.id === compaction.id) this.#boundaryFold.sourceContext = sourceContext;
+		return sourceContext;
+	}
+
+	/** Walk only actual replay; the existing boundary fold holds cold source inventory. */
+	contextPath(options?: BuildSessionContextOptions, fromId: string | null = this.#leaf): {
+		path: SessionEntry[]; controls: SessionContextControlState; inventory?: SessionContextSourceInventory;
+	} {
+		const fold = this.branchFold(fromId);
+		const path: SessionEntry[] = [];
+		const seen = new Set<string>();
+		let cursor = fromId ? this.#entriesById.get(fromId) : undefined;
+		let compaction: CompactionEntry | undefined;
+		let first: string | undefined;
+		while (cursor && !seen.has(cursor.id)) {
+			seen.add(cursor.id);
+			path.push(cursor);
+			if (!compaction) {
+				if (cursor.type === "reset_boundary") break;
+				if (cursor.type === "compaction") {
+					compaction = cursor;
+					if (!options?.transcript && getOpenAiRemoteCompactionPayload(compaction)) {
+						first = compaction.providerReplayThroughEntryId;
+						if (!first) break;
+					} else if (getCompactionSourceRepresentation(compaction.preserveData) && !getOpenAiRemoteCompactionPayload(compaction)) {
+						const source = this.#sourceContextPath(compaction, fold);
+						const result = source.path.slice();
+						for (let i = path.length - 2; i >= 0; i--) result.push(path[i]);
+						return { path: result, controls: fold.controls, inventory: source.inventory };
+					} else first = compaction.firstKeptEntryId;
+				}
+			}
+			if (compaction && cursor.id === first) break;
+			cursor = cursor.parentId ? this.#entriesById.get(cursor.parentId) : undefined;
+		}
+		path.reverse();
+		// A plain notes boundary may have cut past its request. Recover only that
+		// entry from the existing branch fold, not the entire discarded turn.
+		const request = !options?.transcript && compaction ? fold.controls.rolloverUserRequest : undefined;
+		if (request && !seen.has(request.id)) path.unshift(request);
+		return { path, controls: fold.controls };
+	}
 
 	clear(): void {
 		this.#entriesById.clear();
+		this.#messagesByPersistenceKey.clear();
 		this.#children.clear();
 		this.#labels.clear();
 		this.#leaf = null;
 		this.#usage = emptyUsageStatistics();
+		this.#assistantUsage = emptyUsageStatistics();
+		this.#fold = this.#emptyFold();
+		this.#boundaryFold = undefined;
 	}
 
 	rebuild(entries: readonly SessionEntry[]): void {
 		this.clear();
+		this.#rebuilding = true;
 		for (const entry of entries) this.insert(entry);
+		this.#rebuilding = false;
+		this.branchFold();
 	}
 
 	insert(entry: SessionEntry): void {
 		this.#entriesById.set(entry.id, entry);
 		this.#leaf = entry.id;
+		if (entry.type === "message") {
+			const key = sessionMessagePersistenceKey(entry.message);
+			if (key !== undefined) {
+				const existing = this.#messagesByPersistenceKey.get(key);
+				if (!existing) this.#messagesByPersistenceKey.set(key, entry);
+				else if (Array.isArray(existing)) existing.push(entry);
+				else this.#messagesByPersistenceKey.set(key, [existing, entry]);
+			}
+		}
 
 		const bucket = this.#children.get(entry.parentId);
 		if (bucket) bucket.push(entry);
@@ -439,7 +672,13 @@ class SessionEntryIndex {
 			else this.#labels.delete(entry.targetId);
 		}
 
-		addUsage(this.#usage, entryUsage(entry));
+		const usage = entryUsage(entry);
+		addUsage(this.#usage, usage);
+		if (entry.type === "message" && entry.message.role === "assistant") addUsage(this.#assistantUsage, usage);
+		if (!this.#rebuilding) {
+			if (entry.parentId === this.#fold.id) this.#foldEntry(entry);
+			else if (entry.type === "compaction" || entry.type === "reset_boundary") this.branchFold();
+		}
 	}
 
 	has(id: string): boolean {
@@ -448,6 +687,27 @@ class SessionEntryIndex {
 
 	get(id: string): SessionEntry | undefined {
 		return this.#entriesById.get(id);
+	}
+
+	hasMessageWithPersistenceKey(key: string, message?: AgentMessage): boolean {
+		let entries = this.#messagesByPersistenceKey.get(key);
+		if (!entries) return false;
+		if (message !== undefined) {
+			if (Array.isArray(entries)) {
+				entries = entries.filter(entry => sameMessageContent(entry.message, message));
+				if (entries.length === 0) return false;
+			} else if (!sameMessageContent(entries.message, message)) return false;
+		}
+		const seen = new Set<string>();
+		let cursor = this.leafEntry();
+		while (cursor && !seen.has(cursor.id)) {
+			if (cursor.type === "message" && (Array.isArray(entries) ? entries.includes(cursor) : cursor === entries)) {
+				return true;
+			}
+			seen.add(cursor.id);
+			cursor = cursor.parentId ? this.#entriesById.get(cursor.parentId) : undefined;
+		}
+		return false;
 	}
 
 	/**
@@ -470,7 +730,7 @@ class SessionEntryIndex {
 		this.#leaf = id;
 	}
 
-	childrenOf(parentId: string): SessionEntry[] {
+	childrenOf(parentId: string | null): SessionEntry[] {
 		return [...(this.#children.get(parentId) ?? [])];
 	}
 
@@ -731,7 +991,7 @@ export class SessionManager {
 	 * `null` outside an active relocation.
 	 */
 	#sessionFileRelocating: { source: string; dest: string } | null = null;
-	/** Atomic entry batch currently staged for a full-file commit. */
+	/** Atomic entry batch currently staged for publication. */
 	#atomicEntryBatch: AtomicEntryBatch | undefined;
 
 	#artifactManager: ArtifactManager | null = null;
@@ -957,6 +1217,7 @@ export class SessionManager {
 						commitGuard: () => !this.#released && this.#diskEpoch === epoch,
 					});
 				} catch (error) {
+					if (error instanceof SessionWriteConflictError) throw this.#latchIndeterminate(operationError, [error]);
 					const recoveryErrors = [toError(error)];
 					try {
 						await this.#storage.drain();
@@ -975,12 +1236,12 @@ export class SessionManager {
 						throw this.#latchIndeterminate(operationError, recoveryErrors);
 					}
 				}
-				this.#recordFullRewrite(body);
-				if (this.#diskEpoch !== epoch) {
+				if (this.#released || this.#diskEpoch !== epoch) {
 					throw this.#latchIndeterminate(operationError, [
 						new Error("Authoritative session repair was superseded before verification."),
 					]);
 				}
+				this.#recordFullRewrite(body);
 			} while (this.#atomicRewriteDirty);
 
 			this.#fileIsCurrent = true;
@@ -1036,22 +1297,21 @@ export class SessionManager {
 	 * publish can queue behind the unconfirmed one.
 	 */
 	#confirmDeferredPublish(sessionFile: string, onConfirm?: () => void): void {
+		const sessionId = this.#sessionId;
+		const generation = this.#deferredPublishGen;
 		const confirmed = this.#storage.confirmWrites?.(sessionFile);
 		if (!confirmed) return;
 		void confirmed
 			.then(() => {
+				if (this.#released || sessionId !== this.#sessionId || generation !== this.#deferredPublishGen) return;
 				onConfirm?.();
 			})
 			.catch(err => {
+				if (this.#released || sessionId !== this.#sessionId || generation !== this.#deferredPublishGen) return;
 				this.#fileIsCurrent = false;
 				this.#rewriteRequired = true;
-				try {
-					this.#expectedDiskSize = this.#storage.existsSync(sessionFile)
-						? this.#storage.statSync(sessionFile).size
-						: null;
-				} catch {
-					// Backend unreadable: leave the record for the next write to re-establish.
-				}
+				// Failed or provisional storage metadata is not a durable CAS token.
+				// Keep the last loaded/confirmed size; never adopt an external turn.
 				this.#noteDiskFailure(err);
 			});
 	}
@@ -1175,23 +1435,24 @@ export class SessionManager {
 	}
 
 	/**
-	 * Rewrite the whole file atomically (temp-write + rename, EPERM-safe) on the
-	 * disk chain. The body is serialized after the writer is closed. The fence
-	 * is enabled BEFORE `#closeWriterHandle()` and stays active until the last
+	 * Publish atomically (temp-write + rename, EPERM-safe) on the disk chain.
+	 * An append-only batch supplies its durable prefix length; other callers
+	 * rewrite the whole file. Serialization happens after the writer is closed.
+	 * The fence is enabled BEFORE `#closeWriterHandle()` and stays active until the last
 	 * atomic publish returns, so a sync append landing in the close-yield window
 	 * cannot open a fresh writer that the pending replacement would then detach
 	 * from the current JSONL path. A `commitGuard` also prevents a superseding
 	 * synchronous rewrite from being overwritten by the stale body serialized
 	 * before it ran.
 	 */
-	async #rewriteAtomically(): Promise<void> {
+	async #rewriteAtomically(appendFrom?: number): Promise<void> {
 		if (!this.#persist || !this.#sessionFile) return;
 		if (this.#released) return;
 
 		const startEpoch = this.#diskEpoch;
 		await this.#scheduleDiskWork(
 			async () => {
-				if (await this.#runFencedAtomicRewrite(startEpoch)) {
+				if (await this.#runFencedAtomicRewrite(startEpoch, appendFrom)) {
 					this.#fileIsCurrent = true;
 					this.#materializeBreadcrumb();
 					this.#rewriteRequired = false;
@@ -1204,14 +1465,14 @@ export class SessionManager {
 
 	/**
 	 * Shared fenced atomic-rewrite loop used by `#rewriteAtomically` and the
-	 * `#persistTitleChangeEntry` fallback. Holds `#atomicRewriteActive` across
-	 * the writer close and the full-file replace, and loops on
-	 * `#atomicRewriteDirty` so any fenced append that lands during the rewrite
-	 * is captured before the task resolves. Returns `false` when the disk epoch
+	 * `#persistTitleChangeEntry` fallback. Holds the epoch fence across writer
+	 * close and publication, and loops on `#atomicRewriteDirty` so a fenced
+	 * append landing during publication is captured before the task resolves.
+	 * Returns `false` when the disk epoch
 	 * moved (a superseding synchronous rewrite has taken over) so callers skip
 	 * their post-publish state updates.
 	 */
-	async #runFencedAtomicRewrite(epoch: number): Promise<boolean> {
+	async #runFencedAtomicRewrite(epoch: number, appendFrom?: number): Promise<boolean> {
 		if (this.#released) return false;
 		this.#atomicRewriteFenceEpoch = epoch;
 		try {
@@ -1221,22 +1482,55 @@ export class SessionManager {
 				const sessionFile = this.#sessionFile;
 				if (!sessionFile) return false;
 				if (this.#diskEpoch !== epoch) return false;
-				const body = this.#fileBody();
-				try {
-					await this.#storage.writeTextAtomic(sessionFile, body, {
-						expectedSize: this.#expectedDiskSize,
-						commitGuard: () => !this.#released && this.#diskEpoch === epoch,
-					});
-				} catch (error) {
+				const options = {
+					expectedSize: this.#expectedDiskSize,
+					commitGuard: () => !this.#released && this.#diskEpoch === epoch,
+				};
+				if (appendFrom === undefined) {
+					const body = this.#fileBody();
 					try {
-						if ((await this.#storage.readText(sessionFile)) === body) this.#recordFullRewrite(body);
-					} catch {
-						// Preserve the publish error when durable state cannot be read back.
+						await this.#storage.writeTextAtomic(sessionFile, body, options);
+					} catch (error) {
+						if (error instanceof SessionWriteConflictError) throw error;
+						try {
+							if (options.commitGuard() && (await this.#storage.readText(sessionFile)) === body && options.commitGuard()) this.#recordFullRewrite(body);
+						} catch {
+							// Preserve the publish error when durable state cannot be read back.
+						}
+						throw error;
 					}
-					throw error;
+					if (!options.commitGuard()) return false;
+					this.#recordFullRewrite(body);
+				} else {
+					// Serialize only the unpublished tail; appends during publication
+					// dirty the fence and belong to the next confirmed suffix.
+					const end = this.#entries.length;
+					if (appendFrom < end) {
+						let suffix = "";
+						for (let i = appendFrom; i < end; i++) suffix += this.#lineFor(this.#entries[i]);
+						try {
+							await this.#storage.appendTextAtomic(sessionFile, suffix, options);
+						} catch (error) {
+							if (error instanceof SessionWriteConflictError) throw error;
+							// A lost acknowledgement may follow a successful publication.
+							// Verify only that exact suffix before rollback uses its CAS token.
+							try {
+								const suffixSize = Buffer.byteLength(suffix, "utf8");
+								const [, tail] = await this.#storage.readTextSlices(sessionFile, 0, suffixSize);
+								if (options.commitGuard() && tail === suffix &&
+									this.#storage.statSync(sessionFile).size === (options.expectedSize ?? 0) + suffixSize) {
+									this.#recordDurableAppend(suffix);
+								}
+							} catch {
+								// Preserve the publication failure if readback is unavailable.
+							}
+							throw error;
+						}
+						if (!options.commitGuard()) return false;
+						this.#recordDurableAppend(suffix);
+						appendFrom = end;
+					}
 				}
-				if (this.#diskEpoch !== epoch) return false;
-				this.#recordFullRewrite(body);
 			} while (this.#atomicRewriteDirty);
 			return true;
 		} finally {
@@ -1341,11 +1635,17 @@ export class SessionManager {
 				// the line: a lost publish must not leave the record describing bytes
 				// the store never accepted, or the next recovery rewrite hands the
 				// backend CAS an impossible `expectedSize`.
+				const sessionId = this.#sessionId;
+				const generation = this.#deferredPublishGen;
 				if (writer.appendSync) writer.appendSync(line);
 				const confirmed = writer.appendSync ? writer.flush() : writer.append(line);
 				void confirmed
-					.then(() => this.#recordDurableAppend(line))
+					.then(() => {
+						if (this.#released || sessionId !== this.#sessionId || generation !== this.#deferredPublishGen) return;
+						this.#recordDurableAppend(line);
+					})
 					.catch(err => {
+						if (this.#released || sessionId !== this.#sessionId || generation !== this.#deferredPublishGen) return;
 						this.#fileIsCurrent = false;
 						this.#rewriteRequired = true;
 						this.#noteDiskFailure(err);
@@ -1428,6 +1728,8 @@ export class SessionManager {
 	}
 
 	#resetToNewSession(options?: NewSessionOptions, forcedSessionFile?: string): string | undefined {
+		this.#diskEpoch++;
+		this.#deferredPublishGen++;
 		this.#diskTail = Promise.resolve();
 		this.#clearDiskError();
 		this.#expectedDiskSize = null;
@@ -1669,6 +1971,8 @@ export class SessionManager {
 	}
 
 	restoreState(snapshot: SessionManagerStateSnapshot): void {
+		this.#diskEpoch++;
+		this.#deferredPublishGen++;
 		this.#closeWriterEventually();
 		this.#diskTail = Promise.resolve();
 		this.#clearDiskError();
@@ -2074,11 +2378,11 @@ export class SessionManager {
 	}
 
 	/**
-	 * Stage a synchronous group of entry appends and publish the resulting full
-	 * journal with one atomic replace. A failed publish removes only the staged
-	 * entries, preserves/reparents entries appended concurrently, restores the
-	 * prior durable file view, and clears the failed writer latch for retry.
-	 *
+	 * Stage a synchronous group of entry appends and publish the whole batch as
+	 * one atomic suffix without reserializing durable history. A failed publish
+	 * removes only the staged entries, preserves/reparents concurrent appends,
+	 * restores the prior durable file view, and clears the failed writer latch
+	 * for retry.
 	 * The callback MUST be synchronous.
 	 */
 	appendEntriesAtomically<T>(append: () => T): Promise<T> {
@@ -2098,6 +2402,8 @@ export class SessionManager {
 			throw error;
 		}
 
+		// All entries through this cursor are durable, including appends during flush.
+		const appendFrom = this.#entries.length;
 		const batch: AtomicEntryBatch = {
 			collecting: true,
 			entryIds: new Set(),
@@ -2114,7 +2420,7 @@ export class SessionManager {
 			} finally {
 				batch.collecting = false;
 			}
-			await this.#rewriteAtomically();
+			await this.#rewriteAtomically(appendFrom);
 			if (!this.#fileIsCurrent || this.#rewriteRequired) {
 				throw new Error("Atomic session batch was superseded before commit.");
 			}
@@ -2439,6 +2745,11 @@ export class SessionManager {
 		return this.#index.usageSnapshot();
 	}
 
+	/** Cumulative top-level assistant spend, excluding task and background model usage. */
+	getAssistantUsageStatistics(): UsageStatistics {
+		return this.#index.assistantUsageSnapshot();
+	}
+
 	/**
 	 * Open a new per-turn budget window: snapshot the cumulative output baseline,
 	 * reset the eval-subagent counter, and set the (optional) ceiling.
@@ -2697,8 +3008,35 @@ export class SessionManager {
 			| BashExecutionMessage
 			| PythonExecutionMessage
 			| FileMentionMessage,
+		options?: { compactionOverride?: "keep" | "exclude" },
 	): string {
+		if ((message.role === "user" || message.role === "custom") && message.originalSubmission) {
+			const original = message.originalSubmission;
+			const content = message.content;
+			const images = original.images;
+			const sameContent = typeof content === "string"
+				? content === original.text && !images?.length
+				: content.length === 1 + (images?.length ?? 0) && content[0]?.type === "text" && content[0].text === original.text &&
+					(!images || images.every((image, index) => {
+						const delivered = content[index + 1];
+						return delivered?.type === "image" && delivered.data === image.data && delivered.mimeType === image.mimeType;
+					}));
+			const deliveredLinks = message.imageLinks;
+			const sameLinks = original.imageLinks === deliveredLinks ||
+				(original.imageLinks?.length === deliveredLinks?.length &&
+					original.imageLinks?.every((link, index) => link === deliveredLinks?.[index]));
+			if (sameContent && sameLinks && original.compactionOverride === message.compactionOverride) {
+				const { originalSubmission: _original, ...delivered } = message;
+				message = delivered;
+			}
+		}
 		const entry: SessionMessageEntry = { type: "message", ...this.#freshEntryFields(), message };
+		if (message.role === "user") {
+			entry.sourceOrigin = { journalId: this.#sessionId, entryId: entry.id };
+		}
+		if ((message.role === "user" || message.role === "custom") && options?.compactionOverride) {
+			entry.compactionOverride = options.compactionOverride;
+		}
 		this.#recordEntry(entry);
 		return entry.id;
 	}
@@ -2830,6 +3168,7 @@ export class SessionManager {
 			method?: CompactionMethod;
 			providerReplayThroughEntryId?: string;
 			tokensAfter?: number;
+			diagnostics?: CompactionDiagnostics;
 		} = {},
 	): string {
 		const entry: CompactionEntry<T> = {
@@ -2845,6 +3184,7 @@ export class SessionManager {
 			details: options.details,
 			fromExtension: options.fromExtension,
 			preserveData: options.preserveData,
+			diagnostics: options.diagnostics,
 		};
 		this.#recordEntry(entry);
 		return entry.id;
@@ -2868,11 +3208,23 @@ export class SessionManager {
 		return entry.id;
 	}
 
-	/**
-	 * Rewrite the session file after in-place entry updates (e.g. pruning old tool
-	 * outputs). Use sparingly.
-	 */
-	async rewriteEntries(): Promise<void> {
+	/** Publish source bytes, artifact coverage and classifier validity in one journal rewrite. */
+	async rewriteEntries(
+		rewrites: readonly SourceRewrite[] = [],
+		applySourceRewrites?: () => void,
+		onAffected?: (entryIds: readonly string[]) => void,
+	): Promise<void> {
+		if (this.#released) return;
+		if (rewrites.length > 0 && !applySourceRewrites) {
+			throw new Error("Source rewrite maps require a synchronous source mutation callback");
+		}
+		const affected = applySourceRewrites
+			? rewriteSessionSources(this.#entries, rewrites, applySourceRewrites, id => this.#index.get(id), id => this.#index.childrenOf(id))
+			: [];
+		const leaf = this.#index.leafId();
+		this.#index.rebuild(this.#entries);
+		this.#index.setLeaf(leaf);
+		onAffected?.(affected);
 		if (!this.#persist || !this.#sessionFile) return;
 		await this.#rewriteAtomically();
 	}
@@ -2958,14 +3310,7 @@ export class SessionManager {
 	 */
 	getCredentialPins(): Map<string, { hash: string; lastUsedAt: number }> {
 		const pins = new Map<string, { hash: string; lastUsedAt: number }>();
-		for (const entry of this.getBranch()) {
-			if (entry.type === "credential_pin") {
-				pins.set(entry.provider, { hash: entry.hash, lastUsedAt: new Date(entry.timestamp).getTime() });
-			} else if (entry.type === "message" && entry.message.role === "assistant") {
-				const pin = pins.get(entry.message.provider);
-				if (pin) pin.lastUsedAt = Math.max(pin.lastUsedAt, entry.message.timestamp);
-			}
-		}
+		for (const [provider, pin] of this.#index.branchFold().pins) pins.set(provider, { ...pin });
 		return pins;
 	}
 
@@ -2995,7 +3340,7 @@ export class SessionManager {
 	}
 
 	/** All direct children of an entry. */
-	getChildren(parentId: string): SessionEntry[] {
+	getChildren(parentId: string | null): SessionEntry[] {
 		return this.#index.childrenOf(parentId);
 	}
 
@@ -3014,6 +3359,26 @@ export class SessionManager {
 		return entry.id;
 	}
 
+	/** Latest branch compaction, including one before a later reset boundary. */
+	getLatestCompactionEntry(): CompactionEntry | null {
+		return this.#index.branchFold().latestCompaction;
+	}
+
+	/** Conservative eligibility for whole-branch tool-output maintenance. */
+	hasBranchToolResults(): boolean {
+		return this.#index.branchFold().hasToolResults;
+	}
+
+	/** Sparse model calls in the current statistics window, in branch order. */
+	getActiveModelUsageEntries(): readonly ModelUsageEntry[] {
+		return this.#index.activeModelUsageEntries();
+	}
+
+	/** Current-branch persistence identity; optional content disambiguates key collisions. */
+	hasMessageWithPersistenceKey(key: string, message?: AgentMessage): boolean {
+		return this.#index.hasMessageWithPersistenceKey(key, message);
+	}
+
 	/**
 	 * Walk from an entry to root, returning entries in path order. Includes all
 	 * entry types; use buildSessionContext() for the resolved LLM messages.
@@ -3027,10 +3392,15 @@ export class SessionManager {
 	 * the full-history display transcript, from the current leaf path.
 	 */
 	buildSessionContext(options?: BuildSessionContextOptions): SessionContext {
-		return buildSessionContext(this.#entries, this.#index.leafId(), this.#index.entriesById(), {
-			resolveFrameData: data => lazyImageDataSync(this.#blobs, data),
+		const resolvedOptions = {
+			resolveFrameData: (data: string) => lazyImageDataSync(this.#blobs, data),
 			...options,
-		});
+		};
+		if (options?.transcript && !options.collapseCompactedHistory) {
+			return buildSessionContext(this.#entries, this.#index.leafId(), this.#index.entriesById(), resolvedOptions);
+		}
+		const context = this.#index.contextPath(resolvedOptions);
+		return buildSessionContextFromPath(context.path, resolvedOptions, context.controls, context.inventory);
 	}
 
 	/** Strip stale OpenAI Responses assistant replay metadata from loaded entries. */

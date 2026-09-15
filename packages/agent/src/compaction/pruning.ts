@@ -259,7 +259,21 @@ export function pruneSupersededToolResults(
 	tokenizer: Tokenizer,
 	config: SupersedePruneConfig,
 	rewrite?: (maps: readonly SourceRewrite[], apply: () => void) => void,
-): PruneResult {
+): PruneResult;
+export function pruneSupersededToolResults(
+	entries: SessionEntry[],
+	tokenizer: Tokenizer,
+	config: SupersedePruneConfig,
+	rewrite: ((maps: readonly SourceRewrite[], apply: () => void) => void) | undefined,
+	prepareProtection: () => Promise<Pick<ReadonlySet<string>, "has">>,
+): PruneResult | Promise<PruneResult>;
+export function pruneSupersededToolResults(
+	entries: SessionEntry[],
+	tokenizer: Tokenizer,
+	config: SupersedePruneConfig,
+	rewrite?: (maps: readonly SourceRewrite[], apply: () => void) => void,
+	prepareProtection?: () => Promise<Pick<ReadonlySet<string>, "has">>,
+): PruneResult | Promise<PruneResult> {
 	const toolCallsById = collectToolCallsById(entries);
 	const candidates = config.supersedeKey
 		? collectSupersededResults(entries, tokenizer, toolCallsById, config.supersedeKey, config.protectedTools)
@@ -309,31 +323,57 @@ export function pruneSupersededToolResults(
 	}
 	if (toPrune.length === 0) return { prunedCount: 0, tokensSaved: 0 };
 
-	const prunedAt = Date.now();
-	let tokensSaved = 0;
-	const apply = () => {
-		for (const candidate of toPrune) {
-			candidate.message.content = [{ type: "text", text: candidate.notice }];
-			candidate.message.prunedAt = prunedAt;
-			invalidateMessageCache(candidate.message as AgentMessage);
-			tokensSaved += estimatePrunedSavings(candidate.tokens, candidate.notice);
+	const finish = (protectedIds?: Pick<ReadonlySet<string>, "has">): PruneResult => {
+		if (protectedIds) {
+			let retained = 0;
+			for (const candidate of toPrune) {
+				if (!protectedIds.has(candidate.entry.id)) toPrune[retained++] = candidate;
+			}
+			toPrune.length = retained;
 		}
+		if (toPrune.length === 0) return { prunedCount: 0, tokensSaved: 0 };
+		const prunedAt = Date.now();
+		let tokensSaved = 0;
+		const apply = () => {
+			for (const candidate of toPrune) {
+				candidate.message.content = [{ type: "text", text: candidate.notice }];
+				candidate.message.prunedAt = prunedAt;
+				invalidateMessageCache(candidate.message as AgentMessage);
+				tokensSaved += estimatePrunedSavings(candidate.tokens, candidate.notice);
+			}
+		};
+		if (rewrite) {
+			rewrite(toPrune.map(candidate => ({
+				entryId: candidate.entry.id,
+				blocks: candidate.message.content.map((_, oldBlockIndex) => ({ oldBlockIndex, newBlockIndex: null })),
+			})), apply);
+		} else apply();
+		return { prunedCount: toPrune.length, tokensSaved };
 	};
-	if (rewrite) {
-		rewrite(toPrune.map(candidate => ({
-			entryId: candidate.entry.id,
-			blocks: candidate.message.content.map((_, oldBlockIndex) => ({ oldBlockIndex, newBlockIndex: null })),
-		})), apply);
-	} else apply();
-	return { prunedCount: toPrune.length, tokensSaved };
+	// Ordinary turns without a real victim never prepare the source policy index.
+	return prepareProtection ? prepareProtection().then(finish) : finish();
 }
 
 export function pruneToolOutputs(
 	entries: SessionEntry[],
 	tokenizer: Tokenizer,
+	config?: PruneConfig,
+	rewrite?: (maps: readonly SourceRewrite[], apply: () => void) => void,
+): PruneResult;
+export function pruneToolOutputs(
+	entries: SessionEntry[],
+	tokenizer: Tokenizer,
+	config: PruneConfig,
+	rewrite: ((maps: readonly SourceRewrite[], apply: () => void) => void) | undefined,
+	prepareProtection: () => Promise<Pick<ReadonlySet<string>, "has">>,
+): PruneResult | Promise<PruneResult>;
+export function pruneToolOutputs(
+	entries: SessionEntry[],
+	tokenizer: Tokenizer,
 	config: PruneConfig = DEFAULT_PRUNE_CONFIG,
 	rewrite?: (maps: readonly SourceRewrite[], apply: () => void) => void,
-): PruneResult {
+	prepareProtection?: () => Promise<Pick<ReadonlySet<string>, "has">>,
+): PruneResult | Promise<PruneResult> {
 	let accumulatedTokens = 0;
 	let tokensSaved = 0;
 	let prunedCount = 0;
@@ -423,29 +463,49 @@ export function pruneToolOutputs(
 		return { prunedCount: 0, tokensSaved: 0 };
 	}
 
-	const prunedAt = Date.now();
-	const apply = () => {
-		for (const candidate of candidates) {
-			const message = candidate.entry.message as ToolResultMessage;
-			const notice = candidate.superseded
-				? SUPERSEDED_NOTICE
-				: candidate.useless
-					? USELESS_NOTICE
-					: createPrunedNotice(candidate.tokens);
-			message.content = [{ type: "text", text: notice }];
-			message.prunedAt = prunedAt;
-			invalidateMessageCache(message as AgentMessage);
-			prunedCount++;
+	const finish = (protectedIds?: Pick<ReadonlySet<string>, "has">): PruneResult => {
+		if (protectedIds) {
+			let retained = 0;
+			for (const candidate of candidates) {
+				if (protectedIds.has(candidate.entry.id)) {
+					tokensSaved -= estimatePrunedSavings(
+						candidate.tokens,
+						candidate.superseded
+							? SUPERSEDED_NOTICE
+							: candidate.useless
+								? USELESS_NOTICE
+								: createPrunedNotice(candidate.tokens),
+					);
+				} else candidates[retained++] = candidate;
+			}
+			candidates.length = retained;
+			if (tokensSaved < config.minimumSavings || retained === 0) return { prunedCount: 0, tokensSaved: 0 };
 		}
+		const prunedAt = Date.now();
+		const apply = () => {
+			for (const candidate of candidates) {
+				const message = candidate.entry.message as ToolResultMessage;
+				const notice = candidate.superseded
+					? SUPERSEDED_NOTICE
+					: candidate.useless
+						? USELESS_NOTICE
+						: createPrunedNotice(candidate.tokens);
+				message.content = [{ type: "text", text: notice }];
+				message.prunedAt = prunedAt;
+				invalidateMessageCache(message as AgentMessage);
+				prunedCount++;
+			}
+		};
+		if (rewrite) {
+			rewrite(candidates.map(candidate => ({
+				entryId: candidate.entry.id,
+				blocks: (candidate.entry.message as ToolResultMessage).content.map((_, oldBlockIndex) => ({ oldBlockIndex, newBlockIndex: null })),
+			})), apply);
+		} else apply();
+	
+		return { prunedCount, tokensSaved };
 	};
-	if (rewrite) {
-		rewrite(candidates.map(candidate => ({
-			entryId: candidate.entry.id,
-			blocks: (candidate.entry.message as ToolResultMessage).content.map((_, oldBlockIndex) => ({ oldBlockIndex, newBlockIndex: null })),
-		})), apply);
-	} else apply();
-
-	return { prunedCount, tokensSaved };
+	return prepareProtection ? prepareProtection().then(finish) : finish();
 }
 
 /**
