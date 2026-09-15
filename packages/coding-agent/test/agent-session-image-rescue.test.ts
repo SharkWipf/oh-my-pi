@@ -43,7 +43,9 @@ async function createRescueFixture(tailImage: boolean, middleCharacters = 1_000_
 		data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6mQAAAABJRU5ErkJggg==",
 	};
 	const firstId = manager.appendMessage({
-		role: "user", content: [{ type: "text", text: "A".repeat(5_000) }, { ...image }], timestamp: 1,
+		role: "user",
+		content: [{ type: "text", text: "A".repeat(5_000) }, { ...image }],
+		timestamp: 1,
 	});
 	manager.appendMessage({ role: "user", content: "B".repeat(middleCharacters), timestamp: 2 });
 	const tailId = manager.appendMessage({
@@ -54,7 +56,6 @@ async function createRescueFixture(tailImage: boolean, middleCharacters = 1_000_
 	const auth = createInMemoryAuthStorage();
 	auth.setRuntimeApiKey("openai", "isolated-no-provider");
 	const settings = Settings.isolated({
-		"requirements.enabled": false,
 		"snapcompact.shape": "8x13-bw",
 		"compaction.methodOrder": ["snapcompact"],
 		"compaction.keepUserMessages": true,
@@ -73,9 +74,16 @@ async function createRescueFixture(tailImage: boolean, middleCharacters = 1_000_
 	});
 	const agent = new Agent({
 		initialState: { model, messages: manager.buildSessionContext().messages, systemPrompt: [], tools: [] },
-		streamFn: () => { throw Error("No provider call is allowed in local rescue"); },
+		streamFn: () => {
+			throw Error("No provider call is allowed in local rescue");
+		},
 	});
-	const session = new AgentSession({ agent, sessionManager: manager, settings, modelRegistry: new ModelRegistry(auth) });
+	const session = new AgentSession({
+		agent,
+		sessionManager: manager,
+		settings,
+		modelRegistry: new ModelRegistry(auth),
+	});
 	return { model, temp, manager, image, firstId, tailId, auth, settings, agent, session };
 }
 
@@ -102,9 +110,16 @@ async function runAutomaticCompaction({ session, agent, model }: RescueFixture) 
 		const assistant: AssistantMessage = {
 			role: "assistant",
 			content: [{ type: "text", text: "Controlled turn complete." }],
-			api: model.api, provider: model.provider, model: model.id, stopReason: "stop",
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "stop",
 			usage: {
-				input: 90_000, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 90_001,
+				input: 90_000,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 90_001,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			},
 			// Must follow any real manual compaction used to prepare the rescue input.
@@ -122,7 +137,7 @@ async function runAutomaticCompaction({ session, agent, model }: RescueFixture) 
 
 function originalImageCount({ agent, image }: RescueFixture): number {
 	return convertToLlm(agent.state.messages)
-		.flatMap(message => Array.isArray(message.content) ? message.content : [])
+		.flatMap(message => (Array.isArray(message.content) ? message.content : []))
 		.filter(block => block.type === "image" && block.data === image.data).length;
 }
 
@@ -136,8 +151,11 @@ test("automatic image rescue preserves selected originals but explicit image rem
 		assert(first?.type === "message" && "content" in first.message && Array.isArray(first.message.content));
 		assert(tail?.type === "message" && "content" in tail.message && Array.isArray(tail.message.content));
 		assert.equal(first.message.content.filter(block => block.type === "image").length, 1);
-		assert.equal(tail.message.content.filter(block => block.type === "image").length, 0,
-			"Automatic rescue must still remove unselected images");
+		assert.equal(
+			tail.message.content.filter(block => block.type === "image").length,
+			0,
+			"Automatic rescue must still remove unselected images",
+		);
 		assert.equal(originalImageCount(fixture), 1);
 		assert.equal((await session.dropImages()).removed, 1, "Explicit image removal overrides preservation");
 		assert.equal(originalImageCount(fixture), 0);
@@ -168,6 +186,9 @@ test("automatic frame rescue accepts a genuine reduction above the headroom band
 		settings.set("snapcompact.shape", "silver16-bw");
 		await session.compact(undefined, { mode: "snapcompact" });
 		settings.set("snapcompact.shape", "8x13-bw");
+		// The initial ordinary archive has already bounded the unselected middle.
+		// Exercise a smaller reframe that still exceeds the recovery band.
+		settings.set("compaction.thresholdTokens", 40_000);
 		await runAutomaticCompaction(fixture);
 		const entries = manager.getBranch().filter(entry => entry.type === "compaction");
 		const before = entries.at(-2);
@@ -177,7 +198,10 @@ test("automatic frame rescue accepts a genuine reduction above the headroom band
 		const afterArchive = getPreservedArchive(after.preserveData);
 		assert(beforeArchive && afterArchive);
 		const countOptions = { excludeEncryptedReasoning: true } as const;
-		const beforeTokens = agent.tokenizer.countMessages(buildSessionContext(manager.getBranch(before.id)).messages, countOptions);
+		const beforeTokens = agent.tokenizer.countMessages(
+			buildSessionContext(manager.getBranch(before.id)).messages,
+			countOptions,
+		);
 		const afterTokens = agent.tokenizer.countMessages(agent.state.messages, countOptions);
 		assert(afterArchive.frames.length < beforeArchive.frames.length);
 		assert(afterTokens < beforeTokens, "A genuinely smaller reconstructed context must remain admissible");
