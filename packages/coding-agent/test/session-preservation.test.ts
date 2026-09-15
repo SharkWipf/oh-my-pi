@@ -157,11 +157,46 @@ describe("durable manual preservation actions", () => {
 		});
 		f.storage.failDrain = true;
 		await expect(f.preservation.capturePreservedMessageOverrideReset()).rejects.toThrow("flush failed");
-		await expect(f.preservation.capturePreservedMessageOverrideReset()).rejects.toThrow("flush failed");
-		await f.manager.recoverPersistenceFromCurrentState();
 		const snapshot = await f.preservation.capturePreservedMessageOverrideReset();
 		expect(snapshot.groups[0]?.memberIds).toEqual([source]);
 		expect(f.changed).toEqual([]);
+	});
+
+	it("refuses capture recovery over a peer's durable turn", async () => {
+		const f = await fixture(manager => {
+			const source = user(manager, "original source");
+			manager.appendCustomEntry(MESSAGE_OVERRIDE_CUSTOM_TYPE, { messageIds: [source], state: "keep" });
+		});
+		f.storage.failDrain = true;
+		await expect(f.preservation.capturePreservedMessageOverrideReset()).rejects.toThrow("flush failed");
+		const file = f.manager.getSessionFile()!;
+		const peer = await SessionManager.open(file);
+		try {
+			user(peer, "durable peer turn");
+			await peer.ensureOnDisk();
+			await peer.flush();
+		} finally {
+			await peer.close();
+		}
+		const durable = fs.readFileSync(file, "utf8");
+		await expect(f.preservation.capturePreservedMessageOverrideReset()).rejects.toThrow();
+		expect(fs.readFileSync(file, "utf8")).toBe(durable);
+		expect(f.changed).toEqual([]);
+		// Reload for fixture disposal only; the user-facing retry above must refuse the conflict.
+		await f.manager.setSessionFile(file);
+	});
+
+	it("does not carry failed capture recovery into a different ownership scope", async () => {
+		const f = await fixture(manager => {
+			const source = user(manager, "original source");
+			manager.appendCustomEntry(MESSAGE_OVERRIDE_CUSTOM_TYPE, { messageIds: [source], state: "keep" });
+		});
+		f.storage.failDrain = true;
+		await expect(f.preservation.capturePreservedMessageOverrideReset()).rejects.toThrow("flush failed");
+		f.transition();
+		await expect(f.preservation.capturePreservedMessageOverrideReset()).rejects.toThrow("flush failed");
+		expect(f.changed).toEqual([]);
+		await f.manager.setSessionFile(f.manager.getSessionFile()!);
 	});
 
 	it("resets captured hidden sources, allows suffixes, and skips newer same-value journal revisions", async () => {

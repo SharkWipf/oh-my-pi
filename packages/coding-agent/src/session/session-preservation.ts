@@ -82,6 +82,7 @@ export class SessionPreservation {
 	readonly #actions = new WeakMap<PreservedMessageOverrideResetSnapshot, ResetAction>();
 	readonly #sets = new Map<string, { state: PreservationAction; snapshot: PreservedMessageOverrideResetSnapshot }>();
 	#tail: Promise<unknown> = Promise.resolve();
+	#failedCapture?: { sessionId: string; ownership: object };
 
 	constructor(host: SessionPreservationHost) {
 		this.#host = host;
@@ -125,8 +126,20 @@ export class SessionPreservation {
 				deadline = performance.now() + 4;
 			}
 		}
-		await this.#host.sessionManager.ensureOnDisk();
-		await this.#host.sessionManager.flush();
+		this.#validate(snapshot, action);
+		const failedCapture = this.#failedCapture;
+		this.#failedCapture = undefined;
+		try {
+			// A new user request may recover its own failed preflight, never an unrelated scope.
+			if (failedCapture?.sessionId === snapshot.sessionId && failedCapture.ownership === action.ownership) {
+				await this.#host.sessionManager.recoverPersistenceFromCurrentState();
+			}
+			await this.#host.sessionManager.ensureOnDisk();
+			await this.#host.sessionManager.flush();
+		} catch (error) {
+			this.#failedCapture = { sessionId: snapshot.sessionId, ownership: action.ownership };
+			throw error;
+		}
 		this.#validate(snapshot, action);
 		snapshot.groupCount = groups.length;
 		Object.freeze(groups);
