@@ -133,6 +133,10 @@
 ### Fixed
 
 - Preserved background message-classifier ownership across guarded session transitions, including vetoed navigation, while adopting nested configured role aliases without changing the default `@tiny` selector or success-only classification replacement.
+- Added `goal.injectAsUserMessage` to queue objective-only ordinary user follow-ups after successful goal tool creation, retaining host tool provenance without duplicate lifecycle or `/goal` injection. Provenance survives attributed, staged queued delivery independently of billing attribution; disabling the setting leaves historical messages unchanged.
+
+### Fixed
+
 - Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.
 ### Added
 

@@ -34,6 +34,14 @@ With an empty editor, press Escape twice to open rewind at the recent tail. Up/D
 
 Rewind uses journal-entry anchors rather than guessed global row numbers. Edge arrows indicate more history; cold history remains accessible without pre-rendering it. The first open indexes source descriptors cooperatively with a cancellable loading view. Only demanded transcript components are instantiated, and offscreen components are released. Reopening unchanged history reuses the source index and bounded last-visible window; source rewrites, branch changes, and relevant presentation changes invalidate that view. A single large message or grouped tool card still costs the work required by its own renderer.
 
+## Goal objective delivery
+
+`goal.injectAsUserMessage` (default `false`) is available under Settings → Tasks → Modes. When enabled, each successful `goal` tool `create` queues only the trimmed objective as an ordinary user follow-up. Budget, status, and progress remain in the existing goal runtime; they are not added to the user message.
+
+Delivery uses the normal session queue: a streaming run consumes the follow-up after its current work, while an idle session follows ordinary queue-drain rules. The message becomes durable when delivered, not when queued; restarting does not reconstruct undelivered objectives from saved goal state. Delivered messages keep their journal identity and tool-producer metadata on reload, with unchanged user-role rendering and billing attribution.
+
+`get`, `resume`, `complete`, `drop`, and direct `/goal` commands do not inject another objective. Turning the setting off affects future creates only; it does not rewrite history or add special goal retention. SDK tool hosts outside `createAgentSession` must provide `ToolSession.sendUserMessage` when enabling this option.
+
 ## Memory backends
 
 The agent supports three mutually-exclusive memory backends, selected via the `memory.backend` setting (Settings → Memory tab, or `~/.omp/config.yml`):

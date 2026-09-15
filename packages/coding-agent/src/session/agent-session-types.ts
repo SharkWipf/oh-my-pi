@@ -408,6 +408,7 @@ export interface SteerOptions {
 /** Options for AgentSession.sendUserMessage(). */
 export interface SendUserMessageOptions {
 	originalSubmission?: OriginalSubmission;
+	/** Host-recorded producer, separate from billing attribution. */
 	producer?: UserMessageProducer;
 	imageLinks?: (string | undefined)[];
 	compactionOverride?: "keep" | "exclude";
