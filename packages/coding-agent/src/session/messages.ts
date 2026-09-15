@@ -28,6 +28,7 @@ import {
 	transferSourceOrigin,
 	transferTransformedSourceOrigin,
 } from "@oh-my-pi/pi-ai/utils/source-origin";
+import { copyPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import userInterjectionTemplate from "../prompts/steering/user-interjection.md" with { type: "text" };
@@ -52,24 +53,59 @@ import { parseCompactionOverridePrompt } from "./preserved-message-settings";
 export function getOriginalSourceMessage(message: UserMessage): UserMessage {
 	const original = message.originalSubmission;
 	if (!original) return message;
-	const text = message.compactionOverride !== undefined
-		? parseCompactionOverridePrompt(original.text)?.text ?? original.text : original.text;
+	const text =
+		message.compactionOverride !== undefined
+			? (parseCompactionOverridePrompt(original.text)?.text ?? original.text)
+			: original.text;
 	const content = message.content;
 	const images = original.images;
 	if (typeof content === "string") {
 		if (!images?.length && content === text) return message;
-	} else if (content.length === 1 + (images?.length ?? 0) && content[0]?.type === "text" && content[0].text === text &&
-		(!images || images.every((image, index) => {
-			const delivered = content[index + 1];
-			return delivered?.type === "image" && delivered.data === image.data && delivered.mimeType === image.mimeType;
-		}))) return message;
+	} else if (
+		content.length === 1 + (images?.length ?? 0) &&
+		content[0]?.type === "text" &&
+		content[0].text === text &&
+		(!images ||
+			images.every((image, index) => {
+				const delivered = content[index + 1];
+				return (
+					delivered?.type === "image" && delivered.data === image.data && delivered.mimeType === image.mimeType
+				);
+			}))
+	)
+		return message;
 	// The two projections bind independent transient origins; their image blocks cannot alias.
-	return { ...message, providerPayload: undefined, content: images?.length ? [{ type: "text", text }, ...images.map(image => ({ ...image }))] : text };
+	return {
+		...message,
+		providerPayload: undefined,
+		content: images?.length ? [{ type: "text", text }, ...images.map(image => ({ ...image }))] : text,
+	};
 }
 declare module "@oh-my-pi/pi-ai" {
 	interface UserMessage {
 		imageLinks?: (string | undefined)[];
 		compactionOverride?: "keep" | "exclude";
+	}
+}
+
+declare module "@oh-my-pi/pi-ai" {
+	interface UserMessage {
+		imageLinks?: (string | undefined)[];
+		compactionOverride?: "keep" | "exclude";
+	}
+}
+
+/** Host-recorded producer, independent of role and billing attribution. Absence means unknown. */
+export type UserMessageProducer =
+	| { type: "human" }
+	| { type: "tool"; name: string; toolCallId?: string }
+	| { type: "extension"; name?: string }
+	| { type: "generated"; name?: string };
+
+declare module "@oh-my-pi/pi-ai" {
+	interface UserMessage {
+		/** Local provenance only; never a provider role, retention rule, or human-authorship inference. */
+		producer?: UserMessageProducer;
 	}
 }
 
@@ -287,6 +323,7 @@ function normalizeSessionMessageForProviderReplay(message: AgentMessage): unknow
 				meta: message.meta
 					? {
 							truncation: normalizeProviderReplayValue(message.meta.truncation),
+							artifactError: message.meta.artifactError,
 							limits: normalizeProviderReplayValue(message.meta.limits),
 							diagnostics: message.meta.diagnostics
 								? normalizeProviderReplayValue({
@@ -308,6 +345,7 @@ function normalizeSessionMessageForProviderReplay(message: AgentMessage): unknow
 				meta: message.meta
 					? {
 							truncation: normalizeProviderReplayValue(message.meta.truncation),
+							artifactError: message.meta.artifactError,
 							limits: normalizeProviderReplayValue(message.meta.limits),
 							diagnostics: message.meta.diagnostics
 								? normalizeProviderReplayValue({
@@ -470,6 +508,10 @@ export interface SkillPromptDetails {
 	name: string;
 	path: string;
 	args?: string;
+	/** The draft as submitted with its `/skill:<name>` token in place. A leading
+	 *  token renders as a skill callout, a mid-prompt token as an inline chip in
+	 *  a plain user bubble. Absent on sessions recorded before chips existed. */
+	prompt?: string;
 	lineCount: number;
 	/** Internal: compact label shown for a queued custom message. Optional —
 	 *  non-streaming skill prompts never set it. Stripped from persisted
@@ -789,6 +831,7 @@ function wrapSteeringUserMessage(message: SteeringUserMessage): UserMessage {
 					attribution: "user",
 					timestamp: message.timestamp,
 				});
+	copyPerCallContextMessage(userMessage, message);
 	if (typeof message.content === "string") {
 		if (message.content.length === 0) return message.role === "user" ? message : userMessage;
 		return transferTransformedSourceOrigin(message, {
@@ -1220,9 +1263,8 @@ interface ConvertArrayMemo {
 let convertGeneration = 0;
 const convertArrayCache = new WeakMap<AgentMessage[], ConvertArrayMemo>();
 
-/** Forget only this array's append-only conversion receipt after a history splice.
- * Unchanged messages retain their individually cached conversions. */
-export function invalidateConvertedMessageArray(messages: AgentMessage[]): void {
+/** Drop the outer-array shortcut when an owner replaces a live history in place. */
+export function invalidateConvertToLlmArrayCache(messages: AgentMessage[]): void {
 	convertArrayCache.delete(messages);
 }
 
@@ -1372,6 +1414,7 @@ function convertOneCached(m: AgentMessage, interruptedNext: boolean): Message[] 
 		return cached.fragment;
 	}
 	const fragment = convertOne(m, interruptedNext);
+	for (const message of fragment) copyPerCallContextMessage(message, m);
 	convertCache.set(m, { interruptedNext, sourceOrigin, fragment });
 	return fragment;
 }

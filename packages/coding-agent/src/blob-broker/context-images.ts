@@ -9,7 +9,11 @@
  */
 
 import type { Context, ImageContent, Message, Model, TextContent } from "@oh-my-pi/pi-ai";
-import { combineContentSourceOrigins, setSourceOrigin, transferSourceOrigin } from "@oh-my-pi/pi-ai/utils/source-origin";
+import {
+	combineContentSourceOrigins,
+	setSourceOrigin,
+	transferSourceOrigin,
+} from "@oh-my-pi/pi-ai/utils/source-origin";
 import { modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
 
 /** Responses/Chat APIs whose `image_url` accepts arbitrary https URLs. */
@@ -128,7 +132,10 @@ export async function inlineContextImages(
 					if (rest.data.length > 0) return transferSourceOrigin(block, rest);
 					const data = await resolveData(block);
 					if (data) return transferSourceOrigin(block, { ...rest, data });
-					return setSourceOrigin({ type: "text", text: "[image unavailable: render source expired]" }, { kind: "synthetic", reason: "image-omission" });
+					return setSourceOrigin(
+						{ type: "text", text: "[image unavailable: render source expired]" },
+						{ kind: "synthetic", reason: "image-omission" },
+					);
 				}),
 			);
 			if (!contentChanged) return message;

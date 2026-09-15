@@ -202,11 +202,15 @@ function orphanFunctionOutputToMessage(item: InputItem, callId: string): InputIt
 	if (truncated) {
 		text = `${text.slice(0, CODEX_ORPHAN_OUTPUT_LIMIT)}\n...[truncated]`;
 	}
-	return transferTransformedSourceOrigin(item, {
-		type: "message",
-		role: "assistant",
-		content: `[Previous ${toolName} result; call_id=${callId}]: ${text}`,
-	} as InputItem, truncated ? "partial" : "full");
+	return transferTransformedSourceOrigin(
+		item,
+		{
+			type: "message",
+			role: "assistant",
+			content: `[Previous ${toolName} result; call_id=${callId}]: ${text}`,
+		} as InputItem,
+		truncated ? "partial" : "full",
+	);
 }
 
 type ToolCallKind = "function" | "custom" | "computer";
@@ -239,6 +243,40 @@ function toolOutputKind(type: unknown): ToolCallKind | undefined {
  *   tool-result child is dropped from the reconstructed history) or when a turn
  *   is aborted/crashes after the call streamed but before its result persisted.
  */
+
+/**
+ * Sanitize an OpenAI Responses/Codex tool call ID to <= 64 characters and valid charset.
+ * Composite IDs with '|' or '\n' have their secondary/item part stripped.
+ * Hashing is anchored on the canonical base part so assistant and result composites
+ * with different item halves stay identical. Short lossy changes include a hash suffix
+ * to preserve collision resistance across distinct IDs.
+ */
+export function sanitizeCodexCallId(rawCallId: string): string {
+	if (!rawCallId) return `call_${Bun.hash("empty").toString(36)}`;
+	const sep = rawCallId.search(/[\n|]/);
+	const base = sep > 0 ? rawCallId.slice(0, sep) : sep === 0 ? rawCallId.slice(1) : rawCallId;
+	const sanitized = base.replace(/[^a-zA-Z0-9_-]/g, "_").replace(/_+$/, "");
+	if (sanitized.length > 0 && sanitized.length <= 64 && sanitized === base) {
+		return sanitized;
+	}
+	const hash = Bun.hash(base || rawCallId).toString(36);
+	const effectiveBase = sanitized.length > 0 ? sanitized : "call";
+	const prefixLen = Math.max(0, 63 - hash.length);
+	return `${effectiveBase.slice(0, prefixLen)}_${hash}`.slice(0, 64);
+}
+
+/**
+ * In-place mutates the `call_id` property on every input item in the array to conform
+ * to the OpenAI Responses/Codex 64-character limit and valid charset constraints.
+ */
+export function sanitizeInputCallIds(input: InputItem[]): void {
+	for (const item of input) {
+		if (typeof item.call_id === "string") {
+			item.call_id = sanitizeCodexCallId(item.call_id);
+		}
+	}
+}
+
 function repairToolCallPairs(input: InputItem[]): InputItem[] {
 	const callKinds = new Map<string, ToolCallKind>();
 	const outputKinds = new Map<string, ToolCallKind>();
@@ -263,18 +301,29 @@ function repairToolCallPairs(input: InputItem[]): InputItem[] {
 		}
 		if (callKind && callId !== undefined && outputKinds.get(callId) !== callKind) {
 			if (callKind === "computer") {
-				repaired.push(setSourceOrigin({
-					type: "message",
-					role: "assistant",
-					content: `[Computer call interrupted before a screenshot was recorded; call_id=${callId}]`,
-				}, { kind: "synthetic", reason: "interrupted-tool-output" }));
+				repaired.push(
+					setSourceOrigin(
+						{
+							type: "message",
+							role: "assistant",
+							content: `[Computer call interrupted before a screenshot was recorded; call_id=${callId}]`,
+						},
+						{ kind: "synthetic", reason: "interrupted-tool-output" },
+					),
+				);
 				continue;
 			}
-			repaired.push(item, setSourceOrigin({
-				type: callKind === "custom" ? "custom_tool_call_output" : "function_call_output",
-				call_id: callId,
-				output: CODEX_INTERRUPTED_TOOL_OUTPUT,
-			}, { kind: "synthetic", reason: "interrupted-tool-output" }));
+			repaired.push(
+				item,
+				setSourceOrigin(
+					{
+						type: callKind === "custom" ? "custom_tool_call_output" : "function_call_output",
+						call_id: callId,
+						output: CODEX_INTERRUPTED_TOOL_OUTPUT,
+					},
+					{ kind: "synthetic", reason: "interrupted-tool-output" },
+				),
+			);
 			continue;
 		}
 		repaired.push(item);
@@ -334,6 +383,7 @@ export interface CodexLiteShapedBody {
 export function applyCodexResponsesLiteShape(body: CodexLiteShapedBody): void {
 	const input = Array.isArray(body.input) ? body.input : [];
 	stripImageDetails(input);
+	sanitizeInputCallIds(input as InputItem[]);
 	body.parallel_tool_calls = false;
 	const declaredTools = Array.isArray(body.tools) ? body.tools : [];
 	let additionalTools = declaredTools;
@@ -356,13 +406,23 @@ export function applyCodexResponsesLiteShape(body: CodexLiteShapedBody): void {
 			body.tool_choice = "required";
 		}
 	}
-	const prefix: InputItem[] = [setSourceOrigin({ type: "additional_tools", role: "developer", tools: additionalTools }, { kind: "synthetic", reason: "provider-control" })];
+	const prefix: InputItem[] = [
+		setSourceOrigin(
+			{ type: "additional_tools", role: "developer", tools: additionalTools },
+			{ kind: "synthetic", reason: "provider-control" },
+		),
+	];
 	if (typeof body.instructions === "string" && body.instructions.length > 0) {
-		prefix.push(setSourceOrigin({
-			type: "message",
-			role: "developer",
-			content: [{ type: "input_text", text: body.instructions }],
-		}, { kind: "synthetic", reason: "prefix" }));
+		prefix.push(
+			setSourceOrigin(
+				{
+					type: "message",
+					role: "developer",
+					content: [{ type: "input_text", text: body.instructions }],
+				},
+				{ kind: "synthetic", reason: "prefix" },
+			),
+		);
 	}
 	body.input = [...prefix, ...input];
 	if (body.tool_choice !== "none" && body.tool_choice !== "required") {
@@ -384,16 +444,22 @@ export async function transformRequestBody(
 	if (body.input && Array.isArray(body.input)) {
 		body.input = filterInput(body.input);
 		if (body.input) {
+			sanitizeInputCallIds(body.input);
 			body.input = repairToolCallPairs(body.input);
 		}
 	}
 
 	if (prompt?.developerMessages && prompt.developerMessages.length > 0) {
-		const developerMessages: InputItem[] = prompt.developerMessages.map(text => setSourceOrigin({
-			type: "message",
-			role: "developer",
-			content: [{ type: "input_text", text }],
-		}, { kind: "synthetic", reason: "prefix" }));
+		const developerMessages: InputItem[] = prompt.developerMessages.map(text =>
+			setSourceOrigin(
+				{
+					type: "message",
+					role: "developer",
+					content: [{ type: "input_text", text }],
+				},
+				{ kind: "synthetic", reason: "prefix" },
+			),
+		);
 		const input = Array.isArray(body.input) ? body.input : [];
 		body.input = [...developerMessages, ...input];
 	}
@@ -436,11 +502,14 @@ export async function transformRequestBody(
 		if (!hasVisibleInput) {
 			body.input = [
 				...input,
-				setSourceOrigin({
-					type: "message",
-					role: "user",
-					content: [{ type: "input_text", text: finalInstruction }],
-				}, { kind: "synthetic", reason: "prefix" }),
+				setSourceOrigin(
+					{
+						type: "message",
+						role: "user",
+						content: [{ type: "input_text", text: finalInstruction }],
+					},
+					{ kind: "synthetic", reason: "prefix" },
+				),
 			];
 		}
 	}

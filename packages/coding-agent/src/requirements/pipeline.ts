@@ -238,7 +238,9 @@ export function admitRequirementsCandidates(raw: unknown, input: RequirementsEvi
 			);
 		if (!evidence.some(span => span.sourceKey === source.key) || source.origin.kind !== "human")
 			throw new RequirementsPipelineError("mechanical", "Operation lacks host-attested operator source authority");
-		const referents = array(op.referents ?? [], "referents").map(span => verifyRequirementsEvidenceInSources(span, sources));
+		const referents = array(op.referents ?? [], "referents").map(span =>
+			verifyRequirementsEvidenceInSources(span, sources),
+		);
 		const predecessors = array(op.predecessorRevisionIds, "predecessorRevisionIds").map(value =>
 			text(value, "predecessor"),
 		);
@@ -330,7 +332,16 @@ function reviewResult(
 		const units = new Set(input.source.source.units.map(unit => unit.id));
 		const known = new Map(input.active.map(revision => [revision.id, revision]));
 		const applicable = new Set(input.applicableRevisionIds);
-		const existing = new Set(input.active.filter(revision => applicable.has(revision.id) && revision.lifecycle === "accepted" && (!revision.availability || revision.availability === "available")).map(revision => revision.id));
+		const existing = new Set(
+			input.active
+				.filter(
+					revision =>
+						applicable.has(revision.id) &&
+						revision.lifecycle === "accepted" &&
+						(!revision.availability || revision.availability === "available"),
+				)
+				.map(revision => revision.id),
+		);
 		const operationsById = new Map(candidates.map(candidate => [candidate.id, candidate]));
 		const knownIds = new Set(known.keys());
 		const adopted = new Set(input.source.source.adoptedUnitIds ?? []);
@@ -343,7 +354,23 @@ function reviewResult(
 		};
 		for (const value of array(response.obligations, "source obligations")) {
 			const obligation = object(value, "source obligation");
-			keys(obligation, ["id", "kind", "requirementId", "predecessorRevisionIds", "statement", "sourceUnitIds", "operationIds", "applicableRevisionIds", "adoptedUnitIds", "decision", "reason"], "source obligation");
+			keys(
+				obligation,
+				[
+					"id",
+					"kind",
+					"requirementId",
+					"predecessorRevisionIds",
+					"statement",
+					"sourceUnitIds",
+					"operationIds",
+					"applicableRevisionIds",
+					"adoptedUnitIds",
+					"decision",
+					"reason",
+				],
+				"source obligation",
+			);
 			const id = text(obligation.id, "obligation id");
 			const statement = text(obligation.statement, "obligation statement");
 			if (obligations.has(id)) throw new RequirementsPipelineError("mechanical", "Duplicate source obligation id");
@@ -351,31 +378,68 @@ function reviewResult(
 			const kind = text(obligation.kind, "obligation kind");
 			if (kind !== "add" && kind !== "change" && kind !== "withdraw")
 				throw new RequirementsPipelineError("mechanical", "Unknown obligation operation kind");
-			const target = obligation.requirementId === undefined ? undefined : text(obligation.requirementId, "obligation requirement id");
+			const target =
+				obligation.requirementId === undefined
+					? undefined
+					: text(obligation.requirementId, "obligation requirement id");
 			const predecessors = identifiers(obligation.predecessorRevisionIds, knownIds, "obligation predecessor ids");
-			if (kind === "add" ? target !== undefined || predecessors.length > 0 : !target || !predecessors.length || predecessors.some(id => known.get(id)!.requirementId !== target))
-				throw new RequirementsPipelineError("mechanical", "Obligation target does not match its requested operation");
+			if (
+				kind === "add"
+					? target !== undefined || predecessors.length > 0
+					: !target || !predecessors.length || predecessors.some(id => known.get(id)!.requirementId !== target)
+			)
+				throw new RequirementsPipelineError(
+					"mechanical",
+					"Obligation target does not match its requested operation",
+				);
 			const sourceUnitIds = identifiers(obligation.sourceUnitIds, units, "obligation source units");
-			if (!sourceUnitIds.length) throw new RequirementsPipelineError("mechanical", "Source obligation lacks original units");
+			if (!sourceUnitIds.length)
+				throw new RequirementsPipelineError("mechanical", "Source obligation lacks original units");
 			const operations = identifiers(obligation.operationIds, candidateIds, "coverage operation ids");
 			const revisions = identifiers(obligation.applicableRevisionIds, existing, "coverage applicable revision ids");
 			const adoptedUnits = identifiers(obligation.adoptedUnitIds, adopted, "coverage adopted unit ids");
 			if (adoptedUnits.some(unit => !sourceUnitIds.includes(unit)))
-				throw new RequirementsPipelineError("mechanical", "Adopted coverage does not identify an obligation source unit");
+				throw new RequirementsPipelineError(
+					"mechanical",
+					"Adopted coverage does not identify an obligation source unit",
+				);
 			if (!operations.length && !revisions.length)
 				consider("reject", `Uncovered source obligation ${id}: ${statement}`);
 			consider(obligation.decision, obligation.reason);
-			recorded.push({ id, kind, ...(target ? { requirementId: target } : {}), predecessorRevisionIds: predecessors, statement, sourceUnitIds, operationIds: operations, applicableRevisionIds: revisions, adoptedUnitIds: adoptedUnits, decision: obligation.decision as "pass" | "reject" | "uncertain", reason: String(obligation.reason) });
+			recorded.push({
+				id,
+				kind,
+				...(target ? { requirementId: target } : {}),
+				predecessorRevisionIds: predecessors,
+				statement,
+				sourceUnitIds,
+				operationIds: operations,
+				applicableRevisionIds: revisions,
+				adoptedUnitIds: adoptedUnits,
+				decision: obligation.decision as "pass" | "reject" | "uncertain",
+				reason: String(obligation.reason),
+			});
 			for (const operationId of operations) {
 				const operation = operationsById.get(operationId)!;
-				if (!operation.evidence.some(unit => unit.sourceKey === input.source.source.key && sourceUnitIds.includes(unit.unitId)))
+				if (
+					!operation.evidence.some(
+						unit => unit.sourceKey === input.source.source.key && sourceUnitIds.includes(unit.unitId),
+					)
+				)
 					consider("reject", `Coverage operation ${operationId} does not cite obligation ${id}`);
-				if (operation.kind !== kind || operation.requirementId !== target || predecessors.some(id => !operation.predecessorRevisionIds.includes(id)))
+				if (
+					operation.kind !== kind ||
+					operation.requirementId !== target ||
+					predecessors.some(id => !operation.predecessorRevisionIds.includes(id))
+				)
 					consider("reject", `Coverage operation ${operationId} does not perform obligation ${id}`);
 			}
 			for (const revisionId of revisions) {
 				const revision = known.get(revisionId)!;
-				if ((kind === "withdraw") !== (revision.kind === "withdraw") || (kind !== "add" && (revision.requirementId !== target || predecessors.includes(revision.id))))
+				if (
+					(kind === "withdraw") !== (revision.kind === "withdraw") ||
+					(kind !== "add" && (revision.requirementId !== target || predecessors.includes(revision.id)))
+				)
 					consider("reject", `Unchanged or unrelated revision ${revisionId} does not fulfill obligation ${id}`);
 			}
 		}
@@ -388,9 +452,18 @@ function reviewResult(
 			throw new RequirementsPipelineError("mechanical", "Invented or duplicate reviewer id");
 		seen.add(id);
 		consider(decision.decision, decision.reason);
-		candidateReviews.push({ id, decision: decision.decision as "pass" | "reject" | "uncertain", reason: String(decision.reason) });
+		candidateReviews.push({
+			id,
+			decision: decision.decision as "pass" | "reject" | "uncertain",
+			reason: String(decision.reason),
+		});
 	}
-	return { outcome, candidates: candidateReviews, ...(input ? { obligations: recorded } : {}), ...(reasons.length ? { reason: reasons.join("; ") } : {}) };
+	return {
+		outcome,
+		candidates: candidateReviews,
+		...(input ? { obligations: recorded } : {}),
+		...(reasons.length ? { reason: reasons.join("; ") } : {}),
+	};
 }
 type CitedRequirementsEvidence = RequirementsEvidence & { text?: string; image?: ImageContent };
 function citedEvidenceKey(span: RequirementsEvidence): string {
@@ -415,8 +488,7 @@ function citedEvidencePayload(
 	for (const candidate of candidates) {
 		for (const span of candidate.evidence) append(span);
 		for (const span of candidate.referents ?? []) append(span);
-		for (const relation of candidate.relations ?? [])
-			for (const span of relation.evidence) append(span);
+		for (const relation of candidate.relations ?? []) for (const span of relation.evidence) append(span);
 	}
 	return cited;
 }
@@ -513,12 +585,7 @@ async function call(
 			true,
 		);
 	const owner = { sessionId: host.sessionManager.getSessionId(), parentId: host.sessionManager.getLeafId() };
-	const prompt =
-		stage === "extractor"
-			? extractionPrompt
-			: stage === "evidence"
-				? evidencePrompt
-				: sanityPrompt;
+	const prompt = stage === "extractor" ? extractionPrompt : stage === "evidence" ? evidencePrompt : sanityPrompt;
 	const response = await retryTransientCompletion(async () => {
 		signal.throwIfAborted();
 		// Fresh identity on every attempt. Credential ownership is NOT conversation ownership.
@@ -681,7 +748,11 @@ export function createRequirementsBatch(
 ): RequirementsBatch {
 	if (input.source.source.referenceOnly)
 		throw new RequirementsPipelineError("mechanical", "Reference-only material lacks operator source authority");
-	if (operationIds.length !== operations.length || new Set(operationIds).size !== operationIds.length || operationIds.some(id => !id.trim()))
+	if (
+		operationIds.length !== operations.length ||
+		new Set(operationIds).size !== operationIds.length ||
+		operationIds.some(id => !id.trim())
+	)
 		throw new RequirementsPipelineError("mechanical", "Batch requires one unique ID per operation");
 	const selected = new Set<string>();
 	for (const operation of operations) {
@@ -723,7 +794,11 @@ export async function extractRequirementsBatch(
 	const extraction = await call(host, "extractor", contextualPayload(input), input, signal, true);
 	const candidates = admitRequirementsCandidates(extraction.raw, input);
 	const operations = candidates.map(({ id: _id, ...operation }) => operation);
-	const batch = createRequirementsBatch(input, operations, candidates.map(candidate => candidate.id));
+	const batch = createRequirementsBatch(
+		input,
+		operations,
+		candidates.map(candidate => candidate.id),
+	);
 	const review = await reviewRequirementsCandidates(host, input, candidates, signal);
 	return {
 		...batch,

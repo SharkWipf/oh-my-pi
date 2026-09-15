@@ -4,20 +4,28 @@
 
 ### Fixed
 
+- Kept compaction source IDs and selected ranges aligned with converted messages across journal metadata and repeated sparse retention, preserving prior-summary timestamps and one-time admitted non-user charges.
 - Preserved selected original-submission payloads during compaction preparation instead of replacing them with expanded delivery text; pending protection now retains those original bytes too.
 - Kept ordinarily retained expanded delivery and selected original submissions as adjacent, separately addressed source projections. Repeated compaction resolves the committed original projection through the normal host reader, and delivery rewrites no longer invalidate original-coordinate coverage.
 - Joined pending delivered users into ordinary source selection without moving the normal retained-history cut or resurrecting an intervening history tail. Ordinary unselected preparations no longer manufacture a full source map.
+- Realigned native preservation with upstream whole-group ordinary retention and automatic eligible Anthropic compaction at 55,000 input tokens. Anthropic summaries and encrypted state replay verbatim as aggregate history, followed by chronological selected source atoms and the ordinary tail; selected original images remain source-addressed.
+- Native V2 excludes identified summary/archive migrations from ordinary user retention without relying on their wording. Complete admitted non-user inputs remain full logical atoms; Codex V1 requires an explicit supported endpoint.
 - Fixed native compaction conflating selected original submissions with their delivered expansions. Both projections retain their own text/image coverage and survive native history reload without changing ordinary allocation.
 - Fixed normalized custom messages counting as zero tokens. Custom text and original images now consume their ordinary local baseline regardless of attribution or display settings.
 - Fixed ordinary source token estimates omitting assistant images and known current native text, code, logs, search context, and computer metadata. Normalized native mirrors are charged once, including after controlled source rewrites and JSON reload.
 - Fixed metadata-only computer screenshots counting as zero before source allocation. Their single image baseline replaces content-image mirrors, matching computer-result serialization.
-- Fixed local token estimates omitting user and developer images; original images now receive the same one-time baseline as tool-result and hook images.
-- Fixed repeated compaction losing messages retained by the previous compaction, including turns received while native compaction was running.
 - Fixed normalized custom messages counting as zero tokens. Custom text and original images now consume their ordinary local baseline regardless of attribution or display settings.
 - Fixed local token estimates omitting user and developer images; original images now receive the same one-time baseline as tool-result and hook images.
 - Fixed repeated compaction losing messages retained by the previous compaction, including turns received while native compaction was running.
 - Added source-addressed compaction coverage with positional rewrite mapping; edited or deleted source intervals no longer claim current coverage in historical artifacts.
 - Fixed native V2 compaction dropping typeless user messages emitted by the bundled Codex serializer and bypassing the retained-token budget for string user content.
+- Native compaction now carries local source provenance through ordinary serializers and preserves selected historical users chronologically without changing the ordinary retained-history allocation. V2 precharges complete selected tool exchanges before allocation, unions partial text/image coverage in one source slot, and reports its actual target, complete-atom charge, and minimum-clamped residual.
+- Native V1 sends selected non-user history as attributed input context with original images, leaves the canonical provider output unchanged, and records unknown item attribution rather than guessing source identities.
+- Local compaction computes the upstream whole-group suffix first (including its newest-oversized-group exception), then preserves missing selected source spans chronologically without refunding selected-user costs. Complete admitted non-user atoms are charged once against that same calibrated budget. Repeated sparse retention no longer resurrects intervening omitted originals.
+- Authored images interleaved with snap archive frames keep their one-time original-image estimate instead of being priced as rasterized transcript frames.
+- Fixed repeated compaction losing messages retained by the previous compaction, including turns received while native compaction was running.
+- Original user, developer and custom images use upstream one-time baseline accounting; native logical-source visitors continue to charge current content only, separately from physical archived-frame costs.
+- Original user, developer and custom images use upstream one-time baseline accounting; typed computer screenshots still replace their content-image mirrors rather than adding a duplicate charge.
 - Native compaction now carries local source provenance through ordinary serializers and preserves selected historical users chronologically without changing the ordinary retained-history allocation. V2 captures complete selected tool-exchange quotes from original logical sources before any conversion, precharges them once before allocation, unions partial text/image coverage in one source slot, and reports its actual target, source charge, and minimum-clamped residual without repricing rendered history.
 - Native V1 sends selected non-user history as attributed input context with original images, leaves the canonical provider output unchanged, and records unknown item attribution rather than guessing source identities. Complete native atoms retain provider-native server-tool fields, metadata-only computer screenshots, and generated images without replaying whole-history snapshots or duplicating executable calls.
 
@@ -31,6 +39,56 @@
 ### Added
 
 - Pre-model-call gates receive the resolved request model alongside the actual post-inband provider context, so accounting and admission use the dispatched representation without preparing it again.
+### Added
+
+- Added optional queued-message preparation with cancellation-safe delivery and appended context ([#11835](https://github.com/can1357/oh-my-pi/pull/11835) by [@andrebrait](https://github.com/andrebrait)).
+
+### Fixed
+
+- Fixed streaming CPU blowup on long turns: per-delta `message_update` snapshots now deep-clone only the blocks the stream actually touched instead of the entire accumulated message, eliminating the quadratic cloning work that could freeze the TUI for tens of seconds to minutes while a subagent streams ([#10605](https://github.com/can1357/oh-my-pi/issues/10605)).
+- Native compaction now carries an existing local summary into the first provider-native request instead of losing the summarized history. ([#11525](https://github.com/can1357/oh-my-pi/pull/11525) by [@rpie9](https://github.com/rpie9))
+- Subsequent native compactions preserve messages appended between a speculative snapshot and its commit, while honoring `/clear` boundaries. ([#11525](https://github.com/can1357/oh-my-pi/pull/11525) by [@rpie9](https://github.com/rpie9))
+- Native replay compatibility checks the active provider and Responses API independently of whether future native compaction is enabled. ([#11525](https://github.com/can1357/oh-my-pi/pull/11525) by [@rpie9](https://github.com/rpie9))
+- Fixed compaction retaining oversized older steps beyond the recent-history budget and skipping previously retained history on later passes, preventing long tool loops from freeing enough context ([#11365](https://github.com/can1357/oh-my-pi/issues/11365)).
+- Fixed Codex remote compaction retries for both Bun and proxy socket-closure messages and stopped falling back to the unsupported `/responses/compact` endpoint after V2 failures.
+
+## [18.1.19] - 2026-09-12
+
+### Added
+
+- Added `Agent.getPendingToolResults()` for reconstructing live displays before buffered tool results are persisted ([#11868](https://github.com/can1357/oh-my-pi/pull/11868) by [@serverinspector](https://github.com/serverinspector)).
+- Added opt-in host authorization and exact-once streamed child execution for discard-safe local reads.
+
+### Changed
+
+- `Tool <name> not found` now also suggests mounted `xd://` devices, not just the advertised tool set, via the new `suggestFallbackToolNames` option ([#11516](https://github.com/can1357/oh-my-pi/issues/11516), [#10109](https://github.com/can1357/oh-my-pi/issues/10109) by [@oldschoola](https://github.com/oldschoola)).
+
+### Fixed
+
+- Speculative stream sessions are now discarded when a hook or argument transform replaces a call's arguments while keeping its ID, instead of releasing deferred work planned from the original code ([#11889](https://github.com/can1357/oh-my-pi/pull/11889) by [@h4vc](https://github.com/h4vc)).
+
+## [18.1.18] - 2026-09-11
+
+### Added
+
+- Anthropic server-side compaction as a `remote` compaction backend: model lines the beta supports (`compat.supportsServerCompaction`, rule-owned in the catalog: Opus 4.6+, Sonnet 4.6+, Fable/Mythos 5) on the official endpoint, resolved the way the provider routes requests, plus Anthropic-compatible routes with `remoteCompaction.enabled`, compact by re-issuing the live turn's own request — same system prompt, tools, and history, so it reads the prompt cache the last turn wrote — with the `compact_20260112` edit paused after the summary and the harness summary prompt as `instructions`. The instructions name where the retained tail begins so the summary covers only the history the rebuilt context drops. The API's summary is stored as the entry text and as `preserveData.anthropicCompaction`, replayed natively on later Anthropic requests and read as plain text by every other provider; the retained tail comes from session entries as with a local summary. Contexts below 55k tokens (the API trigger floor plus margin) keep summarizing locally, and a response without a summary is a native failure, like the OpenAI lanes. An aborted compaction response is the abort (a cancellation, never a native failure) and an error response keeps its HTTP status, so auth and timeout classification match the OpenAI lanes; the block's opaque `encrypted_content` is persisted as `preserveData.anthropicCompaction.encryptedContent` and replayed verbatim.
+
+### Fixed
+
+- `compact()` now forwards the caller's `oneshotRetry` opt-out to every summarization oneshot; auto-compaction's outer retry loop no longer multiplies with the inner transient-failure retries.
+
+## [18.1.17] - 2026-09-10
+
+### Changed
+
+- `Tool <name> not found` now names a plausible intended target when the advertised set contains one, e.g. `Tool mcp__abc123__xyz789_read not found. Did you mean read?`. A model that mis-transcribes a long opaque tool name reliably keeps the trailing segment, which is the only part carrying meaning, so the miss becomes recoverable in the same turn instead of costing a round trip. Purely advisory — the suggestion is only ever a string in the error, never a dispatch target, so an unrecognized name still fails ([#10109](https://github.com/can1357/oh-my-pi/issues/10109) by [@oldschoola](https://github.com/oldschoola)).
+
+### Fixed
+
+- Fixed the token estimator counting developer messages as free and ignoring images in user content, which let context budgeting, pruning and the compaction trigger read a transcript as far smaller than the one sent to the provider.
+- Fixed repeated local compaction omitting messages retained before the previous compaction record, while preserving original entry IDs and `/clear` boundaries.
+- Raised remote compaction request timeout from 3 minutes to 5 minutes so long Codex/gpt-6-astra compact streams can finish before the watchdog aborts them.
+- Fixed proxy responses dropping the cost the server reported; recorded costs are kept instead of being recomputed.
 
 ## [18.1.10] - 2026-09-04
 

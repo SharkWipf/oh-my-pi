@@ -1,7 +1,7 @@
 import { type AgentMessage, type AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
-import { type Model, PASTE_CODE_LOGIN_PROVIDERS, type UsageReport } from "@oh-my-pi/pi-ai";
-import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
+import type { Model, PASTE_CODE_LOGIN_PROVIDERS as PasteCodeLoginProviders, UsageReport } from "@oh-my-pi/pi-ai";
+import type { getOAuthProviders as GetOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { Component, OverlayHandle, ResizeScrollbackMode } from "@oh-my-pi/pi-tui";
@@ -25,7 +25,7 @@ import { getRoleInfo } from "../../config/model-roles";
 import { settings } from "../../config/settings";
 import type { SettingPath, SettingTab } from "../../config/settings-schema";
 import { confirmRequirementsJournalDeletion } from "../../requirements/commands";
-import { disableProvider, enableProvider } from "../../discovery";
+import type { disableProvider as DisableProvider, enableProvider as EnableProvider } from "../../discovery";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
 	getInstalledPluginsRegistryPath,
@@ -62,7 +62,8 @@ import {
 	PRESERVED_USER_MESSAGE_CATEGORY_SETTING_PATHS,
 } from "../../session/preserved-message-settings";
 import { isPreservationUser } from "../../session/preserved-messages";
-import type { SessionEntry, SessionMessageEntry } from "../../session/session-entries";
+import { isTranscriptEntry, isUserRequestEntry, type TranscriptEntry } from "../../session/session-context";
+import type { SessionEntry } from "../../session/session-entries";
 import type { SessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
 import { loadPinnedSessionIds } from "../../session/session-pins";
@@ -89,9 +90,10 @@ import {
 	type ToolSession,
 } from "../../tools";
 import { AskTool, type AskToolDetails, type AskToolInput } from "../../tools/ask";
-import { shortenPath } from "../../tools/render-utils";
+import { sanitizeDisplayWarnings, shortenPath } from "../../tools/render-utils";
 import { ToolAbortError } from "../../tools/tool-errors";
 import { applyHyperlinkSetting } from "../../tui/hyperlink";
+import { captureBrowserSession } from "../../utils/browser-session";
 import { copyToClipboard } from "../../utils/clipboard";
 import { openPath } from "../../utils/open";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
@@ -105,11 +107,11 @@ import { CompactionMessageManagerComponent, type CompactionMessageRow } from "..
 import { ExtensionDashboard } from "../components/extensions";
 import { listLiveToolRecords, liveToolRecordFromSession } from "../components/extensions/live-tool-session";
 import { HistorySearchComponent } from "../components/history-search";
-import { LoginDialogComponent } from "../components/login-dialog";
-import { LogoutAccountSelectorComponent } from "../components/logout-account-selector";
-import { ModelHubComponent, type ModelRoleSelectionScope } from "../components/model-hub";
-import { ModelPickerComponent } from "../components/model-picker";
-import { OAuthSelectorComponent } from "../components/oauth-selector";
+import type { LoginDialogComponent as LoginDialogComponentType } from "../components/login-dialog";
+import type { LogoutAccountSelectorComponent as LogoutAccountSelectorComponentType } from "../components/logout-account-selector";
+import type { ModelHubComponent as ModelHubComponentType, ModelRoleSelectionScope } from "../components/model-hub";
+import type { ModelPickerComponent as ModelPickerComponentType } from "../components/model-picker";
+import type { OAuthSelectorComponent as OAuthSelectorComponentType } from "../components/oauth-selector";
 import { PluginSelectorComponent } from "../components/plugin-selector";
 import { ReadToolGroupComponent } from "../components/read-tool-group";
 import { ResetUsageSelectorComponent } from "../components/reset-usage-selector";
@@ -127,16 +129,61 @@ import type { SessionObserverRegistry } from "../session-observer-registry";
 
 const MANUAL_LOGIN_PROMPT = "Paste the authorization code (or full redirect URL), then press Enter:";
 
+interface ModelOverlayModules {
+	ModelHubComponent: typeof ModelHubComponentType;
+	ModelPickerComponent: typeof ModelPickerComponentType;
+}
+
+/** Synchronous first-use boundary for model overlays; key callbacks require immediate mounting. */
+function loadModelOverlayComponents(): ModelOverlayModules {
+	return {
+		ModelHubComponent: require("../components/model-hub").ModelHubComponent,
+		ModelPickerComponent: require("../components/model-picker").ModelPickerComponent,
+	};
+}
+
+interface ProviderAuthUiModules {
+	PASTE_CODE_LOGIN_PROVIDERS: typeof PasteCodeLoginProviders;
+	getOAuthProviders: typeof GetOAuthProviders;
+	LoginDialogComponent: typeof LoginDialogComponentType;
+	LogoutAccountSelectorComponent: typeof LogoutAccountSelectorComponentType;
+	OAuthSelectorComponent: typeof OAuthSelectorComponentType;
+}
+
+/** Synchronous first-use boundary for provider auth catalog and dialog components. */
+function loadProviderAuthUi(): ProviderAuthUiModules {
+	return {
+		PASTE_CODE_LOGIN_PROVIDERS: require("@oh-my-pi/pi-ai/index.js").PASTE_CODE_LOGIN_PROVIDERS,
+		getOAuthProviders: require("@oh-my-pi/pi-ai/registry/oauth/index.js").getOAuthProviders,
+		LoginDialogComponent: require("../components/login-dialog").LoginDialogComponent,
+		LogoutAccountSelectorComponent: require("../components/logout-account-selector").LogoutAccountSelectorComponent,
+		OAuthSelectorComponent: require("../components/oauth-selector").OAuthSelectorComponent,
+	};
+}
+
+interface ProviderToggleModules {
+	disableProvider: typeof DisableProvider;
+	enableProvider: typeof EnableProvider;
+}
+
+/** Settings-only boundary for provider discovery mutations. */
+function loadProviderToggles(): ProviderToggleModules {
+	const discovery = require("../../discovery");
+	return { disableProvider: discovery.disableProvider, enableProvider: discovery.enableProvider };
+}
+
 export class SelectorController {
 	constructor(private ctx: InteractiveModeContext) {}
 
-	#rewind: {
-		selector: RewindSelectorComponent;
-		manager: SessionManager;
-		presentation: readonly unknown[];
-		invalidate: () => void;
-		unsubscribe?: () => void;
-	} | undefined;
+	#rewind:
+		| {
+				selector: RewindSelectorComponent;
+				manager: SessionManager;
+				presentation: readonly unknown[];
+				invalidate: () => void;
+				unsubscribe?: () => void;
+		  }
+		| undefined;
 	/**
 	 * Mount a primary fullscreen menu through the one polished modal path shared
 	 * by Settings, Model Hub, and Agent Hub.
@@ -165,6 +212,7 @@ export class SelectorController {
 	}
 
 	async #refreshOAuthProviderAuthState(): Promise<void> {
+		const { getOAuthProviders } = loadProviderAuthUi();
 		const oauthProviders = getOAuthProviders();
 		await Promise.all(
 			oauthProviders.map(provider =>
@@ -191,14 +239,20 @@ export class SelectorController {
 	}
 
 	/**
-	 * Shows a selector component in place of the editor.
-	 * @param create Factory that receives a `done` callback and returns the component and focus target
+	 * Temporarily replaces the editor slot with a selector, restoring the prior
+	 * slot contents and focus when the selector finishes.
 	 */
 	showSelector(create: (done: () => void) => { component: Component; focus: Component }): void {
+		const previousChildren = [...this.ctx.editorContainer.children];
+		const previousFocus = this.ctx.ui.getFocused();
 		const done = () => {
 			this.ctx.editorContainer.clear();
-			this.ctx.editorContainer.addChild(this.ctx.editor);
-			this.ctx.ui.setFocus(this.ctx.editor);
+			for (const child of previousChildren) this.ctx.editorContainer.addChild(child);
+			const focus =
+				previousFocus && previousChildren.includes(previousFocus)
+					? previousFocus
+					: (previousChildren[0] ?? this.ctx.editor);
+			this.ctx.ui.setFocus(focus);
 		};
 		const { component, focus } = create(done);
 		this.ctx.editorContainer.clear();
@@ -796,6 +850,9 @@ export class SelectorController {
 			}
 			const dirs = { projectDir, agentDir };
 			const initialDoc = await loadWatchdogConfigFile(await resolveAdvisorConfigEditPath(initialScope, dirs));
+			if (initialDoc.warnings?.length) {
+				this.ctx.showWarning(`WATCHDOG.yml: ${sanitizeDisplayWarnings(initialDoc.warnings).join("; ")}`);
+			}
 			// Fullscreen editor on the alternate screen (the /settings idiom): the
 			// overlay holds the alt buffer + mouse tracking; the transcript stays put.
 			const done = () => {
@@ -832,6 +889,9 @@ export class SelectorController {
 						discovered.sharedMaxNotesPerUpdate,
 					);
 					this.ctx.statusLine.invalidate();
+					if (discovered.warnings.length > 0) {
+						this.ctx.showWarning(`WATCHDOG.yml: ${sanitizeDisplayWarnings(discovered.warnings).join("; ")}`);
+					}
 					this.ctx.showStatus(
 						count > 0
 							? `Saved ${scope} WATCHDOG.yml — ${count} advisor${count === 1 ? "" : "s"} active.`
@@ -842,6 +902,9 @@ export class SelectorController {
 				close: done,
 				requestRender: () => this.ctx.ui.requestRender(),
 				notify: message => this.ctx.showStatus(message),
+				// Scope switches happen inside the overlay; the initial file's warnings
+				// were already shown above, so only newly activated files arrive here.
+				warn: message => this.ctx.showWarning(message),
 				getAdvisorStats: () => this.ctx.session.getAdvisorStats().advisors,
 				getUsageReports: async () => this.ctx.session.fetchUsageReports?.() ?? null,
 				resolveActiveAccount: (provider, sessionId) =>
@@ -979,6 +1042,7 @@ export class SelectorController {
 		// Discovery provider toggles
 		if (id.startsWith("discovery.")) {
 			const providerId = id.replace("discovery.", "");
+			const { disableProvider, enableProvider } = loadProviderToggles();
 			if (value) {
 				enableProvider(providerId);
 			} else {
@@ -990,7 +1054,7 @@ export class SelectorController {
 		switch (id) {
 			// Session-managed settings (not in SettingsManager)
 			case "autoCompact":
-				this.ctx.session.setAutoCompactionEnabled(value as boolean);
+				this.ctx.session.setAutoCompactionEnabled(value as boolean, true);
 				this.ctx.statusLine.setAutoCompactEnabled(value as boolean);
 				break;
 			case "composer.shape":
@@ -1008,13 +1072,13 @@ export class SelectorController {
 				}
 				break;
 			case "steeringMode":
-				this.ctx.session.setSteeringMode(value as "all" | "one-at-a-time");
+				this.ctx.session.setSteeringMode(value as "all" | "one-at-a-time", true);
 				break;
 			case "followUpMode":
-				this.ctx.session.setFollowUpMode(value as "all" | "one-at-a-time");
+				this.ctx.session.setFollowUpMode(value as "all" | "one-at-a-time", true);
 				break;
 			case "interruptMode":
-				this.ctx.session.setInterruptMode(value as "immediate" | "wait");
+				this.ctx.session.setInterruptMode(value as "immediate" | "wait", true);
 				break;
 			case "thinkingLevel":
 			case "defaultThinkingLevel":
@@ -1058,6 +1122,14 @@ export class SelectorController {
 				this.ctx.ui.requestRender();
 				break;
 
+			case "tui.vimMode":
+			case "tui.vimModeDisplay":
+				this.ctx.applyVimModeSetting();
+				break;
+			case "display.pinnedAgents":
+				this.ctx.applyPinnedAgentsSetting();
+				break;
+
 			// Settings with UI side effects
 			case "display.hideToolActivity": {
 				const hidden = value as boolean;
@@ -1072,7 +1144,8 @@ export class SelectorController {
 				}
 				this.ctx.chatContainer.setToolActivityVisible(!hidden);
 				if (hidden) this.ctx.ui.clearInlineImages();
-				this.ctx.ui.requestRender(true);
+				// Match the shortcut path: visibility changes must rebuild retired terminal history.
+				this.ctx.ui.resetDisplay();
 				break;
 			}
 			case "terminal.showImages":
@@ -1347,6 +1420,7 @@ export class SelectorController {
 	 * highlighted and preselected; a leading `@` searches ctrl+p quick roles.
 	 */
 	#showModelPicker(): void {
+		const { ModelPickerComponent } = loadModelOverlayComponents();
 		const currentContextTokens = this.ctx.session.getContextUsage()?.tokens ?? 0;
 		const current = this.ctx.session.model;
 		const quickRoleOrder = this.ctx.settings.get("cycleOrder");
@@ -1437,6 +1511,7 @@ export class SelectorController {
 	 * entry — used when reopening the hub after a /login round-trip.
 	 */
 	#showModelHub(hubOptions: { initialProviderId?: string }): void {
+		const { ModelHubComponent } = loadModelOverlayComponents();
 		let closed = false;
 		const done = () => {
 			// Re-entrant guard: cancel paths (Esc, login forward) may race;
@@ -1502,7 +1577,7 @@ export class SelectorController {
 									thinkingLevel: isAuto ? ThinkingLevel.Inherit : concreteThinking,
 									persist: targetScope === "global",
 								});
-								if (!switched) return;
+								if (!switched) return false;
 								if (targetScope === "project") {
 									this.ctx.settings.setProjectModelRole(
 										"default",
@@ -1531,8 +1606,10 @@ export class SelectorController {
 								`${scopeLabel}${roleInfo?.tag ?? roleInfo?.name ?? role} model: ${selector ?? model.id}`,
 							);
 						}
+						return true;
 					} catch (error) {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
+						return false;
 					} finally {
 						releaseDefaultMutation?.();
 						hub?.refreshAfterExternalMutation();
@@ -1759,13 +1836,24 @@ export class SelectorController {
 		const manager = this.ctx.sessionManager;
 		const linkTargets = getAssistantMessageLinkTargets(this.ctx);
 		const presentation: readonly unknown[] = [
-			theme, manager.getCwd(), this.ctx.effectiveHideThinkingBlock, this.ctx.proseOnlyThinking,
-			linkTargets, this.ctx.session.extensionRunner,
-			settings.get("display.showTokenUsage"), settings.get("display.showTurnTime"),
-			settings.get("display.hideToolActivity"), settings.get("display.cacheMissMarker"),
-			settings.get("terminal.showImages"), settings.get("read.toolResultPreview"),
+			theme,
+			manager.getCwd(),
+			this.ctx.effectiveHideThinkingBlock,
+			this.ctx.proseOnlyThinking,
+			linkTargets,
+			this.ctx.session.extensionRunner,
+			settings.get("display.showTokenUsage"),
+			settings.get("display.showTurnTime"),
+			settings.get("display.hideToolActivity"),
+			settings.get("display.cacheMissMarker"),
+			settings.get("terminal.showImages"),
+			settings.get("read.toolResultPreview"),
 		];
-		if (this.#rewind && (this.#rewind.manager !== manager || presentation.some((value, index) => value !== this.#rewind!.presentation[index]))) {
+		if (
+			this.#rewind &&
+			(this.#rewind.manager !== manager ||
+				presentation.some((value, index) => value !== this.#rewind!.presentation[index]))
+		) {
 			this.#rewind.unsubscribe?.();
 			this.#rewind.invalidate();
 			this.#rewind = undefined;
@@ -1797,7 +1885,9 @@ export class SelectorController {
 		};
 		const onSelect = (entryId: string) => {
 			selecting = true;
-			void this.#rewindFromTranscript(entryId, done).finally(() => { selecting = false; });
+			void this.#rewindFromTranscript(entryId, done).finally(() => {
+				selecting = false;
+			});
 		};
 		if (this.#rewind) {
 			selector = this.#rewind.selector;
@@ -1818,7 +1908,13 @@ export class SelectorController {
 				onSelect,
 				onCancel: done,
 			});
-			const cached = { selector, manager, presentation, invalidate, unsubscribe: undefined as (() => void) | undefined };
+			const cached = {
+				selector,
+				manager,
+				presentation,
+				invalidate,
+				unsubscribe: undefined as (() => void) | undefined,
+			};
 			this.#rewind = cached;
 			cached.unsubscribe = manager.subscribeSourceChanges(() => {
 				if (this.#rewind === cached) this.#rewind = undefined;
@@ -1832,32 +1928,39 @@ export class SelectorController {
 			return;
 		}
 		overlayHandle = this.ctx.ui.showOverlay(selector, {
-			anchor: "bottom-center", width: "100%", maxHeight: "100%", margin: 0, fullscreen: true,
+			anchor: "bottom-center",
+			width: "100%",
+			maxHeight: "100%",
+			margin: 0,
+			fullscreen: true,
 		});
-		void selector.ready.then(() => {
-			if (!closed && !invalidated && selector.targetCount === 0) {
+		void selector.ready.then(
+			() => {
+				if (!closed && !invalidated && selector.targetCount === 0) {
+					invalidate();
+					this.ctx.showStatus("No messages to branch from");
+				}
+			},
+			error => {
+				if (closed) return;
 				invalidate();
-				this.ctx.showStatus("No messages to branch from");
-			}
-		}, error => {
-			if (closed) return;
-			invalidate();
-			this.ctx.showStatus("Unable to open rewind: " + String(error));
-		});
+				this.ctx.showStatus("Unable to open rewind: " + String(error));
+			},
+		);
 		this.ctx.ui.setFocus(selector);
 		// Acquisition starts only after the loading surface is visible and accepts Esc.
 		this.ctx.ui.renderNow();
 	}
 
-	async #collectRewindMessages(manager: SessionManager, signal: AbortSignal): Promise<SessionMessageEntry[]> {
-		const entries: SessionMessageEntry[] = [];
+	async #collectRewindMessages(manager: SessionManager, signal: AbortSignal): Promise<TranscriptEntry[]> {
+		const entries: TranscriptEntry[] = [];
 		let id = manager.getLeafId();
 		let deadline = performance.now() + 8;
 		while (id !== null) {
 			if (signal.aborted) return [];
 			const entry = manager.getEntry(id);
 			if (!entry) break;
-			if (entry.type === "message") entries.push(entry);
+			if (isTranscriptEntry(entry)) entries.push(entry);
 			id = entry.parentId;
 			if (performance.now() >= deadline) {
 				await new Promise<void>(resolve => setImmediate(resolve));
@@ -1888,18 +1991,18 @@ export class SelectorController {
 		const manager = this.ctx.sessionManager;
 		const entry = manager.getEntry(entryId);
 		if (!entry) return [];
-		const siblings = entry.parentId === null
-			? manager.getTree().map(node => node.entry).filter(sibling => sibling.id !== entryId)
-			: manager.getChildren(entry.parentId).filter(sibling => sibling.id !== entryId)
-				.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+		const siblings = manager
+			.getChildren(entry.parentId)
+			.filter(sibling => sibling.id !== entryId)
+			.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 		const paths: BranchVariantPath[] = [];
 		let deadline = performance.now() + 8;
 		for (const sibling of siblings) {
-			const entries: SessionMessageEntry[] = [];
+			const entries: TranscriptEntry[] = [];
 			let current: SessionEntry | undefined = sibling;
 			while (current) {
 				if (signal.aborted) return [];
-				if (current.type === "message") entries.push(current);
+				if (isTranscriptEntry(current)) entries.push(current);
 				const children = manager.getChildren(current.id);
 				// Match stable tree order, including the last inserted equal-time child.
 				children.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
@@ -1917,20 +2020,21 @@ export class SelectorController {
 	/**
 	 * Complete an esc-esc rewind in place via `navigateTree`: the session tree
 	 * keeps the old path as a sibling branch instead of forking a child
-	 * session. A user-message target rewinds PAST itself (leaf moves to its
-	 * parent) and its text replaces the editor draft, so it is a real move
-	 * even when it is the current leaf; every other target lands the leaf on
-	 * the entry. `done` closes the fullscreen selector after the transcript is
-	 * rebuilt so the alternate screen never flashes a stale transcript.
+	 * session. A user-request target (plain prompt, user-invoked skill/collab
+	 * prompt) rewinds PAST itself (leaf moves to its parent) and its draft
+	 * replaces the editor text, so it is a real move even when it is the
+	 * current leaf; every other target lands the leaf on the entry. `done`
+	 * closes the fullscreen selector after the transcript is rebuilt so the
+	 * alternate screen never flashes a stale transcript.
 	 */
 	async #rewindFromTranscript(entryId: string, done: () => void): Promise<void> {
 		const entry = this.ctx.sessionManager.getEntry(entryId);
-		if (entry?.type !== "message") {
+		if (!entry || !isTranscriptEntry(entry)) {
 			done();
 			return;
 		}
 
-		const isUserTarget = entry.message.role === "user";
+		const isUserTarget = isUserRequestEntry(entry);
 		const realLeafId = this.ctx.sessionManager.getLeafId();
 		if (entryId === realLeafId && !isUserTarget) {
 			done();
@@ -1965,9 +2069,7 @@ export class SelectorController {
 	}
 
 	showCopySelector(): void {
-		const entries = this.ctx.sessionManager
-			.getBranch()
-			.filter((entry): entry is SessionMessageEntry => entry.type === "message");
+		const entries = this.ctx.sessionManager.getBranch().filter(isTranscriptEntry);
 		if (entries.length === 0) {
 			this.ctx.showStatus("Nothing to copy yet.");
 			return;
@@ -2205,12 +2307,12 @@ export class SelectorController {
 	/**
 	 * First rendered message a pure tree rewind drops, plus the leaf id the
 	 * navigation is expected to land on. `targetId` must sit on the current
-	 * leaf's path; a user-message target rewinds PAST itself (navigateTree
-	 * moves the leaf to its parent and hands the text back as an editor
-	 * draft), every other target keeps the target as the new leaf. Returns
-	 * undefined when the navigation is not a pure rewind or the boundary entry
-	 * cannot anchor an in-place truncation (non-message boundary; custom
-	 * messages render unkeyed components).
+	 * leaf's path; a user-request target rewinds PAST itself (navigateTree
+	 * moves the leaf to its parent and hands the draft back to the editor),
+	 * every other target keeps the target as the new leaf. Returns undefined
+	 * when the navigation is not a pure rewind or the boundary entry cannot
+	 * anchor an in-place truncation (non-message boundary; custom messages
+	 * render unkeyed components, so a skill/collab target takes the replay).
 	 */
 	#treeRewindBoundary(
 		targetId: string,
@@ -2219,7 +2321,7 @@ export class SelectorController {
 		if (!leafId) return undefined;
 		const target = this.ctx.sessionManager.getEntry(targetId);
 		if (!target) return undefined;
-		const rewindsPastTarget = target.type === "message" && target.message.role === "user";
+		const rewindsPastTarget = isUserRequestEntry(target);
 		if (!rewindsPastTarget && target.type === "custom_message") return undefined;
 		// Walk leaf → root: proves the target is on the current path and finds
 		// the first entry the rewind drops.
@@ -2367,6 +2469,9 @@ export class SelectorController {
 				historyMatcher,
 				loadAllSessions: () => SessionManager.listAll(),
 				pinnedIds,
+				// Live getter so detach/newSession stays accurate; tolerant of partial
+				// contexts and in-memory sessions (undefined file means no marker).
+				currentSessionPath: () => this.ctx.sessionManager.getSessionFile?.() ?? undefined,
 			};
 		}
 
@@ -2435,10 +2540,12 @@ export class SelectorController {
 			return true;
 		}
 
+		await this.ctx.prepareSessionSwitch();
 		const detached = await this.ctx.session.newSession();
 		if (!detached) {
 			return false;
 		}
+		this.ctx.resetObserverRegistry();
 		this.#refreshSessionTerminalTitle();
 
 		this.ctx.clearTransientSessionUi();
@@ -2465,6 +2572,8 @@ export class SelectorController {
 				return false;
 			}
 		}
+		await this.ctx.prepareSessionSwitch();
+		this.ctx.resetObserverRegistry();
 		// AgentSession owns the transaction. It restores the complete source state
 		// if applying the target project's cwd fails, including in-memory sessions.
 		if (
@@ -2515,7 +2624,11 @@ export class SelectorController {
 			return;
 		}
 
-		if (!(await confirmRequirementsJournalDeletion(this.ctx.settings, sessionFile, (title, options) => this.ctx.showHookSelector(title, options)))) {
+		if (
+			!(await confirmRequirementsJournalDeletion(this.ctx.settings, sessionFile, (title, options) =>
+				this.ctx.showHookSelector(title, options),
+			))
+		) {
 			this.ctx.showStatus("Delete cancelled");
 			return;
 		}
@@ -2541,6 +2654,7 @@ export class SelectorController {
 	 */
 	async #handleOAuthLogin(providerId: string): Promise<boolean> {
 		this.ctx.showStatus(`Logging in to ${providerId}…`);
+		const { LoginDialogComponent, PASTE_CODE_LOGIN_PROVIDERS } = loadProviderAuthUi();
 		const useManualInput = PASTE_CODE_LOGIN_PROVIDERS.has(providerId);
 		let restored = false;
 		const restoreEditor = () => {
@@ -2564,6 +2678,7 @@ export class SelectorController {
 		try {
 			const identity = await this.ctx.session.modelRegistry.authStorage.login(providerId as OAuthProvider, {
 				signal: dialog.signal,
+				onBrowserSession: captureBrowserSession,
 				onAuth: (info: { url: string; launchUrl?: string; instructions?: string }) => {
 					// The dialog renders the full URL (SSH-safe copy target) and
 					// opens the browser best-effort.
@@ -2671,6 +2786,7 @@ export class SelectorController {
 			);
 			return;
 		}
+		const { getOAuthProviders, LogoutAccountSelectorComponent } = loadProviderAuthUi();
 		const provider = getOAuthProviders().find(candidate => candidate.id === providerId);
 		const accounts = toLogoutAccounts(providerId, authStorage.listStoredCredentials(providerId), {
 			activeIdentity: authStorage.getOAuthAccountIdentity(providerId, this.ctx.session.sessionId),
@@ -2710,6 +2826,7 @@ export class SelectorController {
 			return;
 		}
 
+		const { getOAuthProviders, OAuthSelectorComponent } = loadProviderAuthUi();
 		if (mode === "logout") {
 			await this.#refreshOAuthProviderAuthState();
 			const oauthProviders = getOAuthProviders();
@@ -2777,6 +2894,7 @@ export class SelectorController {
 			this.ctx.showStatus("Select a model before pinning a provider account.");
 			return;
 		}
+		const { getOAuthProviders } = loadProviderAuthUi();
 		const provider = getOAuthProviders().find(candidate => candidate.id === accountList.provider);
 		const providerName = provider?.name ?? accountList.provider;
 		const accounts = toSessionPinAccounts(accountList.accounts);

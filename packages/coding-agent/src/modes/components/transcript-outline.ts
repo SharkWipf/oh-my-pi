@@ -6,6 +6,7 @@
  */
 import type { Component } from "@oh-my-pi/pi-tui";
 import { visibleWidth } from "@oh-my-pi/pi-tui";
+import { isUserRequestEntry, type TranscriptEntry, userTurnDraft } from "../../session/session-context";
 import type { SessionMessageEntry } from "../../session/session-entries";
 import { type ThemeColor, theme } from "../theme/theme";
 import type { ChatTranscriptBuilder } from "./chat-transcript-builder";
@@ -25,7 +26,7 @@ export interface OutlineTarget {
 	/** One past the last child rendered by this entry. */
 	end: number;
 	/** Entries this target spans: the turn plus any folded tool results. */
-	entries: SessionMessageEntry[];
+	entries: TranscriptEntry[];
 }
 
 /** Composed rows of one column plus the outline's line range within them. */
@@ -101,14 +102,18 @@ export class OutlineRowCache {
  * are skipped. Usage rows flushed at the head of an append are attributed
  * to the turn above.
  */
-export function appendOutlineEntries(builder: ChatTranscriptBuilder, entries: SessionMessageEntry[]): OutlineTarget[] {
+export function appendOutlineEntries(builder: ChatTranscriptBuilder, entries: TranscriptEntry[]): OutlineTarget[] {
 	const targets: OutlineTarget[] = [];
 	for (const entry of entries) appendOutlineEntry(builder, entry, targets);
 	return targets;
 }
 
 /** Append one source while retaining target folding across cooperative yields. */
-export function appendOutlineEntry(builder: ChatTranscriptBuilder, entry: SessionMessageEntry, targets: OutlineTarget[]): void {
+export function appendOutlineEntry(
+	builder: ChatTranscriptBuilder,
+	entry: TranscriptEntry,
+	targets: OutlineTarget[],
+): void {
 	const children = builder.container.children;
 	const before = children.length;
 	builder.append([entry]);
@@ -120,7 +125,7 @@ export function appendOutlineEntry(builder: ChatTranscriptBuilder, entry: Sessio
 		start++;
 	}
 	const previous = targets.at(-1);
-	if (entry.message.role === "toolResult" && previous) {
+	if (entry.type === "message" && entry.message.role === "toolResult" && previous) {
 		previous.entryId = entry.id;
 		previous.entries.push(entry);
 		if (after > previous.end) previous.end = after;
@@ -130,7 +135,7 @@ export function appendOutlineEntry(builder: ChatTranscriptBuilder, entry: Sessio
 	targets.push({
 		entryId: entry.id,
 		turnId: entry.id,
-		isUserTurn: entry.message.role === "user" && userMessageHasText(entry.message),
+		isUserTurn: isUserTurnEntry(entry),
 		start,
 		end: after,
 		entries: [entry],
@@ -238,6 +243,27 @@ export function positionRail(
 	return " ".repeat(pad) + rail;
 }
 
+/**
+ * A turn the user can rewind past and re-edit: a user message with prompt
+ * text or images, or a user-initiated custom message (skill / collab prompt).
+ */
+export function isUserTurnEntry(entry: TranscriptEntry): boolean {
+	if (entry.type === "message" && entry.message.role === "user") {
+		return (
+			userMessageHasText(entry.message) ||
+			(Array.isArray(entry.message.content) && entry.message.content.some(block => block.type === "image"))
+		);
+	}
+	return isUserRequestEntry(entry);
+}
+
+/** Single-line label for a user turn: its prompt text, or the custom message's draft. */
+export function userTurnLabel(entry: TranscriptEntry): string | undefined {
+	if (entry.type === "message" && entry.message.role === "user") return userMessageText(entry.message);
+	const draft = userTurnDraft(entry);
+	return draft === undefined ? undefined : draft.replace(/\s+/g, " ").trim();
+}
+
 /** Plain text of a user message (string or text blocks), single line. */
 export function userMessageText(message: Extract<SessionMessageEntry["message"], { role: "user" }>): string {
 	const text =
@@ -282,8 +308,14 @@ export class OutlineViewport {
 	moreAbove = false;
 	moreBelow = false;
 
-	configure(children: readonly Component[], target: OutlineTarget | undefined, width: number, height: number,
-		from = 0, to = children.length): void {
+	configure(
+		children: readonly Component[],
+		target: OutlineTarget | undefined,
+		width: number,
+		height: number,
+		from = 0,
+		to = children.length,
+	): void {
 		this.#children = children;
 		this.#target = target;
 		this.#width = width;
@@ -334,7 +366,7 @@ export class OutlineViewport {
 			if (head < tail) rows.push(...outlineRows(source.slice(head, tail), Math.max(10, this.#width - 4)));
 			rows.push(...source.slice(tail));
 		} else {
-			rows = this.#raw(index).map(row => row ? `  ${row}` : row);
+			rows = this.#raw(index).map(row => (row ? `  ${row}` : row));
 		}
 		this.#rows.set(index, rows);
 		return rows;
@@ -345,7 +377,10 @@ export class OutlineViewport {
 			this.#child = this.#unit(this.#child);
 			const length = this.#block(this.#child).length;
 			const remaining = Math.max(0, length - this.#row);
-			if (amount < remaining) { this.#row += amount; return; }
+			if (amount < remaining) {
+				this.#row += amount;
+				return;
+			}
 			amount -= remaining;
 			this.#child = this.#next(this.#child);
 			this.#row = 0;
@@ -442,4 +477,3 @@ export class OutlineViewport {
 		return this.#retained;
 	}
 }
-

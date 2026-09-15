@@ -1,6 +1,6 @@
 import type { AgentOptions, AgentTelemetryConfig, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import type { EditStore } from "@oh-my-pi/pi-natives";
-import type { FetchImpl, ImageContent, Model, ServiceTierByFamily, ToolChoice, UserMessageProducer } from "@oh-my-pi/pi-ai";
+import type { FetchImpl, ImageContent, Model, ServiceTierByFamily, ToolChoice } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AsyncJobManager } from "../async/job-manager";
 import type { Rule } from "../capability/rule";
@@ -26,7 +26,7 @@ import type { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import type { AgentRegistry } from "../registry/agent-registry";
 import type { ArtifactManager } from "../session/artifacts";
 import type { ClientBridge } from "../session/client-bridge";
-import type { CustomMessage } from "../session/messages";
+import type { CustomMessage, UserMessageProducer } from "../session/messages";
 import type { UsageStatistics } from "../session/session-entries";
 import type { SessionManager } from "../session/session-manager";
 import type { ToolChoiceQueue } from "../session/tool-choice-queue";
@@ -175,6 +175,8 @@ export interface ToolSession {
 	fetch?: FetchImpl;
 	/** Provider credential resolver forwarded unchanged to restricted child sessions. */
 	getApiKey?: AgentOptions["getApiKey"];
+	/** Current session whose stored credential affinities should seed a child session. */
+	getCredentialSourceSessionId?: () => string | undefined;
 	/** Skip subprocess-kernel availability checks and warmup */
 	skipPythonPreflight?: boolean;
 	/** Pre-loaded context files (AGENTS.md, etc) */
@@ -372,7 +374,10 @@ export interface ToolSession {
 	/** Goal runtime for the active agent session. */
 	getGoalRuntime?: () => GoalRuntime | undefined;
 	/** Send ordinary user input through the owning session queue. */
-	sendUserMessage?: (content: string, options: { deliverAs: "followUp"; producer?: UserMessageProducer }) => Promise<void>;
+	sendUserMessage?: (
+		content: string,
+		options: { deliverAs: "followUp"; producer?: UserMessageProducer },
+	) => Promise<void>;
 	/** Get cumulative session usage statistics (input/output tokens, cost). */
 	getUsageStatistics?: () => UsageStatistics;
 	/** Current per-turn token budget {total, spent, hard} for the eval `budget` helper. */
@@ -385,8 +390,20 @@ export interface ToolSession {
 	getTodoPhases?: () => TodoPhase[];
 	/** Replace cached todo phases for this session. */
 	setTodoPhases?: (phases: TodoPhase[]) => void;
+	/**
+	 * Record todo phases on the session branch. Direct `todo` calls persist via
+	 * their toolResult entry; callers that produce none (the eval bridge) use this
+	 * so branch rehydration agrees with the in-memory list.
+	 */
+	persistTodoPhases?: (phases: TodoPhase[]) => void;
 	/** Active workpool items whose incremental yields complete the current turn. */
 	getWorkPoolYieldItems?: () => readonly WorkPoolYieldItem[];
+	/**
+	 * Trimmed text of the most recent assistant message, or `undefined` when the
+	 * turn carries no text (e.g. thinking-only). The yield tool uses it to reject
+	 * a data-less `useLastTurn` finalize that would assemble to an empty result.
+	 */
+	getLastAssistantText?: () => string | undefined;
 	/** Replace the active workpool item contract and refresh its provider-facing prompt. */
 	setWorkPoolYieldItems?: (items: readonly WorkPoolYieldItem[]) => Promise<void>;
 	/** The tool-choice queue used to force forthcoming tool invocations and carry invocation handlers. */

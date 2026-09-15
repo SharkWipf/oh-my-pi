@@ -1,7 +1,14 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { Context, ImageContent, Message, Model, ProviderPayload, TextContent } from "@oh-my-pi/pi-ai";
-import { combineContentSourceOrigins, exportItemOrigins, importItemOrigins, setSourceOrigin, transferMessageSourceOrigin, transferSourceOrigin } from "@oh-my-pi/pi-ai/utils/source-origin";
+import {
+	combineContentSourceOrigins,
+	exportItemOrigins,
+	importItemOrigins,
+	setSourceOrigin,
+	transferMessageSourceOrigin,
+	transferSourceOrigin,
+} from "@oh-my-pi/pi-ai/utils/source-origin";
 import { rasterizeSvg } from "@oh-my-pi/pi-natives";
 import {
 	formatBytes,
@@ -31,11 +38,17 @@ const modelBoundaryImageNormalizations = new Map<string, Promise<NormalizedImage
 const UNDECODABLE_STB_IMAGE_OMISSION_TEXT = "[image omitted: WebP could not be decoded for this model]";
 
 function createUndecodableStbImageOmission(): TextContent {
-	return setSourceOrigin({ type: "text", text: UNDECODABLE_STB_IMAGE_OMISSION_TEXT }, { kind: "synthetic", reason: "image-omission" });
+	return setSourceOrigin(
+		{ type: "text", text: UNDECODABLE_STB_IMAGE_OMISSION_TEXT },
+		{ kind: "synthetic", reason: "image-omission" },
+	);
 }
 
 function createNativeUndecodableStbImageOmission(): Record<string, unknown> {
-	return setSourceOrigin({ type: "input_text", text: UNDECODABLE_STB_IMAGE_OMISSION_TEXT }, { kind: "synthetic", reason: "image-omission" });
+	return setSourceOrigin(
+		{ type: "input_text", text: UNDECODABLE_STB_IMAGE_OMISSION_TEXT },
+		{ kind: "synthetic", reason: "image-omission" },
+	);
 }
 
 function hasWebPMagic(data: string): boolean {

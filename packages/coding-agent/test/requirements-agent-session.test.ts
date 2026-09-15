@@ -208,7 +208,12 @@ function createHarness(
 }
 
 async function capture(harness: Harness, text: string) {
-	const entryId = harness.manager.appendMessage({ role: "user", content: [{ type: "text", text }], timestamp: Date.now(), producer: { type: "human" } });
+	const entryId = harness.manager.appendMessage({
+		role: "user",
+		content: [{ type: "text", text }],
+		timestamp: Date.now(),
+		producer: { type: "human" },
+	});
 	await harness.session.requirements.observeCommittedSources();
 	const descriptor = harness.manager.getRequirementsSource(entryId);
 	if (!descriptor) throw new Error("Committed original source not indexed");
@@ -257,15 +262,21 @@ for (const actionKind of ["literal-adopt", "restore", "extract"] as const) {
 		const text = "Preserve the bounded operator decision after a stopped review.";
 		const captured = actionKind === "restore" ? await adopt(harness, text) : await capture(harness, text);
 		const revisionId = owner.snapshotApplicable().active[0]?.id;
-		if (revisionId) await owner.applyOperatorAction({ kind: "quarantine", revisionIds: [revisionId], reason: "Review before restoring" });
+		if (revisionId)
+			await owner.applyOperatorAction({
+				kind: "quarantine",
+				revisionIds: [revisionId],
+				reason: "Review before restoring",
+			});
 		const reviewer = harness.modelRegistry.getAll().find(candidate => candidate.id === "sanity")!;
 		harness.settings.setModelRole("requirementsExtraction", reviewer.provider + "/" + reviewer.id);
 		harness.settings.setModelRole("requirementsEvidence", reviewer.provider + "/" + reviewer.id);
 		let modelCalls = 0;
-		for (const candidate of harness.modelRegistry.getAll()) registerBoundary(candidate.api, () => {
-			modelCalls++;
-			throw new Error("A stopped requirements action dispatched a model");
-		});
+		for (const candidate of harness.modelRegistry.getAll())
+			registerBoundary(candidate.api, () => {
+				modelCalls++;
+				throw new Error("A stopped requirements action dispatched a model");
+			});
 		const entered = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
 		const inspect = owner.inspectSource.bind(owner);
@@ -275,12 +286,23 @@ for (const actionKind of ["literal-adopt", "restore", "extract"] as const) {
 			await release.promise;
 			return resolved;
 		};
-		const operation = actionKind === "extract" ? owner.processPending(captured.source.key) : owner.applyOperatorAction(
-			actionKind === "restore"
-				? { kind: "restore", revisionIds: [revisionId!], literalUnitId: captured.source.units[0]!.id }
-				: { kind: "literal-adopt", sourceKey: captured.source.key, unitId: captured.source.units[0]!.id,
-					scope: { kind: "session", sessionId: harness.manager.getSessionId(), epoch: captured.source.epoch } },
-		);
+		const operation =
+			actionKind === "extract"
+				? owner.processPending(captured.source.key)
+				: owner.applyOperatorAction(
+						actionKind === "restore"
+							? { kind: "restore", revisionIds: [revisionId!], literalUnitId: captured.source.units[0]!.id }
+							: {
+									kind: "literal-adopt",
+									sourceKey: captured.source.key,
+									unitId: captured.source.units[0]!.id,
+									scope: {
+										kind: "session",
+										sessionId: harness.manager.getSessionId(),
+										epoch: captured.source.epoch,
+									},
+								},
+					);
 		const settled = operation.catch(error => error);
 		try {
 			await entered.promise;
@@ -293,7 +315,10 @@ for (const actionKind of ["literal-adopt", "restore", "extract"] as const) {
 			expect(after.state.owners).toEqual(stopped.state.owners);
 			expect(after.batches).toEqual(stopped.batches);
 			expect(after.revisions).toEqual(stopped.revisions);
-		} finally { release.resolve(); await settled; }
+		} finally {
+			release.resolve();
+			await settled;
+		}
 	});
 }
 
@@ -314,12 +339,24 @@ test("STOP aborts the in-flight sanity stage and ignores its later successful re
 		const content = context.messages[0]!.content;
 		if (typeof content === "string" || content[0]?.type !== "text") throw new Error("Expected sanity input");
 		const payload = JSON.parse(content[0].text) as { candidates: { id: string }[] };
-		return createAssistantMessage(JSON.stringify({ candidates: payload.candidates.map(candidate => ({ id: candidate.id, decision: "pass", reason: "Accepted exact finite rule" })) }));
+		return createAssistantMessage(
+			JSON.stringify({
+				candidates: payload.candidates.map(candidate => ({
+					id: candidate.id,
+					decision: "pass",
+					reason: "Accepted exact finite rule",
+				})),
+			}),
+		);
 	});
-	const settled = owner.applyOperatorAction({ kind: "literal-adopt", sourceKey: captured.source.key,
-		unitId: captured.source.units[0]!.id,
-		scope: { kind: "session", sessionId: harness.manager.getSessionId(), epoch: captured.source.epoch },
-	}).catch(error => error);
+	const settled = owner
+		.applyOperatorAction({
+			kind: "literal-adopt",
+			sourceKey: captured.source.key,
+			unitId: captured.source.units[0]!.id,
+			scope: { kind: "session", sessionId: harness.manager.getSessionId(), epoch: captured.source.epoch },
+		})
+		.catch(error => error);
 	try {
 		await entered.promise;
 		expect(stageSignal?.aborted).toBe(false);
@@ -329,7 +366,10 @@ test("STOP aborts the in-flight sanity stage and ignores its later successful re
 		expect(await settled).toBeInstanceOf(Error);
 		expect(modelCalls).toBe(1);
 		expect(owner.status({ includeLedger: true }).snapshot.revisions).toEqual([]);
-	} finally { release.resolve(); await settled; }
+	} finally {
+		release.resolve();
+		await settled;
+	}
 });
 
 test("literal adoption of unknown provenance creates new operator authority without laundering the original", async () => {
@@ -341,14 +381,22 @@ test("literal adoption of unknown provenance creates new operator authority with
 	const selected = await harness.session.requirements.inspectSource(descriptor.key);
 	expect(harness.session.requirements.snapshotApplicable().active).toEqual([]);
 	const result = await harness.session.requirements.applyOperatorAction({
-		kind: "literal-adopt", sourceKey: descriptor.key, unitId: selected.units[0]!.id,
-		scope: { kind: "session", sessionId: harness.manager.getSessionId(), epoch: harness.manager.getRequirementsEpoch() },
+		kind: "literal-adopt",
+		sourceKey: descriptor.key,
+		unitId: selected.units[0]!.id,
+		scope: {
+			kind: "session",
+			sessionId: harness.manager.getSessionId(),
+			epoch: harness.manager.getRequirementsEpoch(),
+		},
 	});
 	expect(result).toMatchObject({ status: "accepted" });
 	const active = harness.session.requirements.snapshotApplicable().active;
 	expect(active.map(revision => revision.statement)).toEqual([text]);
 	expect(active[0]!.sourceKey).not.toBe(descriptor.key);
-	expect(active[0]!.referents).toEqual([{ sourceKey: descriptor.key, integrity: selected.source.integrity, unitId: selected.units[0]!.id }]);
+	expect(active[0]!.referents).toEqual([
+		{ sourceKey: descriptor.key, integrity: selected.source.integrity, unitId: selected.units[0]!.id },
+	]);
 	expect((await harness.session.requirements.inspectSource(descriptor.key)).source.origin.kind).toBe("unknown");
 	await harness.session.prompt("Execute the bounded action.", { synthetic: true });
 	await harness.session.waitForIdle();
@@ -867,8 +915,9 @@ test("deleting a foreign original while physical preparation awaits refuses the 
 		await harness.session.requirements.refreshCurrentEvidence();
 		expect(harness.session.requirements.snapshotApplicable().active).toEqual([]);
 		expect(
-			harness.session.requirements.status({ includeLedger: true }).snapshot.sources.find(source => source.key === captured.source.key)
-				?.state,
+			harness.session.requirements
+				.status({ includeLedger: true })
+				.snapshot.sources.find(source => source.key === captured.source.key)?.state,
 		).toBe("orphaned");
 	} finally {
 		release.resolve();
@@ -882,19 +931,32 @@ test("catalog relocation preserves accepted requirements and quarantine without 
 	const storage = await AgentStorage.open(temp.join("agent.db"));
 	const opened: Harness[] = [];
 	const seed = SessionManager.inMemory(temp.path());
-	const texts = ["Preserve the active requirement across journal relocation.", "Keep the quarantined requirement suspended."];
-	const entryIds = texts.map((text, timestamp) => seed.appendMessage({ role: "user", content: text, timestamp, producer: { type: "human" } }));
+	const texts = [
+		"Preserve the active requirement across journal relocation.",
+		"Keep the quarantined requirement suspended.",
+	];
+	const entryIds = texts.map((text, timestamp) =>
+		seed.appendMessage({ role: "user", content: text, timestamp, producer: { type: "human" } }),
+	);
 	const originalPath = temp.join("original.jsonl");
-	await writeFile(originalPath, [seed.getHeader(), ...seed.getEntries()].map(entry => JSON.stringify(entry)).join("\n") + "\n");
+	await writeFile(
+		originalPath,
+		[seed.getHeader(), ...seed.getEntries()].map(entry => JSON.stringify(entry)).join("\n") + "\n",
+	);
 	await seed.close();
 	try {
-		const original = createHarness({ manager: await SessionManager.open(originalPath, temp.path()), agentStorage: storage });
+		const original = createHarness({
+			manager: await SessionManager.open(originalPath, temp.path()),
+			agentStorage: storage,
+		});
 		opened.push(original);
 		for (const entryId of entryIds) {
 			const descriptor = original.manager.getRequirementsSource(entryId)!;
 			const { source } = await original.session.requirements.inspectSource(descriptor.key);
 			await original.session.requirements.applyOperatorAction({
-				kind: "literal-adopt", sourceKey: source.key, unitId: source.units[0]!.id,
+				kind: "literal-adopt",
+				sourceKey: source.key,
+				unitId: source.units[0]!.id,
 				scope: { kind: "session", sessionId: original.manager.getSessionId(), epoch: source.epoch },
 			});
 		}
@@ -909,21 +971,32 @@ test("catalog relocation preserves accepted requirements and quarantine without 
 		expect(beforeCatalog.coverageComplete).toBe(false);
 		const heads = original.session.requirements.snapshotApplicable().active;
 		const quarantined = heads.find(revision => revision.statement === texts[1])!;
-		await original.session.requirements.applyOperatorAction({ kind: "quarantine", revisionIds: [quarantined.id], reason: "Preserve the operator suspension across relocation" });
+		await original.session.requirements.applyOperatorAction({
+			kind: "quarantine",
+			revisionIds: [quarantined.id],
+			reason: "Preserve the operator suspension across relocation",
+		});
 		await original.manager.flush();
 		const relocatedPath = temp.join("relocated.jsonl");
 		await writeFile(relocatedPath, await readFile(originalPath, "utf8"));
-		const relocated = createHarness({ manager: await SessionManager.open(relocatedPath, temp.path()), agentStorage: storage });
+		const relocated = createHarness({
+			manager: await SessionManager.open(relocatedPath, temp.path()),
+			agentStorage: storage,
+		});
 		opened.push(relocated);
 		await relocated.session.requirements.refreshCurrentEvidence();
 		await relocated.session.requirements.observeCommittedSources(true);
 		const after = relocated.session.requirements.status({ includeLedger: true });
 		expect(after.applicable.active.map(revision => revision.statement)).toEqual([texts[0]!]);
-		expect(after.snapshot.revisions.map(revision => revision.id).sort()).toEqual(heads.map(revision => revision.id).sort());
+		expect(after.snapshot.revisions.map(revision => revision.id).sort()).toEqual(
+			heads.map(revision => revision.id).sort(),
+		);
 		expect(after.snapshot.revisions.find(revision => revision.id === quarantined.id)?.lifecycle).toBe("quarantined");
 		await unlink(originalPath);
 		await relocated.session.requirements.refreshCurrentEvidence();
-		const activeSource = await relocated.session.requirements.inspectSource(heads.find(revision => revision.statement === texts[0])!.sourceKey);
+		const activeSource = await relocated.session.requirements.inspectSource(
+			heads.find(revision => revision.statement === texts[0])!.sourceKey,
+		);
 		expect(activeSource.units.map(unit => unit.text)).toEqual([texts[0]!]);
 		await relocated.session.prompt("Execute only the active requirement.", { synthetic: true });
 		await relocated.session.agent.waitForIdle();
@@ -1048,15 +1121,20 @@ test("exact literal actions finish during cold indexing and still reject unavail
 	const catalog = owner.observeCommittedSources();
 	await entered.promise;
 	const action = {
-		kind: "literal-adopt" as const, sourceKey: captured.source.key, unitId: captured.source.units[0]!.id,
+		kind: "literal-adopt" as const,
+		sourceKey: captured.source.key,
+		unitId: captured.source.units[0]!.id,
 		scope: { kind: "session" as const, sessionId: harness.manager.getSessionId(), epoch: captured.source.epoch },
 	};
 	let timeout: ReturnType<typeof setTimeout> | undefined;
 	const admission = owner.applyOperatorAction(action);
 	try {
-		const result = await Promise.race([admission, new Promise<never>((_resolve, reject) => {
-			timeout = setTimeout(() => reject(new Error("Exact action waited for the unrelated cold catalog")), 2000);
-		})]);
+		const result = await Promise.race([
+			admission,
+			new Promise<never>((_resolve, reject) => {
+				timeout = setTimeout(() => reject(new Error("Exact action waited for the unrelated cold catalog")), 2000);
+			}),
+		]);
 		expect(result).toMatchObject({ status: "accepted" });
 		await harness.session.prompt("Execute the selected requirement.", { synthetic: true });
 		await harness.session.agent.waitForIdle();
@@ -1075,18 +1153,29 @@ test("exact literal actions finish during cold indexing and still reject unavail
 
 test("cold catalog never blocks an ordinary provider request or acquires a live hold", async () => {
 	const manager = SessionManager.inMemory("/requirements-cold-catalog");
-	manager.appendMessage({ role: "user", content: "Cold requirement remains inspectable.", timestamp: 1, producer: { type: "human" } });
+	manager.appendMessage({
+		role: "user",
+		content: "Cold requirement remains inspectable.",
+		timestamp: 1,
+		producer: { type: "human" },
+	});
 	const harness = createHarness({ manager });
 	const entered = Promise.withResolvers<void>();
 	const release = Promise.withResolvers<void>();
 	const iterate = manager.iterateRequirementsSources.bind(manager);
-	manager.iterateRequirementsSources = async function* (...args) { entered.resolve(); await release.promise; return yield* iterate(...args); };
+	manager.iterateRequirementsSources = async function* (...args) {
+		entered.resolve();
+		await release.promise;
+		return yield* iterate(...args);
+	};
 	try {
 		await harness.session.prompt("Perform the bounded action.", { synthetic: true });
 		await entered.promise;
 		expect(harness.calls).toHaveLength(1);
 		expect(harness.session.requirements.pendingLiveSnapshot().entryIds).toEqual([]);
-	} finally { release.resolve(); }
+	} finally {
+		release.resolve();
+	}
 	await harness.session.requirements.observeCommittedSources();
 	expect(harness.session.requirements.status({ includeLedger: true }).snapshot.sources).toHaveLength(1);
 });
@@ -1097,7 +1186,12 @@ test("disabled automatic observation leaves cold coverage lazy but explicit obse
 	const ids: string[] = [];
 	for (const text of ["Keep the first original.", "Keep the second original."]) {
 		ids.push(
-			harness.manager.appendMessage({ role: "user", content: [{ type: "text", text }], timestamp: 1, producer: { type: "human" } }),
+			harness.manager.appendMessage({
+				role: "user",
+				content: [{ type: "text", text }],
+				timestamp: 1,
+				producer: { type: "human" },
+			}),
 		);
 	}
 	await harness.session.requirements.observeCommittedSources();
@@ -1117,7 +1211,12 @@ test("enabling catalogs historical coverage without any model call or pending-li
 	const harness = createHarness();
 	harness.settings.override("requirements.enabled", false);
 	for (const text of ["Older unresolved requirement.", "Current committed requirement."]) {
-		harness.manager.appendMessage({ role: "user", content: [{ type: "text", text }], timestamp: 1, producer: { type: "human" } });
+		harness.manager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text }],
+			timestamp: 1,
+			producer: { type: "human" },
+		});
 	}
 	harness.settings.override("requirements.enabled", true);
 	while (
@@ -1134,7 +1233,12 @@ test("enabling catalogs historical coverage without any model call or pending-li
 test("a cold observation canceled by session replacement cannot install abandoned source coverage", async () => {
 	const harness = createHarness();
 	const manager = harness.manager;
-	manager.appendMessage({ role: "user", content: "Abandoned session original.", timestamp: 1, producer: { type: "human" } });
+	manager.appendMessage({
+		role: "user",
+		content: "Abandoned session original.",
+		timestamp: 1,
+		producer: { type: "human" },
+	});
 	const entered = Promise.withResolvers<void>();
 	const release = Promise.withResolvers<void>();
 	const iterate = manager.iterateRequirementsSources.bind(manager);
@@ -1157,35 +1261,63 @@ test("a cold observation canceled by session replacement cannot install abandone
 		await entered.promise;
 		harness.session.requirements.cancelPending("Session replaced during cold observation");
 		await manager.newSession();
-		currentEntry = manager.appendMessage({ role: "user", content: "Current session original.", timestamp: 2, producer: { type: "human" } });
+		currentEntry = manager.appendMessage({
+			role: "user",
+			content: "Current session original.",
+			timestamp: 2,
+			producer: { type: "human" },
+		});
 	} finally {
 		release.resolve();
 	}
 	await observing;
 	const status = harness.session.requirements.status({ includeLedger: true });
 	expect(status.sourceCatalog).toBe("last-observed");
-	expect(status.snapshot.sources.flatMap(source => source.locators.map(locator => locator.entryId))).toEqual([currentEntry]);
+	expect(status.snapshot.sources.flatMap(source => source.locators.map(locator => locator.entryId))).toEqual([
+		currentEntry,
+	]);
 	expect(harness.session.requirements.pendingLiveSnapshot().entryIds).toEqual([]);
 });
 
 test("quarantine survives unavailable original bytes and reappearance until explicit fresh restore", async () => {
 	using temp = TempDir.createSync("requirements-original-restore-");
 	const journalPath = temp.join("session.jsonl");
-	const manager = await SessionManager.open(journalPath, temp.path(), new FileSessionStorage(), { initialCwd: temp.path(), suppressBreadcrumb: true });
+	const manager = await SessionManager.open(journalPath, temp.path(), new FileSessionStorage(), {
+		initialCwd: temp.path(),
+		suppressBreadcrumb: true,
+	});
 	const harness = createHarness({ manager });
 	const text = "Keep the original technical spelling exactly.";
 	const captured = await adopt(harness, text);
 	const revision = harness.session.requirements.snapshotApplicable().active[0]!;
 	await manager.flush();
 	const original = await readFile(journalPath);
-	await harness.session.requirements.applyOperatorAction({ kind: "quarantine", revisionIds: [revision.id], reason: "Operator requested review" });
+	await harness.session.requirements.applyOperatorAction({
+		kind: "quarantine",
+		revisionIds: [revision.id],
+		reason: "Operator requested review",
+	});
 	await unlink(journalPath);
-	await expect(harness.session.requirements.applyOperatorAction({ kind: "restore", revisionIds: [revision.id], literalUnitId: captured.source.units[0]!.id })).rejects.toThrow("unavailable");
-	expect(await harness.session.requirements.applyOperatorAction({ kind: "inspect", revisionId: revision.id })).toMatchObject({ lifecycle: "quarantined" });
+	await expect(
+		harness.session.requirements.applyOperatorAction({
+			kind: "restore",
+			revisionIds: [revision.id],
+			literalUnitId: captured.source.units[0]!.id,
+		}),
+	).rejects.toThrow("unavailable");
+	expect(
+		await harness.session.requirements.applyOperatorAction({ kind: "inspect", revisionId: revision.id }),
+	).toMatchObject({ lifecycle: "quarantined" });
 	await writeFile(journalPath, original);
 	await harness.session.requirements.refreshCurrentEvidence();
 	expect(harness.session.requirements.snapshotApplicable().active).toEqual([]);
-	expect(await harness.session.requirements.applyOperatorAction({ kind: "restore", revisionIds: [revision.id], literalUnitId: captured.source.units[0]!.id })).toEqual([revision.id]);
+	expect(
+		await harness.session.requirements.applyOperatorAction({
+			kind: "restore",
+			revisionIds: [revision.id],
+			literalUnitId: captured.source.units[0]!.id,
+		}),
+	).toEqual([revision.id]);
 	await harness.session.prompt("Use the freshly restored rule.", { synthetic: true });
 	await harness.session.waitForIdle();
 	expect(requirementStatements(harness.calls[0]!)).toEqual([text]);
@@ -1195,17 +1327,33 @@ test("historical unknown coverage is aggregated while a bounded branch request r
 	using temp = TempDir.createSync("requirements-historical-provider-");
 	const seed = SessionManager.inMemory(temp.path());
 	const historical = 4096;
-	for (let index = 0; index < historical; index++) seed.appendMessage({ role: "user", content: "Unknown historical input " + index, timestamp: index });
+	for (let index = 0; index < historical; index++)
+		seed.appendMessage({ role: "user", content: "Unknown historical input " + index, timestamp: index });
 	const common = seed.getLeafId()!;
-	const sibling = seed.appendMessage({ role: "user", content: "Abandoned sibling request", timestamp: historical + 1, producer: { type: "human" } });
+	const sibling = seed.appendMessage({
+		role: "user",
+		content: "Abandoned sibling request",
+		timestamp: historical + 1,
+		producer: { type: "human" },
+	});
 	seed.branch(common);
-	const current = { role: "user" as const, content: "Perform only this bounded branch action.", timestamp: historical + 2, producer: { type: "human" as const } };
+	const current = {
+		role: "user" as const,
+		content: "Perform only this bounded branch action.",
+		timestamp: historical + 2,
+		producer: { type: "human" as const },
+	};
 	const entry = seed.appendMessage(current);
 	const journalPath = temp.join("historical.jsonl");
-	await writeFile(journalPath, [seed.getHeader(), ...seed.getEntries()].map(entry => JSON.stringify(entry)).join("\n") + "\n");
+	await writeFile(
+		journalPath,
+		[seed.getHeader(), ...seed.getEntries()].map(entry => JSON.stringify(entry)).join("\n") + "\n",
+	);
 	await seed.close();
 	const storage = await AgentStorage.open(temp.join("agent.db"));
-	const manager = await SessionManager.open(journalPath, temp.path(), new FileSessionStorage(), { suppressBreadcrumb: true });
+	const manager = await SessionManager.open(journalPath, temp.path(), new FileSessionStorage(), {
+		suppressBreadcrumb: true,
+	});
 	const harness = createHarness({ manager, agentStorage: storage });
 	try {
 		await harness.session.requirements.observeCommittedSources();
@@ -1217,12 +1365,20 @@ test("historical unknown coverage is aggregated while a bounded branch request r
 		harness.agent.replaceMessages([current]);
 		await harness.session.prompt("Execute the bounded current action.", { synthetic: true });
 		await harness.session.waitForIdle();
-		expect(harness.calls, JSON.stringify({ receipt: harness.session.requirements.status().receipt, messages: harness.agent.state.messages })).toHaveLength(1);
+		expect(
+			harness.calls,
+			JSON.stringify({
+				receipt: harness.session.requirements.status().receipt,
+				messages: harness.agent.state.messages,
+			}),
+		).toHaveLength(1);
 		const request = JSON.stringify(harness.calls[0]!.context);
 		expect(request).toContain(current.content);
 		expect(request).not.toContain("Abandoned sibling request");
 		expect(request).not.toContain("Unknown historical input");
-		expect(harness.agent.tokenizer.countTokens(request)).toBeLessThan(harness.model.contextWindow! - harness.model.maxTokens!);
+		expect(harness.agent.tokenizer.countTokens(request)).toBeLessThan(
+			harness.model.contextWindow! - harness.model.maxTokens!,
+		);
 		const status = harness.session.requirements.status({ includeLedger: true });
 		expect(status.snapshot.revisions).toEqual([]);
 		expect(status.snapshot.batches).toEqual([]);
@@ -1238,7 +1394,10 @@ test("historical unknown coverage is aggregated while a bounded branch request r
 		const originalJournal = await readFile(journalPath, "utf8");
 		const firstNewline = originalJournal.indexOf("\n");
 		const header = JSON.parse(originalJournal.slice(0, firstNewline));
-		await writeFile(journalPath, JSON.stringify({ ...header, id: crypto.randomUUID() }) + originalJournal.slice(firstNewline));
+		await writeFile(
+			journalPath,
+			JSON.stringify({ ...header, id: crypto.randomUUID() }) + originalJournal.slice(firstNewline),
+		);
 		await expect(harness.session.requirements.inspectSource(first.key)).rejects.toThrow("unavailable");
 		await writeFile(journalPath, originalJournal);
 		expect((await manager.observeRequirementsEvidence([first]))[0]!.integrity).toBe(first.integrity);
@@ -1246,6 +1405,8 @@ test("historical unknown coverage is aggregated while a bounded branch request r
 		expect((await manager.observeRequirementsEvidence([first]))[0]!.integrity).toBeNull();
 		await expect(harness.session.requirements.inspectSource(first.key)).rejects.toThrow("unavailable");
 	} finally {
-		await harness.session.dispose(); sessions.delete(harness.session); AgentStorage.close();
+		await harness.session.dispose();
+		sessions.delete(harness.session);
+		AgentStorage.close();
 	}
 });

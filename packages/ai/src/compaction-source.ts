@@ -57,7 +57,7 @@ export type SourceLayoutPart =
 			blockIndex: number;
 			/** Current source block; absence denotes an unresolved historical reference. */
 			currentBlockIndex?: number;
-		}
+	  }
 	| {
 			kind: "source";
 			entryId: string;
@@ -67,7 +67,7 @@ export type SourceLayoutPart =
 			spans?: SourceBlockRange[];
 			/** Frozen ownership of this whole emitted part; mixed spans use per-run coverage instead. */
 			contribution?: SourceCoverageRun["contribution"];
-		}
+	  }
 	| {
 			kind: "gap";
 			beforeEntryId?: string;
@@ -75,7 +75,7 @@ export type SourceLayoutPart =
 			/** Positive wholly missing context-producing entries only; never partial truncation. */
 			wholeMessages?: number;
 			reason: "omitted-messages" | "partial-text" | "image-deleted" | "unknown-source";
-		};
+	  };
 
 /** Stored once in existing compaction preserveData.sourceRepresentation. */
 export interface SourceRepresentation {

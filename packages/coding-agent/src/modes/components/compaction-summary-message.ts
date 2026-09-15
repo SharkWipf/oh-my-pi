@@ -12,6 +12,10 @@ const COMPACTION_METHOD_LABELS: Record<string, string> = {
 	handoff: "handed-off",
 	snapcompact: "snap-compacted",
 	shake: "shaken",
+	"anthropic-native": "Anthropic-native",
+	"openai-native-v1": "OpenAI-native-v1",
+	"openai-native-v2": "OpenAI-native-v2",
+	"local-summary": "soft-compacted",
 };
 
 /** `256K→20K` amount badge, or undefined when the entry predates `tokensAfter`. */
@@ -111,7 +115,9 @@ export class CompactionSummaryMessageComponent implements Component {
 	readonly #diagnosticLines: string[] | undefined;
 
 	constructor(private readonly message: CompactionSummaryMessage) {
-		this.#diagnosticLines = message.diagnostics ? renderCompactionDiagnosticsSummary(message.diagnostics).split("\n") : undefined;
+		this.#diagnosticLines = message.diagnostics
+			? renderCompactionDiagnosticsSummary(message.diagnostics).split("\n")
+			: undefined;
 		this.#divider = new SummaryDividerComponent({
 			// A dead-end warning stamped by the progress guard badges the bar;
 			// the full text lives in the ctrl+o detail block below.
@@ -122,7 +128,8 @@ export class CompactionSummaryMessageComponent implements Component {
 	}
 
 	#label(): string {
-		const name = (this.message.method && COMPACTION_METHOD_LABELS[this.message.method]) || "compacted";
+		const method = this.message.diagnostics?.method ?? this.message.method;
+		const name = (method && COMPACTION_METHOD_LABELS[method]) || "compacted";
 		let label = `${theme.icon.camera} ${name}`;
 		const amount = this.#diagnosticLines?.[0] ?? compactionAmount(this.message);
 		if (amount) label += `${theme.sep.dot}${amount}`;
@@ -155,7 +162,9 @@ export class CompactionSummaryMessageComponent implements Component {
 		const frameNote =
 			frameCount > 0 ? `\n\n_${frameCount} snapcompact frame${frameCount === 1 ? "" : "s"} attached_` : "";
 		const warningNote = this.message.warning ? `\n\n${theme.icon.warning} **Warning:** ${this.message.warning}` : "";
-		const diagnosticNote = this.#diagnosticLines ? `\n\n${this.#diagnosticLines.join("\n\n")}\n\nUse /context details for ordered inventory and measurement basis.` : "";
+		const diagnosticNote = this.#diagnosticLines
+			? `\n\n${this.#diagnosticLines.join("\n\n")}\n\nUse /context details for ordered inventory and measurement basis.`
+			: "";
 		return `**${tokenLine}**${warningNote}${diagnosticNote}\n\n${this.message.summary}${frameNote}`;
 	}
 }

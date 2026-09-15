@@ -11,17 +11,27 @@ import type {
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
 import { decodeDataUri } from "@oh-my-pi/pi-ai/providers/openai-data-uri";
-import { combineContentSourceOrigins, exportItemOrigins, getSourceOrigin, importItemOrigins, setSourceOrigin, transferMessageSourceOrigin } from "@oh-my-pi/pi-ai/utils/source-origin";
+import {
+	combineContentSourceOrigins,
+	exportItemOrigins,
+	getSourceOrigin,
+	importItemOrigins,
+	setSourceOrigin,
+	transferMessageSourceOrigin,
+} from "@oh-my-pi/pi-ai/utils/source-origin";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { providerImageBudget } from "@oh-my-pi/snapcompact";
 import { supportsRemoteImageUrls } from "../blob-broker/context-images";
 import { imageDecodeFailureReason } from "../utils/image-loading";
 
-const TOOL_RESULT_IMAGE_OMISSION: TextContent = setSourceOrigin({
-	type: "text",
-	text: "[image omitted: provider image limit]",
-}, { kind: "synthetic", reason: "image-omission" });
+const TOOL_RESULT_IMAGE_OMISSION: TextContent = setSourceOrigin(
+	{
+		type: "text",
+		text: "[image omitted: provider image limit]",
+	},
+	{ kind: "synthetic", reason: "image-omission" },
+);
 
 function countImages(context: Context): number {
 	let count = 0;
@@ -43,8 +53,14 @@ function isSelectedOriginalImage(image: ImageContent, state: ImageClampState): b
 	const isSelectedSource = state.isSelectedSource;
 	if (!isSelectedSource) return false;
 	const origin = getSourceOrigin(image);
-	return origin?.kind === "source" && origin.parts.some(part =>
-		part.representation === "original-image" && (part.status === undefined || part.status === "exact-current") && isSelectedSource(part.entryId),
+	return (
+		origin?.kind === "source" &&
+		origin.parts.some(
+			part =>
+				part.representation === "original-image" &&
+				(part.status === undefined || part.status === "exact-current") &&
+				isSelectedSource(part.entryId),
+		)
 	);
 }
 
@@ -81,7 +97,10 @@ function clampToolResultMessage(message: ToolResultMessage, state: ImageClampSta
 	if (state.remainingDrops <= 0) return message;
 	const content = clampContent(message.content, state);
 	if (!content) return message;
-	return transferMessageSourceOrigin(message, { ...message, content: content.length > 0 ? content : [TOOL_RESULT_IMAGE_OMISSION] });
+	return transferMessageSourceOrigin(message, {
+		...message,
+		content: content.length > 0 ? content : [TOOL_RESULT_IMAGE_OMISSION],
+	});
 }
 
 /** Drops oldest transient images; currently selected originals are never omitted solely to satisfy the cap. */
@@ -213,10 +232,13 @@ async function replaceUnreadableContent(
 		const reason = await unreadableImageReason(part);
 		if (reason === null) continue;
 		replaced ??= [...content];
-		replaced[index] = setSourceOrigin({
-			type: "text",
-			text: `[image omitted: undecodable ${part.mimeType ?? "image"} data (${reason})]`,
-		}, { kind: "synthetic", reason: "image-omission" });
+		replaced[index] = setSourceOrigin(
+			{
+				type: "text",
+				text: `[image omitted: undecodable ${part.mimeType ?? "image"} data (${reason})]`,
+			},
+			{ kind: "synthetic", reason: "image-omission" },
+		);
 	}
 	return replaced;
 }
@@ -233,7 +255,10 @@ async function replaceUnreadableNativePart(part: unknown): Promise<Record<string
 	if (!image) return undefined;
 	const reason = await unreadableImageReason(image);
 	if (reason === null) return undefined;
-	return setSourceOrigin({ type: "input_text", text: `[image omitted: undecodable ${image.mimeType} data (${reason})]` }, { kind: "synthetic", reason: "image-omission" });
+	return setSourceOrigin(
+		{ type: "input_text", text: `[image omitted: undecodable ${image.mimeType} data (${reason})]` },
+		{ kind: "synthetic", reason: "image-omission" },
+	);
 }
 
 /** `undefined` when the item needs no rewrite. */
@@ -314,7 +339,11 @@ async function dropUnreadableFromMessage(message: Message, model: Model): Promis
 				: undefined;
 			const providerPayload = await replaceUnreadableNativePayload(message.providerPayload);
 			if (!content && !providerPayload) return undefined;
-			return transferMessageSourceOrigin(message, { ...message, ...(content ? { content } : {}), ...(providerPayload ? { providerPayload } : {}) });
+			return transferMessageSourceOrigin(message, {
+				...message,
+				...(content ? { content } : {}),
+				...(providerPayload ? { providerPayload } : {}),
+			});
 		}
 		case "toolResult": {
 			const content = await replaceUnreadableContent(message.content, model);

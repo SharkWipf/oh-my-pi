@@ -153,7 +153,11 @@ describe("AgentSession shake", () => {
 	});
 
 	it("drops delivered images without destroying the accepted original draft on reload", async () => {
-		const image: ImageContent = { type: "image", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=", mimeType: "image/png" };
+		const image: ImageContent = {
+			type: "image",
+			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
+			mimeType: "image/png",
+		};
 		const imageLinks = ["https://example.test/original.png"];
 		const entryId = sessionManager.appendMessage({
 			role: "user",
@@ -166,13 +170,23 @@ describe("AgentSession shake", () => {
 		const entry = sessionManager.getEntry(entryId);
 		if (entry?.type !== "message") throw new Error("Missing accepted source");
 		expect(entry.message).toMatchObject({ content: [{ type: "text", text: "original instruction" }] });
-		expect(toRestoredQueuedMessage(entry.message)).toMatchObject({ text: "original instruction", images: [image], imageLinks });
+		expect(toRestoredQueuedMessage(entry.message)).toMatchObject({
+			text: "original instruction",
+			images: [image],
+			imageLinks,
+		});
 		const reloaded = await SessionManager.open(sessionManager.getSessionFile()!, tempDir.path());
 		try {
 			const restored = reloaded.getEntry(entryId);
 			if (restored?.type !== "message") throw new Error("Missing reloaded source");
-			expect(toRestoredQueuedMessage(restored.message)).toMatchObject({ text: "original instruction", images: [image], imageLinks });
-		} finally { await reloaded.close(); }
+			expect(toRestoredQueuedMessage(restored.message)).toMatchObject({
+				text: "original instruction",
+				images: [image],
+				imageLinks,
+			});
+		} finally {
+			await reloaded.close();
+		}
 	});
 
 	describe("elide", () => {
@@ -194,6 +208,25 @@ describe("AgentSession shake", () => {
 			const text = tr.content.map(b => (b.type === "text" ? b.text : "")).join("");
 			expect(text).toContain(`artifact://${result.artifactId}`);
 			expect(text).toContain("shaken");
+		});
+
+		it("continues artifact-less when ordinary shake cannot allocate an artifact", async () => {
+			seedHeavyToolResult("X".repeat(4000));
+			appendRecentProtectedTail();
+			const allocateArtifactPath = vi
+				.spyOn(sessionManager, "allocateArtifactPath")
+				.mockRejectedValue(new Error("artifact directory unavailable"));
+			const saveArtifact = vi.spyOn(sessionManager, "saveArtifact").mockResolvedValue(undefined);
+
+			const result = await session.shake("elide");
+
+			expect(result.toolResultsDropped).toBe(1);
+			expect(result.artifactId).toBeUndefined();
+			const [toolResult] = branchToolResults();
+			expect(toolResult.content).toEqual([{ type: "text", text: expect.stringContaining("[shaken ~") }]);
+			expect(toolResult.content).not.toEqual([{ type: "text", text: expect.stringContaining("artifact://") }]);
+			saveArtifact.mockRestore();
+			allocateArtifactPath.mockRestore();
 		});
 
 		it("preserves mixed tool-result images while eliding only recoverable text", async () => {

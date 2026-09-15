@@ -343,10 +343,13 @@ export function pruneSupersededToolResults(
 			}
 		};
 		if (rewrite) {
-			rewrite(toPrune.map(candidate => ({
-				entryId: candidate.entry.id,
-				blocks: candidate.message.content.map((_, oldBlockIndex) => ({ oldBlockIndex, newBlockIndex: null })),
-			})), apply);
+			rewrite(
+				toPrune.map(candidate => ({
+					entryId: candidate.entry.id,
+					blocks: candidate.message.content.map((_, oldBlockIndex) => ({ oldBlockIndex, newBlockIndex: null })),
+				})),
+				apply,
+			);
 		} else apply();
 		return { prunedCount: toPrune.length, tokensSaved };
 	};
@@ -497,12 +500,18 @@ export function pruneToolOutputs(
 			}
 		};
 		if (rewrite) {
-			rewrite(candidates.map(candidate => ({
-				entryId: candidate.entry.id,
-				blocks: (candidate.entry.message as ToolResultMessage).content.map((_, oldBlockIndex) => ({ oldBlockIndex, newBlockIndex: null })),
-			})), apply);
+			rewrite(
+				candidates.map(candidate => ({
+					entryId: candidate.entry.id,
+					blocks: (candidate.entry.message as ToolResultMessage).content.map((_, oldBlockIndex) => ({
+						oldBlockIndex,
+						newBlockIndex: null,
+					})),
+				})),
+				apply,
+			);
 		} else apply();
-	
+
 		return { prunedCount, tokensSaved };
 	};
 	return prepareProtection ? prepareProtection().then(finish) : finish();

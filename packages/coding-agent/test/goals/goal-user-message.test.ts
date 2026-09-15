@@ -15,7 +15,10 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 registerMockApi();
 
 function userEntries(manager: SessionManager) {
-	return manager.getEntries().filter(entry => entry.type === "message").filter((entry): entry is typeof entry & { message: UserMessage } => entry.message.role === "user");
+	return manager
+		.getEntries()
+		.filter(entry => entry.type === "message")
+		.filter((entry): entry is typeof entry & { message: UserMessage } => entry.message.role === "user");
 }
 
 async function createHarness(handler: MockHandler = { content: ["Done"] }) {
@@ -53,12 +56,19 @@ async function createHarness(handler: MockHandler = { content: ["Done"] }) {
 	});
 	await session.setActiveToolsByName(["goal"]);
 	const tool = session.agent.state.tools.find(tool => tool.name === "goal")!;
-	return { session, manager, tool, settings, mock, dispose: async () => {
-		await session.dispose();
-		auth.close();
-		dir.removeSync();
-		resetSettingsForTest();
-	} };
+	return {
+		session,
+		manager,
+		tool,
+		settings,
+		mock,
+		dispose: async () => {
+			await session.dispose();
+			auth.close();
+			dir.removeSync();
+			resetSettingsForTest();
+		},
+	};
 }
 
 async function operation(tool: AgentTool, op: string, objective?: string) {
@@ -72,7 +82,10 @@ async function settle(session: AgentSession) {
 
 describe("goal objective ordinary delivery", () => {
 	let harness: { dispose: () => Promise<void> } | undefined;
-	afterEach(async () => { await harness?.dispose(); harness = undefined; });
+	afterEach(async () => {
+		await harness?.dispose();
+		harness = undefined;
+	});
 
 	it("delivers an idle objective once, preserving its source ID across reload and lifecycle operations", async () => {
 		const h = await createHarness();
@@ -89,11 +102,19 @@ describe("goal objective ordinary delivery", () => {
 		await settle(h.session);
 		const users = userEntries(h.manager);
 		expect(users.map(entry => entry.message.content)).toEqual([
-			[{ type: "text", text: "Begin" }], [{ type: "text", text: "Keep ordinary delivery" }],
+			[{ type: "text", text: "Begin" }],
+			[{ type: "text", text: "Keep ordinary delivery" }],
 		]);
-		expect(users[1]!.message).toMatchObject({ role: "user", attribution: "user", producer: { type: "tool", name: "goal", toolCallId: "goal-create" } });
+		expect(users[1]!.message).toMatchObject({
+			role: "user",
+			attribution: "user",
+			producer: { type: "tool", name: "goal", toolCallId: "goal-create" },
+		});
 		const reopened = await SessionManager.open(h.manager.getSessionFile()!);
 		expect(userEntries(reopened)).toEqual(JSON.parse(JSON.stringify(users)));
+		expect(reopened.buildSessionContext().messages.filter(message => message.role === "user")).toEqual(
+			JSON.parse(JSON.stringify(users.map(entry => entry.message))),
+		);
 		h.settings.override("goal.injectAsUserMessage", false);
 		expect(await h.session.switchSession(h.manager.getSessionFile()!)).toBe(true);
 		await operation(h.tool, "get");
@@ -101,24 +122,41 @@ describe("goal objective ordinary delivery", () => {
 		await operation(h.tool, "complete");
 		await operation(h.tool, "drop");
 		expect(h.session.queuedMessageCount).toBe(0);
-		expect(userEntries(h.manager).map(entry => entry.id)).toEqual(users.map(entry => entry.id));
+		expect(JSON.parse(JSON.stringify(userEntries(h.manager)))).toEqual(JSON.parse(JSON.stringify(users)));
 	});
 
 	it("drains a successful model goal create after the tool atom, not as an interrupt or duplicate", async () => {
 		let call = 0;
-		const h = await createHarness(() => ++call === 1
-			? { content: [{ type: "toolCall", id: "model-goal", name: "goal", arguments: { op: "create", objective: "Streaming objective" } }] }
-			: { content: ["Done"] });
+		const h = await createHarness(() =>
+			++call === 1
+				? {
+						content: [
+							{
+								type: "toolCall",
+								id: "model-goal",
+								name: "goal",
+								arguments: { op: "create", objective: "Streaming objective" },
+							},
+						],
+					}
+				: { content: ["Done"] },
+		);
 		harness = h;
 		await h.session.prompt("Start the work");
 		await settle(h.session);
 		const entries = h.manager.getEntries();
 		const users = userEntries(h.manager);
 		expect(users.map(entry => entry.message.content)).toEqual([
-			[{ type: "text", text: "Start the work" }], [{ type: "text", text: "Streaming objective" }],
+			[{ type: "text", text: "Start the work" }],
+			[{ type: "text", text: "Streaming objective" }],
 		]);
 		const injectedIndex = entries.findIndex(entry => entry.id === users[1]!.id);
-		const resultIndex = entries.findIndex(entry => entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolCallId === "model-goal");
+		const resultIndex = entries.findIndex(
+			entry =>
+				entry.type === "message" &&
+				entry.message.role === "toolResult" &&
+				entry.message.toolCallId === "model-goal",
+		);
 		expect(resultIndex).toBeGreaterThan(-1);
 		expect(injectedIndex).toBeGreaterThan(resultIndex);
 		expect(h.session.queuedMessageCount).toBe(0);
@@ -139,10 +177,19 @@ describe("goal objective ordinary delivery", () => {
 		initTheme();
 		const mode = new InteractiveMode(h.session, "test");
 		try {
-			await mode.handleGoalModeCommand("Direct objective");
+			let delivery: Promise<unknown> | undefined;
+			mode.onInputCallback = input => {
+				mode.onInputCallback = undefined;
+				delivery = h.session.prompt(input.text);
+			};
+			expect(await mode.handleGoalModeCommand("Direct objective")).toBe(true);
+			await delivery;
+			await settle(h.session);
 			expect(h.session.getGoalModeState()?.goal.objective).toBe("Direct objective");
 			expect(h.session.getQueuedMessages()).toEqual({ steering: [], followUp: [] });
-			expect(userEntries(h.manager)).toEqual([]);
+			expect(userEntries(h.manager).map(entry => entry.message.content)).toEqual([
+				[{ type: "text", text: "Direct objective" }],
+			]);
 		} finally {
 			mode.stop();
 		}

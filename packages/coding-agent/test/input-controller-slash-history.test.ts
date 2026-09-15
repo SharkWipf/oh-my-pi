@@ -169,8 +169,6 @@ describe("input controller — slash command history (#3148)", () => {
 		expect(editor.pendingImageLinks).toEqual([]);
 	});
 
-
-
 	it("starts the first queued item immediately when the session is idle", async () => {
 		const { ctx, editor, followUp, steer, onInputCallback, showStatus } = makeCtx();
 		controllerFor(ctx);

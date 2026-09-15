@@ -11,28 +11,57 @@ import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 
 const timestamp = 1_700_000_000_000;
 const usage = {
-	input: 4242, output: 17, cacheRead: 0, cacheWrite: 0, totalTokens: 4259,
+	input: 4242,
+	output: 17,
+	cacheRead: 0,
+	cacheWrite: 0,
+	totalTokens: 4259,
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 function assistant(content: AssistantMessage["content"]): AgentMessage {
 	return {
-		role: "assistant", content, api: "anthropic-messages", provider: "anthropic", model: "test",
-		stopReason: "stop", usage, timestamp, completedAt: timestamp + 1000,
+		role: "assistant",
+		content,
+		api: "anthropic-messages",
+		provider: "anthropic",
+		model: "test",
+		stopReason: "stop",
+		usage,
+		timestamp,
+		completedAt: timestamp + 1000,
 	};
 }
 function call(name: string, id: string, args: Record<string, unknown> = {}): AssistantMessage["content"][number] {
 	return { type: "toolCall", name, id, arguments: args };
 }
 function result(name: string, id: string, details?: unknown, isError = false): AgentMessage {
-	return { role: "toolResult", toolName: name, toolCallId: id, content: [{ type: "text", text: `result ${id}` }], details, isError, timestamp };
+	return {
+		role: "toolResult",
+		toolName: name,
+		toolCallId: id,
+		content: [{ type: "text", text: `result ${id}` }],
+		details,
+		isError,
+		timestamp,
+	};
 }
 function entries(messages: AgentMessage[]): SessionMessageEntry[] {
-	return messages.map((message, index) => ({ type: "message", id: String(index), parentId: index ? String(index - 1) : null, timestamp: new Date(timestamp).toISOString(), message }));
+	return messages.map((message, index) => ({
+		type: "message",
+		id: String(index),
+		parentId: index ? String(index - 1) : null,
+		timestamp: new Date(timestamp).toISOString(),
+		message,
+	}));
 }
 const builders: ChatTranscriptBuilder[] = [];
 function builder(deferComponents: boolean, extra: Partial<ChatTranscriptBuilderDeps> = {}): ChatTranscriptBuilder {
 	const instance = new ChatTranscriptBuilder({
-		ui: new TUI(new VirtualTerminal(100, 24)), cwd: process.cwd(), requestRender: () => {}, deferComponents, ...extra,
+		ui: new TUI(new VirtualTerminal(100, 24)),
+		cwd: process.cwd(),
+		requestRender: () => {},
+		deferComponents,
+		...extra,
 	});
 	builders.push(instance);
 	return instance;
@@ -68,15 +97,21 @@ describe("source-backed lazy transcript replay", () => {
 			result("hub", "h1", { jobs: [{ id: "j1", status: "running" }] }),
 			assistant([call("hub", "h2", { op: "wait" })]),
 			result("hub", "h2", { jobs: [{ id: "j1", status: "completed" }] }),
-			assistant([call("todo", "t1", { op: "write" })]), result("todo", "t1", { phases: [] }),
-			assistant([call("todo", "t2", { op: "write" })]), result("todo", "t2", { phases: [] }, true),
-			assistant([{ type: "text", text: "Continue" }, call("todo", "t3", { op: "write" })]), result("todo", "t3", { phases: [] }),
+			assistant([call("todo", "t1", { op: "write" })]),
+			result("todo", "t1", { phases: [] }),
+			assistant([call("todo", "t2", { op: "write" })]),
+			result("todo", "t2", { phases: [] }, true),
+			assistant([{ type: "text", text: "Continue" }, call("todo", "t3", { op: "write" })]),
+			result("todo", "t3", { phases: [] }),
 			{ role: "user", content: "Next turn", timestamp: timestamp + 2000 },
 			assistant([{ type: "text", text: "Done" }]),
 		]);
 		const eager = builder(false);
 		const lazy = builder(true);
-		for (const entry of source) { eager.append([entry]); lazy.append([entry]); }
+		for (const entry of source) {
+			eager.append([entry]);
+			lazy.append([entry]);
+		}
 		const expected = rows(eager);
 		expect(rows(lazy)).toEqual(expected);
 		lazy.releaseOutside(new Set());
@@ -98,17 +133,30 @@ describe("source-backed lazy transcript replay", () => {
 	it("keeps rewind source identities stable when prior hub and todo panels disappear", () => {
 		settings.set("display.showTokenUsage", false);
 		const lazy = builder(true);
-		const targets = appendOutlineEntries(lazy, entries([
-			{ role: "user", content: "Start", timestamp },
-			assistant([call("hub", "h1")]), result("hub", "h1", { jobs: [{ status: "running" }] }),
-			assistant([call("hub", "h2")]), result("hub", "h2", { jobs: [{ status: "completed" }] }),
-			assistant([call("todo", "t1")]), result("todo", "t1", { phases: [] }),
-			assistant([call("todo", "t2")]), result("todo", "t2", { phases: [] }),
-			assistant([{ type: "text", text: "Finished" }]),
-		]));
-		const visible = outlineVisibility(lazy.container.children.map(child => child.render(90)), targets);
+		const targets = appendOutlineEntries(
+			lazy,
+			entries([
+				{ role: "user", content: "Start", timestamp },
+				assistant([call("hub", "h1")]),
+				result("hub", "h1", { jobs: [{ status: "running" }] }),
+				assistant([call("hub", "h2")]),
+				result("hub", "h2", { jobs: [{ status: "completed" }] }),
+				assistant([call("todo", "t1")]),
+				result("todo", "t1", { phases: [] }),
+				assistant([call("todo", "t2")]),
+				result("todo", "t2", { phases: [] }),
+				assistant([{ type: "text", text: "Finished" }]),
+			]),
+		);
+		const visible = outlineVisibility(
+			lazy.container.children.map(child => child.render(90)),
+			targets,
+		);
 		expect(targets.filter((_, index) => visible[index]).map(target => [target.turnId, target.entryId])).toEqual([
-			["0", "0"], ["3", "4"], ["7", "8"], ["9", "9"],
+			["0", "0"],
+			["3", "4"],
+			["7", "8"],
+			["9", "9"],
 		]);
 	});
 
@@ -118,12 +166,25 @@ describe("source-backed lazy transcript replay", () => {
 		const lazy = builder(true, {
 			getMessageRenderer: () => message => {
 				opened++;
-				return { render: () => [String(message.content)], dispose: () => { closed++; } };
+				return {
+					render: () => [String(message.content)],
+					dispose: () => {
+						closed++;
+					},
+				};
 			},
 		});
-		lazy.rebuild(entries(Array.from({ length: 300 }, (_, index) => ({
-			role: "custom" as const, customType: "extension", display: true, content: `source ${index}`, timestamp,
-		}))));
+		lazy.rebuild(
+			entries(
+				Array.from({ length: 300 }, (_, index) => ({
+					role: "custom" as const,
+					customType: "extension",
+					display: true,
+					content: `source ${index}`,
+					timestamp,
+				})),
+			),
+		);
 		expect(opened).toBe(0);
 		const last = lazy.container.children.at(-1)!;
 		expect(last.render(80)).toEqual(["source 299"]);

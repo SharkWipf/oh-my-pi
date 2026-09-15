@@ -27,13 +27,16 @@ export function projectPreservedUserMessageClassifierMessage(message: AgentMessa
 /** Validation borrows arguments only for its synchronous comparison; snapshots own independent arguments. */
 function projectClassifierMessage(message: AgentMessage, cloneArguments: boolean): MessageProjection | null {
 	if (message.role === "user" && message.synthetic !== true && message.attribution !== "agent") {
-		const content = typeof message.content === "string" ? [{ type: "text" as const, text: message.content }] : message.content;
+		const content =
+			typeof message.content === "string" ? [{ type: "text" as const, text: message.content }] : message.content;
 		return {
 			role: "user",
 			content: content.map(part => {
 				if (part.type === "text") return { type: "text", text: part.text };
 				return {
-					type: "image", data: part.data, mimeType: part.mimeType,
+					type: "image",
+					data: part.data,
+					mimeType: part.mimeType,
 					...(part.detail !== undefined ? { detail: part.detail } : {}),
 				};
 			}),
@@ -44,7 +47,11 @@ function projectClassifierMessage(message: AgentMessage, cloneArguments: boolean
 	for (const part of message.content) {
 		if (part.type === "text" && part.text.length > 0) content.push({ type: "text", text: part.text });
 		else if (part.type === "toolCall") {
-			content.push({ type: "toolCall", name: part.name, arguments: cloneArguments ? structuredClone(part.arguments) : part.arguments });
+			content.push({
+				type: "toolCall",
+				name: part.name,
+				arguments: cloneArguments ? structuredClone(part.arguments) : part.arguments,
+			});
 		}
 	}
 	return content.length > 0 ? { role: "assistant", content } : null;
@@ -59,7 +66,11 @@ function inputSnapshot(
 		currentMessage: current.content,
 		previousUserMessage: previousUser?.content ?? null,
 		previousAssistantMessages: assistants.map(item => item.content),
-		sourceIds: { current: current.id, previousUser: previousUser?.id ?? null, previousAssistants: assistants.map(item => item.id) },
+		sourceIds: {
+			current: current.id,
+			previousUser: previousUser?.id ?? null,
+			previousAssistants: assistants.map(item => item.id),
+		},
 	};
 }
 
@@ -184,10 +195,21 @@ export function matchesPreservedUserMessageClassifierSources(
 	getEntry: (id: string) => SessionEntry | undefined,
 ): boolean {
 	if (!matchesClassifierSource(input.sourceIds.current, "user", input.currentMessage, getEntry)) return false;
-	if (input.sourceIds.previousUser !== null &&
-		!matchesClassifierSource(input.sourceIds.previousUser, "user", input.previousUserMessage!, getEntry)) return false;
+	if (
+		input.sourceIds.previousUser !== null &&
+		!matchesClassifierSource(input.sourceIds.previousUser, "user", input.previousUserMessage!, getEntry)
+	)
+		return false;
 	for (let i = 0; i < input.sourceIds.previousAssistants.length; i++) {
-		if (!matchesClassifierSource(input.sourceIds.previousAssistants[i]!, "assistant", input.previousAssistantMessages[i]!, getEntry)) return false;
+		if (
+			!matchesClassifierSource(
+				input.sourceIds.previousAssistants[i]!,
+				"assistant",
+				input.previousAssistantMessages[i]!,
+				getEntry,
+			)
+		)
+			return false;
 	}
 	return true;
 }
@@ -212,25 +234,32 @@ export function buildPreservedUserMessageClassifierRequest(
 	const currentImages = input.currentMessage.filter((part): part is ImageContent => part.type === "image");
 	const modelName = `${model.provider}/${model.id}`;
 	if (currentImages.length > 0 && !model.input.includes("image")) {
-		throw new Error(`User-message classifier: ${modelName} does not support the current message's original images. Configure a vision model.`);
+		throw new Error(
+			`User-message classifier: ${modelName} does not support the current message's original images. Configure a vision model.`,
+		);
 	}
 	const imageLimit = providerImageBudget(model.provider);
 	if (currentImages.length > imageLimit) {
-		throw new Error(`User-message classifier: current message has ${currentImages.length} original images; ${modelName} allows ${imageLimit}. Configure a supported model.`);
+		throw new Error(
+			`User-message classifier: current message has ${currentImages.length} original images; ${modelName} allows ${imageLimit}. Configure a supported model.`,
+		);
 	}
 	if (!model.contextWindow || model.contextWindow <= 0) {
-		throw new Error(`User-message classifier: ${modelName} has no known input allowance. Configure a supported model.`);
+		throw new Error(
+			`User-message classifier: ${modelName} has no known input allowance. Configure a supported model.`,
+		);
 	}
 	const allowance = model.contextWindow - outputAllowance(model, options.maxTokens);
 	const tokenizer = new Tokenizer(model);
 	const build = (previous: UserContent | null, assistants: AssistantContent[], omitted: boolean): Context => {
 		const auxiliaryImages: ImageContent[] = [];
 		const auxiliary = {
-			previousUserMessage: previous?.map(part => {
-				if (part.type === "text") return part;
-				auxiliaryImages.push(part);
-				return { type: "image", index: auxiliaryImages.length };
-			}) ?? null,
+			previousUserMessage:
+				previous?.map(part => {
+					if (part.type === "text") return part;
+					auxiliaryImages.push(part);
+					return { type: "image", index: auxiliaryImages.length };
+				}) ?? null,
 			previousAssistantMessages: assistants,
 			omitted,
 		};
@@ -249,8 +278,15 @@ export function buildPreservedUserMessageClassifierRequest(
 				if (typeof message.content === "string") continue;
 				for (const part of message.content) if (part.type === "image") actualImages.push(part);
 			}
-			if (actualImages.length !== expectedImages.length || actualImages.some((part, i) => part.data !== expectedImages[i]!.data || part.mimeType !== expectedImages[i]!.mimeType)) {
-				throw new Error("User-message classifier: side-request conversion changed original images; classification was not sent.");
+			if (
+				actualImages.length !== expectedImages.length ||
+				actualImages.some(
+					(part, i) => part.data !== expectedImages[i]!.data || part.mimeType !== expectedImages[i]!.mimeType,
+				)
+			) {
+				throw new Error(
+					"User-message classifier: side-request conversion changed original images; classification was not sent.",
+				);
 			}
 		}
 		return { systemPrompt: [classifierPrompt], messages };
@@ -260,7 +296,10 @@ export function buildPreservedUserMessageClassifierRequest(
 		let imageTokens = 0;
 		let images = 0;
 		for (const message of context.messages) {
-			if (typeof message.content === "string") { text.push(message.content); continue; }
+			if (typeof message.content === "string") {
+				text.push(message.content);
+				continue;
+			}
 			for (const part of message.content) {
 				if (part.type === "text") text.push(part.text);
 				else if (part.type === "image") {
@@ -273,7 +312,9 @@ export function buildPreservedUserMessageClassifierRequest(
 	};
 	const mandatory = build(null, [], true);
 	if (!fits(mandatory)) {
-		throw new Error(`User-message classifier: complete current message exceeds ${modelName}'s input allowance. Configure a larger supported model; current content was not truncated.`);
+		throw new Error(
+			`User-message classifier: complete current message exceeds ${modelName}'s input allowance. Configure a larger supported model; current content was not truncated.`,
+		);
 	}
 	let previous = input.previousUserMessage;
 	let omitted = false;
@@ -305,11 +346,19 @@ export async function classifyPreservedUserMessage(
 	const request = buildPreservedUserMessageClassifierRequest(input, options.model, options);
 	const response = await options.complete(request, outputAllowance(options.model, options.maxTokens));
 	if (response.stopReason !== "stop") {
-		throw new Error(`User-message classifier failed (${response.stopReason}): ${response.errorMessage ?? "incomplete classification"}`);
+		throw new Error(
+			`User-message classifier failed (${response.stopReason}): ${response.errorMessage ?? "incomplete classification"}`,
+		);
 	}
-	const text = response.content.filter(part => part.type === "text").map(part => part.text).join("");
+	const text = response.content
+		.filter(part => part.type === "text")
+		.map(part => part.text)
+		.join("");
 	const mask = parsePreservedUserMessageCategoryMask(text);
-	if (mask === undefined) throw new Error("User-message classifier returned invalid categories; expected a JSON object containing all eleven named boolean fields.");
+	if (mask === undefined)
+		throw new Error(
+			"User-message classifier returned invalid categories; expected a JSON object containing all eleven named boolean fields.",
+		);
 	return mask;
 }
 

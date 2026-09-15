@@ -11,7 +11,7 @@
 ### Fixed
 
 - Consolidated ordinary and source-aware compaction into one serializer/planner/writer path, retaining ordinary pagination with zero selection and monotone text overflow at the measured raster-byte limit.
-- Fixed repeated archive rescue retaining the entire old text despite a smaller target; ordinary retention now reduces reconstructed context before selected source intervals are restored.
+- Frame-budget rescue now preserves already-retained text and original images, spilling overflow instead of discarding source content.
 - Regenerated sparse truncation notices after overlap union and preserved full ordinary recent spans and durable whole-message omission counts.
 - Distinguished differing original-submission coordinates from delivered history, retaining both projections in the same chronological source position with independent text/image coverage.
 - Preserved complete admitted assistant/tool atoms, original-image interleaving, and historical source bytes across repeated compaction without duplicating provenance payloads.
@@ -19,6 +19,15 @@
 - Distinguished positive whole-message omissions from partial pruning and raster-to-text continuation.
 - Preserved partial normalized-unit coordinates at text/raster boundaries so adding or reloading a selected source completes an expanded glyph exactly once.
 - Recorded original-image coverage independently from neighboring text, preserving admitted image ownership and treating previously committed images as ordinary input on the next compaction.
+### Changed
+
+- `historyBlocks()` resolves persisted frame payloads lazily. Legacy/unmapped archives keep the newest fitting frames with in-place gap notices; mapped archives retain the oldest contiguous raster prefix and spill missing or over-budget frames to chronological source text without charging original images to the raster budget ([#10227](https://github.com/can1357/oh-my-pi/pull/10227) by [@lemonleks](https://github.com/lemonleks)).
+
+## [18.1.18] - 2026-09-11
+
+### Fixed
+
+- A snapcompact pass now also strips a superseded Anthropic server-compaction payload (`preserveData.anthropicCompaction`) alongside the OpenAI replacement history, so a stale native summary can never replay ahead of the archived frames.
 
 ## [18.1.0] - 2026-09-01
 

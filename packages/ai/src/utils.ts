@@ -1,8 +1,20 @@
 import { $env, isRecord, parseImageMetadata } from "@oh-my-pi/pi-utils";
 import type { ResponseInput, ResponseInputItem } from "./providers/openai-responses-wire";
 import { redactSensitiveCredentials } from "./providers/transform-messages";
-import type { AssistantMessage, CacheRetention, ImageContent, OpenAIResponsesHistoryPayload, ProviderPayload } from "./types";
-import { exportItemOrigins, getSourceOrigin, importItemOrigins, type NativeItemOrigin, transferSourceOrigin } from "./utils/source-origin";
+import type {
+	AssistantMessage,
+	CacheRetention,
+	ImageContent,
+	OpenAIResponsesHistoryPayload,
+	ProviderPayload,
+} from "./types";
+import {
+	exportItemOrigins,
+	getSourceOrigin,
+	importItemOrigins,
+	type NativeItemOrigin,
+	transferSourceOrigin,
+} from "./utils/source-origin";
 
 type OpenAIResponsesReplayItem = ResponseInput[number];
 const NON_WHITESPACE_RE = /\S/;
@@ -46,8 +58,10 @@ export function normalizeResponsesToolCallId(
 	id: string,
 	itemPrefix: ResponsesToolItemIdPrefix = "fc",
 ): { callId: string; itemId: string } {
-	const [callId, itemId] = id.split("|");
-	if (callId && itemId) {
+	const sep = id.search(/[\n|]/);
+	if (sep > 0) {
+		const callId = id.slice(0, sep);
+		const itemId = id.slice(sep + 1);
 		return { callId, itemId: normalizeResponsesItemId(itemId, itemPrefix) };
 	}
 	const hash = Bun.hash(id).toString(36);
@@ -325,6 +339,15 @@ export function stripUnpairedOpenAIResponsesComputerReasoningIdsForReplay(items:
  * Returns `undefined` for hidden-empty turns that only contain reasoning and an
  * empty assistant message, allowing callers to rebuild visible transcript
  * history instead of replaying stale native state.
+ *
+ * When the turn does carry replayable output, whitespace-only assistant
+ * messages are dropped rather than replayed. gpt-5.6 Codex ends a turn whose
+ * text all landed in the `commentary` phase with an empty `final_answer`
+ * message; replaying that item verbatim seeds the next turn with an empty slot
+ * the model then fills - `""` → `"\n\n"` → stray words → non-Latin residue -
+ * and each contaminated item is replayed in turn, so the drift compounds until
+ * the visible answer collapses. Codex CLI replays the empty item too
+ * (openai/codex#32389); this is the layer where omp can refuse to.
  */
 export function sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(
 	items: Array<Record<string, unknown>>,
@@ -332,34 +355,68 @@ export function sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(
 ): ResponseInput | undefined {
 	const sanitized = sanitizeOpenAIResponsesHistoryItemsForReplay(items, options);
 	let hasReplayableAssistantOutput = false;
+	let hasEmptyAssistantMessage = false;
 
 	for (const item of sanitized) {
 		if (item.type === "reasoning") continue;
-		if (item.type !== "message" || item.role !== "assistant") {
-			hasReplayableAssistantOutput = true;
-			break;
-		}
-		if (typeof item.content === "string") {
-			if (NON_WHITESPACE_RE.test(item.content)) {
-				hasReplayableAssistantOutput = true;
-				break;
-			}
+		if (isEmptyAssistantMessage(item)) {
+			hasEmptyAssistantMessage = true;
 			continue;
 		}
-		for (const part of item.content) {
-			if (part.type === "output_text" && NON_WHITESPACE_RE.test(part.text)) {
-				hasReplayableAssistantOutput = true;
-				break;
-			}
-			if (part.type === "refusal" && NON_WHITESPACE_RE.test(part.refusal)) {
-				hasReplayableAssistantOutput = true;
-				break;
-			}
-		}
-		if (hasReplayableAssistantOutput) break;
+		hasReplayableAssistantOutput = true;
 	}
 
-	return hasReplayableAssistantOutput ? sanitized : undefined;
+	if (!hasReplayableAssistantOutput) return undefined;
+	if (!hasEmptyAssistantMessage) return sanitized;
+	return dropEmptyAssistantMessagesForReplay(sanitized);
+}
+
+function isEmptyAssistantMessage(item: OpenAIResponsesReplayItem): boolean {
+	if (item.type !== "message" || item.role !== "assistant") return false;
+	if (typeof item.content === "string") return !NON_WHITESPACE_RE.test(item.content);
+	for (const part of item.content) {
+		if (part.type === "output_text" && NON_WHITESPACE_RE.test(part.text)) return false;
+		if (part.type === "refusal" && NON_WHITESPACE_RE.test(part.refusal)) return false;
+	}
+	return true;
+}
+
+/**
+ * Remove whitespace-only assistant messages plus any reasoning item left with
+ * no output to introduce: a reasoning item is only meaningful ahead of the
+ * output it produced, and a dangling one is rejected by the Responses API when
+ * it carries an id.
+ */
+function dropEmptyAssistantMessagesForReplay(items: ResponseInput): ResponseInput {
+	const kept: ResponseInput = [];
+	let pendingReasoning: ResponseInput = [];
+	let removedAssistantMessage = false;
+	const flushReasoning = (): void => {
+		kept.push(...pendingReasoning);
+		pendingReasoning = [];
+	};
+	for (const item of items) {
+		if (isOpenAIResponsesClientInputBoundary(item as unknown as Record<string, unknown>)) {
+			pendingReasoning = [];
+			removedAssistantMessage = false;
+			kept.push(item);
+			continue;
+		}
+		if (item.type === "reasoning") {
+			if (removedAssistantMessage) pendingReasoning = [];
+			removedAssistantMessage = false;
+			pendingReasoning.push(item);
+			continue;
+		}
+		if (isEmptyAssistantMessage(item)) {
+			removedAssistantMessage = true;
+			continue;
+		}
+		flushReasoning();
+		removedAssistantMessage = false;
+		kept.push(item);
+	}
+	return kept;
 }
 
 /**
@@ -478,43 +535,99 @@ export function openAIResponsesImageContent(data: string): ImageContent {
 	return { type: "image", data, mimeType: parseImageMetadata(Buffer.from(data, "base64"))?.mimeType ?? "image/png" };
 }
 /** Shared normalized source projection; signatures and transport controls stay opaque. */
-export function getAssistantLogicalBlock(block: AssistantMessage["content"][number]): Record<string, unknown> | undefined {
+export function getAssistantLogicalBlock(
+	block: AssistantMessage["content"][number],
+): Record<string, unknown> | undefined {
 	switch (block.type) {
-		case "text": return { type: "text", text: block.text };
-		case "thinking": return { type: "thinking", thinking: block.thinking };
-		case "toolCall": return {
-			type: "toolCall", id: block.id, name: block.name, arguments: block.arguments,
-			rawBlock: block.rawBlock, intent: block.intent, customWireName: block.customWireName,
-			...(block.providerMetadata?.type === "computer" ? { actions: block.providerMetadata.actions, pendingSafetyChecks: block.providerMetadata.pendingSafetyChecks } : {}),
-		};
-		case "anthropicServerTool": return { type: block.type, block: block.block };
-		case "image": case "redactedThinking": case "fallback": return undefined;
+		case "text":
+			return { type: "text", text: block.text };
+		case "thinking":
+			return { type: "thinking", thinking: block.thinking };
+		case "toolCall":
+			return {
+				type: "toolCall",
+				id: block.id,
+				name: block.name,
+				arguments: block.arguments,
+				rawBlock: block.rawBlock,
+				intent: block.intent,
+				customWireName: block.customWireName,
+				...(block.providerMetadata?.type === "computer"
+					? {
+							actions: block.providerMetadata.actions,
+							pendingSafetyChecks: block.providerMetadata.pendingSafetyChecks,
+						}
+					: {}),
+			};
+		case "anthropicServerTool":
+			return { type: block.type, block: block.block };
+		case "image":
+		case "redactedThinking":
+		case "fallback":
+			return undefined;
 	}
 }
 
 /** Visit only typed logical Responses fields; opaque provider state is never traversed. */
 export function visitOpenAIResponsesLogicalContent(
-	value: object, visitor: OpenAIResponsesLogicalVisitor,
+	value: object,
+	visitor: OpenAIResponsesLogicalVisitor,
 	inheritedOrigin?: NativeItemOrigin,
 ): void {
 	const item = value as Record<string, unknown>;
 	if (item.type === "compaction" || item.type === "compaction_summary") return;
 	const origin = getSourceOrigin(item) ?? inheritedOrigin ?? { kind: "unknown", reason: "unmapped-native-history" };
 	if (item.type === "image_generation_call" && typeof item.result === "string" && item.result.length > 0) {
-		const imageOrigin: NativeItemOrigin = origin.kind === "source" ? { kind: "source", parts: origin.parts.slice(0, 1).map(part => ({
-			...part, blockIndex: `${part.blockIndex}.result`, representation: "original-image", sourceSpan: undefined, transportSpan: undefined, transportBlockIndex: undefined,
-		})) } : origin;
+		const imageOrigin: NativeItemOrigin =
+			origin.kind === "source"
+				? {
+						kind: "source",
+						parts: origin.parts.slice(0, 1).map(part => ({
+							...part,
+							blockIndex: `${part.blockIndex}.result`,
+							representation: "original-image",
+							sourceSpan: undefined,
+							transportSpan: undefined,
+							transportBlockIndex: undefined,
+						})),
+					}
+				: origin;
 		visitor.text?.({ type: item.type }, origin);
 		visitor.image?.({ type: "base64", data: item.result }, imageOrigin);
 		return;
 	}
-	if (item.type === "input_image" || item.type === "computer_screenshot" || (item.type === "image" && typeof item.url === "string")) {
-		const image: OpenAIResponsesLogicalImage = { type: "reference", input: item.type !== "image", detail: item.detail ?? "auto",
-			...(typeof item.image_url === "string" ? { image_url: item.image_url } : item.type === "image" ? { image_url: String(item.url) } : {}),
-			...(typeof item.file_id === "string" ? { file_id: item.file_id } : {}) };
-		if (image.image_url || image.file_id) visitor.image?.(image, origin.kind === "source" ? { kind: "source", parts: origin.parts.map(part => ({
-			...part, representation: "original-image", sourceSpan: undefined, transportSpan: undefined, transportBlockIndex: undefined,
-		})) } : origin);
+	if (
+		item.type === "input_image" ||
+		item.type === "computer_screenshot" ||
+		(item.type === "image" && typeof item.url === "string")
+	) {
+		const image: OpenAIResponsesLogicalImage = {
+			type: "reference",
+			input: item.type !== "image",
+			detail: item.detail ?? "auto",
+			...(typeof item.image_url === "string"
+				? { image_url: item.image_url }
+				: item.type === "image"
+					? { image_url: String(item.url) }
+					: {}),
+			...(typeof item.file_id === "string" ? { file_id: item.file_id } : {}),
+		};
+		if (image.image_url || image.file_id)
+			visitor.image?.(
+				image,
+				origin.kind === "source"
+					? {
+							kind: "source",
+							parts: origin.parts.map(part => ({
+								...part,
+								representation: "original-image",
+								sourceSpan: undefined,
+								transportSpan: undefined,
+								transportBlockIndex: undefined,
+							})),
+						}
+					: origin,
+			);
 		return;
 	}
 	// Only typed logical fields cross into visible history. Provider signatures,
@@ -524,63 +637,149 @@ export function visitOpenAIResponsesLogicalContent(
 	let output: unknown;
 	let outputs: unknown;
 	switch (item.type) {
-		case "text": case "thinking": case "toolCall":
-			logical = getAssistantLogicalBlock(item as unknown as AssistantMessage["content"][number])!; break;
+		case "text":
+		case "thinking":
+		case "toolCall":
+			logical = getAssistantLogicalBlock(item as unknown as AssistantMessage["content"][number])!;
+			break;
 		case "message":
 			logical = { type: item.type, role: item.role };
 			nativeContent = item.content;
 			break;
-		case "input_text": case "output_text": case "reasoning_text": case "summary_text":
+		case "input_text":
+		case "output_text":
+		case "reasoning_text":
+		case "summary_text":
 			logical = { type: item.type, text: item.text, annotations: item.annotations };
 			break;
-		case "refusal": logical = { type: item.type, refusal: item.refusal }; break;
-		case "reasoning": logical = { type: item.type, summary: item.summary }; nativeContent = item.content; break;
-		case "function_call": logical = { type: item.type, call_id: item.call_id, name: item.name, arguments: item.arguments }; break;
-		case "custom_tool_call": logical = { type: item.type, call_id: item.call_id, name: item.name, input: item.input }; break;
-		case "function_call_output": case "custom_tool_call_output":
-			logical = { type: item.type, call_id: item.call_id }; output = item.output; break;
+		case "refusal":
+			logical = { type: item.type, refusal: item.refusal };
+			break;
+		case "reasoning":
+			logical = { type: item.type, summary: item.summary };
+			nativeContent = item.content;
+			break;
+		case "function_call":
+			logical = { type: item.type, call_id: item.call_id, name: item.name, arguments: item.arguments };
+			break;
+		case "custom_tool_call":
+			logical = { type: item.type, call_id: item.call_id, name: item.name, input: item.input };
+			break;
+		case "function_call_output":
+		case "custom_tool_call_output":
+			logical = { type: item.type, call_id: item.call_id };
+			output = item.output;
+			break;
 		case "computer_call":
-			logical = { type: item.type, call_id: item.call_id, action: item.action, actions: item.actions, pending_safety_checks: item.pending_safety_checks }; break;
+			logical = {
+				type: item.type,
+				call_id: item.call_id,
+				action: item.action,
+				actions: item.actions,
+				pending_safety_checks: item.pending_safety_checks,
+			};
+			break;
 		case "computer_call_output":
-			logical = { type: item.type, call_id: item.call_id, acknowledged_safety_checks: item.acknowledged_safety_checks }; output = item.output; break;
-		case "web_search_call": logical = { type: item.type, action: item.action }; break;
-		case "file_search_call": logical = { type: item.type, queries: item.queries, results: item.results }; break;
-		case "tool_search_call": logical = { type: item.type, call_id: item.call_id, execution: item.execution, arguments: item.arguments }; break;
-		case "tool_search_output": logical = { type: item.type, call_id: item.call_id, execution: item.execution, tools: item.tools }; break;
-		case "mcp_call": logical = { type: item.type, name: item.name, server_label: item.server_label, arguments: item.arguments, output: item.output, error: item.error }; break;
-		case "mcp_list_tools": logical = { type: item.type, server_label: item.server_label, tools: item.tools, error: item.error }; break;
-		case "code_interpreter_call": logical = { type: item.type, code: item.code }; outputs = item.outputs; break;
-		case "logs": logical = { type: item.type, logs: item.logs }; break;
-		default: return;
+			logical = {
+				type: item.type,
+				call_id: item.call_id,
+				acknowledged_safety_checks: item.acknowledged_safety_checks,
+			};
+			output = item.output;
+			break;
+		case "web_search_call":
+			logical = { type: item.type, action: item.action };
+			break;
+		case "file_search_call":
+			logical = { type: item.type, queries: item.queries, results: item.results };
+			break;
+		case "tool_search_call":
+			logical = { type: item.type, call_id: item.call_id, execution: item.execution, arguments: item.arguments };
+			break;
+		case "tool_search_output":
+			logical = { type: item.type, call_id: item.call_id, execution: item.execution, tools: item.tools };
+			break;
+		case "mcp_call":
+			logical = {
+				type: item.type,
+				name: item.name,
+				server_label: item.server_label,
+				arguments: item.arguments,
+				output: item.output,
+				error: item.error,
+			};
+			break;
+		case "mcp_list_tools":
+			logical = { type: item.type, server_label: item.server_label, tools: item.tools, error: item.error };
+			break;
+		case "code_interpreter_call":
+			logical = { type: item.type, code: item.code };
+			outputs = item.outputs;
+			break;
+		case "logs":
+			logical = { type: item.type, logs: item.logs };
+			break;
+		default:
+			return;
 	}
 	const outputIsContent = Array.isArray(output) || (isRecord(output) && output.type === "computer_screenshot");
 	if (nativeContent !== undefined && !Array.isArray(nativeContent)) logical.content = nativeContent;
 	if (output !== undefined && !outputIsContent) logical.output = output;
-	const metadataOrigin = origin.kind === "source" && Array.isArray(nativeContent) ? { kind: "source" as const, parts: origin.parts.filter(part => part.transportBlockIndex === undefined) } : origin;
-	if (visitor.sourceText) for (const [field, value] of Object.entries(logical)) {
-		if (field === "type" || field === "role" || field === "id" || field === "call_id" || value === undefined || value === null) continue;
-		if (field === "summary" && Array.isArray(value)) {
-			for (const part of value) if (isRecord(part) && part.type === "summary_text" && typeof part.text === "string") visitor.sourceText(part.text);
-		} else if (typeof value === "string") visitor.sourceText(value);
-		else if (!Array.isArray(value) || value.length > 0) visitor.sourceText(JSON.stringify(value));
-	}
+	const metadataOrigin =
+		origin.kind === "source" && Array.isArray(nativeContent)
+			? { kind: "source" as const, parts: origin.parts.filter(part => part.transportBlockIndex === undefined) }
+			: origin;
+	if (visitor.sourceText)
+		for (const [field, value] of Object.entries(logical)) {
+			if (
+				field === "type" ||
+				field === "role" ||
+				field === "id" ||
+				field === "call_id" ||
+				value === undefined ||
+				value === null
+			)
+				continue;
+			if (field === "summary" && Array.isArray(value)) {
+				for (const part of value)
+					if (isRecord(part) && part.type === "summary_text" && typeof part.text === "string")
+						visitor.sourceText(part.text);
+			} else if (typeof value === "string") visitor.sourceText(value);
+			else if (!Array.isArray(value) || value.length > 0) visitor.sourceText(JSON.stringify(value));
+		}
 	visitor.text?.(logical, metadataOrigin);
-	for (const [field, value] of [["content", nativeContent], ["output", output], ["outputs", outputs]] as const) {
+	for (const [field, value] of [
+		["content", nativeContent],
+		["output", output],
+		["outputs", outputs],
+	] as const) {
 		const children = Array.isArray(value) ? value : field === "output" && outputIsContent ? [value] : [];
 		for (let index = 0; index < children.length; index++) {
 			const child: unknown = children[index];
 			if (!isRecord(child)) continue;
-			const childOrigin: NativeItemOrigin = origin.kind === "source" ? { kind: "source", parts: origin.parts.slice(0, 1).map(part => ({
-				...part, blockIndex: `${part.blockIndex}.${field}${Array.isArray(value) ? `.${index}` : ""}`,
-				sourceSpan: undefined, transportSpan: undefined, transportBlockIndex: undefined,
-			})) } : origin;
+			const childOrigin: NativeItemOrigin =
+				origin.kind === "source"
+					? {
+							kind: "source",
+							parts: origin.parts.slice(0, 1).map(part => ({
+								...part,
+								blockIndex: `${part.blockIndex}.${field}${Array.isArray(value) ? `.${index}` : ""}`,
+								sourceSpan: undefined,
+								transportSpan: undefined,
+								transportBlockIndex: undefined,
+							})),
+						}
+					: origin;
 			visitOpenAIResponsesLogicalContent(child, visitor, childOrigin);
 		}
 	}
 }
 
 /** Current delta components only. Ingress mirrors remain owned by current content, even after deletion. */
-export function visitOpenAIResponsesSourceContent(message: AssistantMessage, visitor: OpenAIResponsesLogicalVisitor): void {
+export function visitOpenAIResponsesSourceContent(
+	message: AssistantMessage,
+	visitor: OpenAIResponsesLogicalVisitor,
+): void {
 	const payload = message.providerPayload;
 	if (payload?.type !== "openaiResponsesHistory" || payload.dt !== true) return;
 	importItemOrigins(payload.items, payload.origins);
@@ -588,9 +787,10 @@ export function visitOpenAIResponsesSourceContent(message: AssistantMessage, vis
 		const item = payload.items[index]!;
 		const origin = getSourceOrigin(item);
 		if (origin?.kind === "source" && origin.parts.some(part => part.status === "historical-not-current")) continue;
-		const mirrored = origin?.kind === "source"
-			? origin.parts.some(part => typeof (part.currentBlockIndex ?? part.blockIndex) === "number")
-			: payload.contentBlocks?.some(mapping => mapping.itemIndex === index) === true;
+		const mirrored =
+			origin?.kind === "source"
+				? origin.parts.some(part => typeof (part.currentBlockIndex ?? part.blockIndex) === "number")
+				: payload.contentBlocks?.some(mapping => mapping.itemIndex === index) === true;
 		if (!mirrored) visitOpenAIResponsesLogicalContent(item, visitor);
 	}
 }

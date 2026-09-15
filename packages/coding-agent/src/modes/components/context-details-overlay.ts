@@ -29,7 +29,9 @@ export class ContextDetailsOverlay implements Component {
 		private readonly onClose: () => void,
 		prepared?: CompactionDiagnostics,
 	) {
-		this.#snapshots = [current, recorded, prepared].filter((value): value is CompactionDiagnostics => value !== undefined);
+		this.#snapshots = [current, recorded, prepared].filter(
+			(value): value is CompactionDiagnostics => value !== undefined,
+		);
 		this.#body = new Text(this.#snapshotText(), 0, 0);
 		this.#scroll = new ScrollView([], {
 			height: 1,
@@ -90,7 +92,15 @@ export class ContextDetailsOverlay implements Component {
 			keys.getDisplayString("tui.select.up") + "/" + keys.getDisplayString("tui.select.down") + " scroll",
 			keys.getDisplayString("tui.select.pageUp") + "/" + keys.getDisplayString("tui.select.pageDown") + " page",
 		];
-		if (this.#snapshots.length > 1) hints.push(keys.getDisplayString("tui.select.confirm") + " next snapshot (" + (this.#index + 1) + "/" + this.#snapshots.length + ")");
+		if (this.#snapshots.length > 1)
+			hints.push(
+				keys.getDisplayString("tui.select.confirm") +
+					" next snapshot (" +
+					(this.#index + 1) +
+					"/" +
+					this.#snapshots.length +
+					")",
+			);
 		hints.push(keys.getDisplayString("tui.select.cancel") + " close");
 		this.#footer.setText(hints.join(" · "));
 	}

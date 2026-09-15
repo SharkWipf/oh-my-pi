@@ -1,7 +1,12 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { Tokenizer } from "@oh-my-pi/pi-agent-core/tokenizer";
 import type { UserMessage } from "@oh-my-pi/pi-ai";
-import { createCustomMessage, getOriginalSourceMessage, isCustomMessageContent, normalizeCustomMessagePayload } from "./messages";
+import {
+	createCustomMessage,
+	getOriginalSourceMessage,
+	isCustomMessageContent,
+	normalizeCustomMessagePayload,
+} from "./messages";
 import { PreservedMessageIndex, type PolicyKind, type PolicyLimit, type PolicyRange } from "./preserved-message-index";
 import {
 	PRESERVED_USER_MESSAGE_CATEGORIES,

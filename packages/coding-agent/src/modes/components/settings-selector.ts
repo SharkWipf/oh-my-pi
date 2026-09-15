@@ -1344,7 +1344,11 @@ export class SettingsSelectorComponent implements Component {
 								{ value: "all", label: "All", description: "Every eligible message" },
 								{ value: "messages", label: "Messages", description: "A positive whole-message count" },
 								{ value: "tokens", label: "Tokens", description: "A token allowance, including zero" },
-								{ value: "context-percent", label: "% maximum context", description: "0–100% of the model context size" },
+								{
+									value: "context-percent",
+									label: "% maximum context",
+									description: "0–100% of the model context size",
+								},
 							],
 							limit?.mode ?? "",
 							mode => {
@@ -1453,7 +1457,8 @@ export class SettingsSelectorComponent implements Component {
 				const summary = this.context.getPreservationLimitUsage?.(def.path);
 				usage.currentValue = summary ?? "Unavailable";
 				usage.description =
-					summary ?? "Current selection counts appear once message retention has been calculated for this session.";
+					summary ??
+					"Current selection counts appear once message retention has been calculated for this session.";
 			},
 		);
 		return menu;
@@ -1478,7 +1483,8 @@ export class SettingsSelectorComponent implements Component {
 					id: "direction",
 					label: "Selection order",
 					currentValue: cap === "keep-last" ? "Newest first" : cap === "keep-first" ? "Oldest first" : "No cap",
-					description: "Extra retention for filter Keep or manual Always messages. Newest/Oldest first uses the Recent/First limit value separately; overlap is kept once. No cap keeps all marked messages.",
+					description:
+						"Extra retention for filter Keep or manual Always messages. Newest/Oldest first uses the Recent/First limit value separately; overlap is kept once. No cap keeps all marked messages.",
 					submenu: (_cv, close) =>
 						new SelectSubmenu(
 							"Rule / Manual Keep Order",
@@ -1509,7 +1515,8 @@ export class SettingsSelectorComponent implements Component {
 					id: "edge",
 					label: cap === "keep-first" ? "Edit Keep First Limit…" : "Edit Keep Recent Limit…",
 					currentValue: this.#limitLabel(settings.get(path)),
-					description: "Changes the ordinary Keep First/Recent Limit too. Off or All means no cap here; 0 tokens or 0% is a zero-token allowance. Assistant/tool exchanges stay together; each message counts toward the allowance.",
+					description:
+						"Changes the ordinary Keep First/Recent Limit too. Off or All means no cap here; 0 tokens or 0% is a zero-token allowance. Assistant/tool exchanges stay together; each message counts toward the allowance.",
 					submenu: (_cv, close) =>
 						this.#createLimit(def, value => {
 							close(value);
@@ -1521,7 +1528,8 @@ export class SettingsSelectorComponent implements Component {
 				id: "effective",
 				label: "Effective",
 				currentValue: this.#capSummary(),
-					description: "This limits the Keep/Always selection, not the total retained context. A message beyond this cap can still qualify through First/Recent or recent protection. Overlapping selections keep one copy.",
+				description:
+					"This limits the Keep/Always selection, not the total retained context. A message beyond this cap can still qualify through First/Recent or recent protection. Overlapping selections keep one copy.",
 			});
 			rows.push(usage);
 			return rows;
@@ -1537,7 +1545,8 @@ export class SettingsSelectorComponent implements Component {
 				const summary = this.context.getPreservationLimitUsage?.("compaction.keepUserMessagesFilterKeepCap");
 				usage.currentValue = summary ?? "Unavailable";
 				usage.description =
-					summary ?? "Current selection counts appear once message retention has been calculated for this session.";
+					summary ??
+					"Current selection counts appear once message retention has been calculated for this session.";
 			},
 		);
 		return menu;

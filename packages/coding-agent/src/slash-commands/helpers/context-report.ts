@@ -12,11 +12,10 @@ import { renderAsciiBar } from "./format";
  * (categories + auto-compact buffer + free slack) and falls back to the
  * minimal "window/used" lines when the breakdown helper throws.
  */
-export function buildContextReportText(runtime: Pick<SlashCommandRuntime, "session">, action: "usage" | "details" = "usage"): string {
-	return `${buildUsageReportText(runtime, action)}\n\n${requirementsContextText(runtime.session)}`;
-}
-
-function buildUsageReportText(runtime: Pick<SlashCommandRuntime, "session">, action: "usage" | "details"): string {
+export function buildContextReportText(
+	runtime: Pick<SlashCommandRuntime, "session">,
+	action: "usage" | "details" = "usage",
+): string {
 	if (action === "details") {
 		const current = runtime.session.getCompactionDiagnostics("current");
 		const recorded = runtime.session.getCompactionDiagnostics("recorded");
@@ -25,8 +24,14 @@ function buildUsageReportText(runtime: Pick<SlashCommandRuntime, "session">, act
 		if (current) sections.push(renderCompactionDiagnosticsDetails(current));
 		if (recorded) sections.push(renderCompactionDiagnosticsDetails(recorded));
 		if (prepared) sections.push(renderCompactionDiagnosticsDetails(prepared));
-		return sections.length ? sections.join("\n\n---\n\n") : "Context diagnostics are unavailable. Legacy compactions without recorded facts cannot provide historical settings or source attribution.";
+		return sections.length
+			? sections.join("\n\n---\n\n")
+			: "Context diagnostics are unavailable. Legacy compactions without recorded facts cannot provide historical settings or source attribution.";
 	}
+	return `${buildUsageReportText(runtime)}\n\n${requirementsContextText(runtime.session)}`;
+}
+
+function buildUsageReportText(runtime: Pick<SlashCommandRuntime, "session">): string {
 	try {
 		const breakdown = computeContextBreakdown(runtime.session, { snapcompactSavings: true });
 		if (breakdown.contextWindow <= 0) {

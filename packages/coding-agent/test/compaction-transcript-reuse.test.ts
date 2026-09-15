@@ -85,7 +85,13 @@ describe("post-compaction transcript reuse", () => {
 				},
 			);
 		}
-		const context = { messages, thinkingLevel: "off" as const, models: {}, injectedTtsrRules: [], mode: "none" as const };
+		const context = {
+			messages,
+			thinkingLevel: "off" as const,
+			models: {},
+			injectedTtsrRules: [],
+			mode: "none" as const,
+		};
 		try {
 			helpers.renderSessionContext(context);
 			composer.setRuntimeChildren([ctx.chatContainer, composer.editor]);

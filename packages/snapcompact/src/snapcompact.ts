@@ -46,7 +46,15 @@
  */
 
 import type { Api, ImageContent, Message, TextContent } from "@oh-my-pi/pi-ai";
-import { compactionSourceKey, type SourceBlockRange, type SourceCoverageRun, type SourceLayoutPart, type SourceMessage, type SourceRange, type SourceRepresentation } from "@oh-my-pi/pi-ai/compaction-source";
+import {
+	compactionSourceKey,
+	type SourceBlockRange,
+	type SourceCoverageRun,
+	type SourceLayoutPart,
+	type SourceMessage,
+	type SourceRange,
+	type SourceRepresentation,
+} from "@oh-my-pi/pi-ai/compaction-source";
 import { classifyModel, compareRevision, parseRevision } from "@oh-my-pi/pi-catalog/identity";
 import { renderSnapcompactPng, snapcompactSupportedChars } from "@oh-my-pi/pi-natives";
 import { formatGroupedPaths, prompt } from "@oh-my-pi/pi-utils";
@@ -867,7 +875,11 @@ function adjacentMarkdownOpenerStart(text: string, dataIndex: number, cursor: nu
  *  Parameters are kept rather than stripped to a bare type/subtype so charset
  *  (and similar) remain visible after elision and the label stays a pure
  *  function of the captured text. */
-function elideDataUrls(text: string, context: DataUrlContext = "source", onReplacement?: (start: number, end: number, value: string) => void): string {
+function elideDataUrls(
+	text: string,
+	context: DataUrlContext = "source",
+	onReplacement?: (start: number, end: number, value: string) => void,
+): string {
 	if (!/;base64,/i.test(text)) return text;
 	DATA_URL_ATOM.lastIndex = 0;
 	let match = DATA_URL_ATOM.exec(text);
@@ -939,7 +951,6 @@ function stripDimMarkers(text: string): string {
 	return text.replace(DIM_MARKERS, "");
 }
 
-
 interface SerializationTrace {
 	message: Message;
 	start: number;
@@ -949,14 +960,26 @@ interface SerializationTrace {
 	rawEnd: number;
 	exact: boolean;
 }
-interface SerializationImage { message: Message; blockIndex: number; offset: number }
-interface SerializationCapture { runs: SerializationTrace[]; images: SerializationImage[]; required?: boolean }
+interface SerializationImage {
+	message: Message;
+	blockIndex: number;
+	offset: number;
+}
+interface SerializationCapture {
+	runs: SerializationTrace[];
+	images: SerializationImage[];
+	required?: boolean;
+}
 
 export function serializeConversation(messages: Message[], options?: SerializeOptions): string {
 	return serializeConversationSource(messages, options);
 }
 
-function serializeConversationSource(messages: Message[], options?: SerializeOptions, capture?: SerializationCapture): string {
+function serializeConversationSource(
+	messages: Message[],
+	options?: SerializeOptions,
+	capture?: SerializationCapture,
+): string {
 	const toolResultMaxChars = options?.toolResultMaxChars ?? TOOL_RESULT_MAX_CHARS;
 	const toolArgMaxChars = options?.toolArgMaxChars ?? TOOL_ARG_MAX_CHARS;
 	const toolCallMaxChars = options?.toolCallMaxChars ?? TOOL_CALL_MAX_CHARS;
@@ -988,38 +1011,92 @@ function serializeConversationSource(messages: Message[], options?: SerializeOpt
 		if (!capture) return;
 		let start = 0;
 		for (const match of raw.matchAll(/[\u000e\u000f]/g)) {
-			if (match.index > start) { capture.runs.push({ message, blockIndex, start: at, end: at + match.index - start, rawStart: start, rawEnd: match.index, exact: true }); at += match.index - start; }
+			if (match.index > start) {
+				capture.runs.push({
+					message,
+					blockIndex,
+					start: at,
+					end: at + match.index - start,
+					rawStart: start,
+					rawEnd: match.index,
+					exact: true,
+				});
+				at += match.index - start;
+			}
 			start = match.index + 1;
 		}
-		if (start < raw.length) capture.runs.push({ message, blockIndex, start: at, end: at + raw.length - start, rawStart: start, rawEnd: raw.length, exact: true });
+		if (start < raw.length)
+			capture.runs.push({
+				message,
+				blockIndex,
+				start: at,
+				end: at + raw.length - start,
+				rawStart: start,
+				rawEnd: raw.length,
+				exact: true,
+			});
 	};
 	const resultByCallId = new Map<string, Extract<Message, { role: "toolResult" }>>();
 	const captureResult = (message: Extract<Message, { role: "toolResult" }>, outputStart: number) => {
 		if (!capture) return;
-		const raw = message.content.filter(block => block.type === "text").map(block => block.text).join("");
+		const raw = message.content
+			.filter(block => block.type === "text")
+			.map(block => block.text)
+			.join("");
 		const clean = elideDataUrls(stripDimMarkers(raw));
 		const body = truncateForSummary(clean, toolResultMaxChars, headRatio);
 		const bodyStart = outputStart + "<out>\n".length + (dimToolResults ? DIM_ON.length : 0);
-		const head = clean.length > toolResultMaxChars ? Math.round(toolResultMaxChars * Math.min(Math.max(headRatio, 0), 1)) : clean.length;
+		const head =
+			clean.length > toolResultMaxChars
+				? Math.round(toolResultMaxChars * Math.min(Math.max(headRatio, 0), 1))
+				: clean.length;
 		const tail = clean.length > toolResultMaxChars ? toolResultMaxChars - head : 0;
-		const intervals = [{ start: 0, end: head, output: bodyStart }, ...(tail > 0 ? [{ start: clean.length - tail, end: clean.length, output: bodyStart + body.length - tail }] : [])];
+		const intervals = [
+			{ start: 0, end: head, output: bodyStart },
+			...(tail > 0
+				? [{ start: clean.length - tail, end: clean.length, output: bodyStart + body.length - tail }]
+				: []),
+		];
 		let rawOffset = 0;
 		for (const [blockIndex, block] of message.content.entries()) {
 			if (block.type === "image") {
 				const interval = intervals.find(part => part.end >= rawOffset) ?? intervals.at(-1)!;
-				capture.images.push({ message, blockIndex, offset: interval.output + Math.max(0, Math.min(rawOffset, interval.end) - interval.start) });
+				capture.images.push({
+					message,
+					blockIndex,
+					offset: interval.output + Math.max(0, Math.min(rawOffset, interval.end) - interval.start),
+				});
 				continue;
 			}
 			if (block.type !== "text") continue;
-			if (clean === raw) for (const interval of intervals) {
-				const start = Math.max(rawOffset, interval.start), end = Math.min(rawOffset + block.text.length, interval.end);
-				if (end > start) capture.runs.push({ message, blockIndex, start: interval.output + start - interval.start, end: interval.output + end - interval.start, rawStart: start - rawOffset, rawEnd: end - rawOffset, exact: true });
-			}
-			else if (rawOffset === 0) capture.runs.push({ message, blockIndex, start: bodyStart, end: bodyStart + body.length, rawStart: 0, rawEnd: block.text.length, exact: false });
+			if (clean === raw)
+				for (const interval of intervals) {
+					const start = Math.max(rawOffset, interval.start),
+						end = Math.min(rawOffset + block.text.length, interval.end);
+					if (end > start)
+						capture.runs.push({
+							message,
+							blockIndex,
+							start: interval.output + start - interval.start,
+							end: interval.output + end - interval.start,
+							rawStart: start - rawOffset,
+							rawEnd: end - rawOffset,
+							exact: true,
+						});
+				}
+			else if (rawOffset === 0)
+				capture.runs.push({
+					message,
+					blockIndex,
+					start: bodyStart,
+					end: bodyStart + body.length,
+					rawStart: 0,
+					rawEnd: block.text.length,
+					exact: false,
+				});
 			rawOffset += block.text.length;
 		}
 	};
-
 
 	// Tool results flagged contextually useless (and their paired calls) carry no
 	// information worth archiving — skip the whole pair. Surviving results are
@@ -1052,18 +1129,49 @@ function serializeConversationSource(messages: Message[], options?: SerializeOpt
 	for (const msg of messages) {
 		if (msg.role === "user") {
 			const blocks = typeof msg.content === "string" ? [{ type: "text" as const, text: msg.content }] : msg.content;
-			const content = blocks.filter(block => block.type === "text").map(block => stripDimMarkers(block.text)).join("");
+			const content = blocks
+				.filter(block => block.type === "text")
+				.map(block => stripDimMarkers(block.text))
+				.join("");
 			let at = content ? pushPart("¶user:", content) : serializedLength;
-			if (capture) for (const [blockIndex, block] of blocks.entries()) {
-				if (block.type === "image") { capture.images.push({ message: msg, blockIndex, offset: at }); continue; }
-				if (block.type !== "text") continue;
-				let rawStart = 0;
-				for (const match of block.text.matchAll(/[\u000e\u000f]/g)) {
-					if (match.index > rawStart) { const length = match.index - rawStart; capture.runs.push({ message: msg, blockIndex, start: at, end: at + length, rawStart, rawEnd: match.index, exact: true }); at += length; }
-					rawStart = match.index + 1;
+			if (capture)
+				for (const [blockIndex, block] of blocks.entries()) {
+					if (block.type === "image") {
+						capture.images.push({ message: msg, blockIndex, offset: at });
+						continue;
+					}
+					if (block.type !== "text") continue;
+					let rawStart = 0;
+					for (const match of block.text.matchAll(/[\u000e\u000f]/g)) {
+						if (match.index > rawStart) {
+							const length = match.index - rawStart;
+							capture.runs.push({
+								message: msg,
+								blockIndex,
+								start: at,
+								end: at + length,
+								rawStart,
+								rawEnd: match.index,
+								exact: true,
+							});
+							at += length;
+						}
+						rawStart = match.index + 1;
+					}
+					if (rawStart < block.text.length) {
+						const length = block.text.length - rawStart;
+						capture.runs.push({
+							message: msg,
+							blockIndex,
+							start: at,
+							end: at + length,
+							rawStart,
+							rawEnd: block.text.length,
+							exact: true,
+						});
+						at += length;
+					}
 				}
-				if (rawStart < block.text.length) { const length = block.text.length - rawStart; capture.runs.push({ message: msg, blockIndex, start: at, end: at + length, rawStart, rawEnd: block.text.length, exact: true }); at += length; }
-			}
 		} else if (msg.role === "assistant") {
 			// Stream blocks in content order: buffer thinking/text, then flush a
 			// separate section for each block type right before each tool call.
@@ -1071,12 +1179,19 @@ function serializeConversationSource(messages: Message[], options?: SerializeOpt
 			let pendingThinking: { text: string; raw: string; blockIndex: number }[] = [];
 			let pendingText: { text: string; raw: string; blockIndex: number }[] = [];
 			const flushAssistant = () => {
-				for (const [prefix, pending] of [["¶think:", pendingThinking], ["¶ai:", pendingText]] as const) {
+				for (const [prefix, pending] of [
+					["¶think:", pendingThinking],
+					["¶ai:", pendingText],
+				] as const) {
 					if (!pending.length) continue;
 					let at = pushPart(prefix, pending.map(part => part.text).join("\n"));
-					for (const part of pending) { captureRaw(msg, part.blockIndex, part.raw, at); at += part.text.length + 1; }
+					for (const part of pending) {
+						captureRaw(msg, part.blockIndex, part.raw, at);
+						at += part.text.length + 1;
+					}
 				}
-				pendingThinking = []; pendingText = [];
+				pendingThinking = [];
+				pendingText = [];
 			};
 
 			for (const [blockIndex, block] of msg.content.entries()) {
@@ -1102,11 +1217,14 @@ function serializeConversationSource(messages: Message[], options?: SerializeOpt
 					const intent = stripDimMarkers(rawIntent).replace(/\s+/g, " ").trim();
 
 					let argumentsComplete = true;
-					const argumentText = Object.entries(args).filter(([key]) => key !== INTENT_FIELD).map(([key, value]) => {
-						const raw = elideDataUrls(JSON.stringify(value) ?? "undefined");
-						if (raw.length > toolArgMaxChars) argumentsComplete = false;
-						return key + "=" + truncateForSummary(raw, toolArgMaxChars, headRatio);
-					}).join(", ");
+					const argumentText = Object.entries(args)
+						.filter(([key]) => key !== INTENT_FIELD)
+						.map(([key, value]) => {
+							const raw = elideDataUrls(JSON.stringify(value) ?? "undefined");
+							if (raw.length > toolArgMaxChars) argumentsComplete = false;
+							return key + "=" + truncateForSummary(raw, toolArgMaxChars, headRatio);
+						})
+						.join(", ");
 					if (argumentText.length > toolCallMaxChars) argumentsComplete = false;
 					const argsStr = truncateForSummary(argumentText, toolCallMaxChars, headRatio);
 					const lines: string[] = [];
@@ -1121,7 +1239,16 @@ function serializeConversationSource(messages: Message[], options?: SerializeOpt
 						lines.push(renderResultBlock(resultText));
 					}
 					const at = pushPart("¶call:", lines.join("\n"));
-					if (capture) capture.runs.push({ message: msg, blockIndex, start: at, end: at + firstLine.length, rawStart: 0, rawEnd: 0, exact: argumentsComplete });
+					if (capture)
+						capture.runs.push({
+							message: msg,
+							blockIndex,
+							start: at,
+							end: at + firstLine.length,
+							rawStart: 0,
+							rawEnd: 0,
+							exact: argumentsComplete,
+						});
 					const result = resultByCallId.get(block.id);
 					if (result && resultText !== undefined) captureResult(result, at + firstLine.length + 1);
 				}
@@ -1132,7 +1259,10 @@ function serializeConversationSource(messages: Message[], options?: SerializeOpt
 			// only orphans (call archived outside this window) render standalone.
 			if (uselessCallIds.has(msg.toolCallId) || mergedCallIds.has(msg.toolCallId)) continue;
 			const resultText = resultTextByCallId.get(msg.toolCallId);
-			if (resultText !== undefined) { const at = pushPart("¶call:", "\n" + renderResultBlock(resultText)); captureResult(msg, at + 1); }
+			if (resultText !== undefined) {
+				const at = pushPart("¶call:", "\n" + renderResultBlock(resultText));
+				captureResult(msg, at + 1);
+			}
 		}
 	}
 
@@ -1143,15 +1273,16 @@ function serializeConversationSource(messages: Message[], options?: SerializeOpt
 // Preserve-data helpers
 // ============================================================================
 
-const OPENAI_REMOTE_COMPACTION_PRESERVE_KEY = "openaiRemoteCompaction";
+/** Provider-native compaction payloads a snapcompact pass supersedes. */
+const PROVIDER_COMPACTION_PRESERVE_KEYS = ["openaiRemoteCompaction", "anthropicCompaction"] as const;
 
-function stripOpenAiRemoteCompactionPreserveData(
+function stripProviderCompactionPreserveData(
 	preserveData: Record<string, unknown> | undefined,
 ): Record<string, unknown> | undefined {
-	if (!preserveData || !(OPENAI_REMOTE_COMPACTION_PRESERVE_KEY in preserveData)) {
+	if (!preserveData || !PROVIDER_COMPACTION_PRESERVE_KEYS.some(key => key in preserveData)) {
 		return preserveData;
 	}
-	const { [OPENAI_REMOTE_COMPACTION_PRESERVE_KEY]: _removed, ...rest } = preserveData;
+	const { openaiRemoteCompaction: _openai, anthropicCompaction: _anthropic, ...rest } = preserveData;
 	return Object.keys(rest).length > 0 ? rest : undefined;
 }
 
@@ -1556,9 +1687,17 @@ function sliceCells(text: string, width: number, wideCells: boolean): string {
  *  edge (mirrors native `place_cell`). Pages are contiguous substrings, so each
  *  renders independently starting at cell 0. A single char wider than the whole
  *  budget still rides its page; the native renderer clips it. */
-function paginateCells(text: string, capacity: number, cols: number, wideCells: boolean, maxPages = Infinity): string[] {
+function paginateCells(
+	text: string,
+	capacity: number,
+	cols: number,
+	wideCells: boolean,
+	maxPages = Infinity,
+): string[] {
 	const pages: string[] = [];
-	let start = 0, offset = 0, cell = 0;
+	let start = 0,
+		offset = 0,
+		cell = 0;
 	let hasCell = false;
 	for (const char of text) {
 		const w = charCells(char, wideCells);
@@ -1799,7 +1938,14 @@ export function getPreservedArchive(preserveData: Record<string, unknown> | unde
 	// A text-only archive (everything fit in the plain-text regions) is valid;
 	// only an archive carrying neither frames nor text is empty.
 	const representation = preserveData?.sourceRepresentation as SourceRepresentation | undefined;
-	if (frames.length === 0 && text === undefined && textHead === undefined && textTail === undefined && !representation?.layout.some(part => part.kind === "original-image")) return undefined;
+	if (
+		frames.length === 0 &&
+		text === undefined &&
+		textHead === undefined &&
+		textTail === undefined &&
+		!representation?.layout.some(part => part.kind === "original-image")
+	)
+		return undefined;
 	return {
 		frames,
 		totalChars: typeof archive.totalChars === "number" ? archive.totalChars : 0,
@@ -1846,6 +1992,12 @@ export function renderabilityProbeText(
 	return serialized;
 }
 
+/** A frame payload that can be priced before it is materialized. */
+export interface LazyFrameData {
+	readonly bytes: number;
+	read(): string;
+}
+
 /** Options for reconstructing a persisted snapcompact archive into prompt blocks. */
 export interface HistoryBlockOptions {
 	sourceRepresentation?: SourceRepresentation;
@@ -1854,6 +2006,12 @@ export interface HistoryBlockOptions {
 	onEmit?: (layoutIndex: number, blockIndex: number, block: TextContent | ImageContent) => void;
 	/** Hard cap on image base64 bytes attached to one rebuilt provider request. */
 	maxFrameDataBytes?: number;
+	/**
+	 * Price and resolve a frame payload. Legacy archives budget newest-first;
+	 * source-aware archives retain an oldest-first prefix and spill to source text.
+	 * Returning `undefined` drops a missing payload.
+	 */
+	resolveFrameData?: (data: string) => LazyFrameData | undefined;
 }
 
 function formatFrameDataBytes(bytes: number): string {
@@ -1862,38 +2020,105 @@ function formatFrameDataBytes(bytes: number): string {
 	return `${bytes} B`;
 }
 
-function imagesWithinBudget(
-	archive: Archive,
-	maxFrameDataBytes: number | undefined,
-): { images: ImageContent[]; omittedFrames: number; omittedBytes: number } {
-	if (maxFrameDataBytes === undefined) {
-		return { images: images(archive), omittedFrames: 0, omittedBytes: 0 };
+/**
+ * Prefix of an externalized frame payload (see the session blob store).
+ *
+ * A frame persisted by a recent session holds this reference rather than
+ * base64, so a caller that never supplies `resolveFrameData` would otherwise
+ * hand the reference string to the provider as image data. Dropping the frame
+ * is the safe failure: a missing picture beats a rejected request.
+ */
+const BLOB_REFERENCE_PREFIX = "blob:sha256:";
+
+function isUnresolvedBlobReference(data: string): boolean {
+	return data.startsWith(BLOB_REFERENCE_PREFIX);
+}
+
+/** One reconstructed slot: a usable frame, an unavailable gap, or a byte-budget gap. */
+type FrameSlot = { frame: Frame } | { unavailable: true } | { omittedBytes: number };
+
+/**
+ * Price every frame newest-first and retain only payloads that fit the byte
+ * budget. Gap slots preserve the original chronology without materializing
+ * rejected payloads.
+ */
+function imagesWithinBudget(archive: Archive, options: HistoryBlockOptions): FrameSlot[] {
+	const { maxFrameDataBytes, resolveFrameData } = options;
+	const hasUnresolvedReference = archive.frames.some(frame => isUnresolvedBlobReference(frame.data));
+	if (maxFrameDataBytes === undefined && !resolveFrameData && !hasUnresolvedReference) {
+		return archive.frames.map(frame => ({ frame }));
 	}
 
 	let usedBytes = 0;
-	let omittedFrames = 0;
-	let omittedBytes = 0;
-	const keptNewestFirst: Frame[] = [];
+	const newestFirst: FrameSlot[] = [];
 	for (let index = archive.frames.length - 1; index >= 0; index--) {
 		const frame = archive.frames[index];
 		if (!frame) continue;
-		const bytes = frame.data.length;
-		if (usedBytes + bytes > maxFrameDataBytes) {
-			omittedFrames++;
-			omittedBytes += bytes;
+		const lazy = resolveFrameData?.(frame.data);
+		if (!lazy && (resolveFrameData || isUnresolvedBlobReference(frame.data))) {
+			newestFirst.push({ unavailable: true });
+			continue;
+		}
+		const bytes = lazy ? lazy.bytes : frame.data.length;
+		if (maxFrameDataBytes !== undefined && usedBytes + bytes > maxFrameDataBytes) {
+			newestFirst.push({ omittedBytes: bytes });
 			continue;
 		}
 		usedBytes += bytes;
-		keptNewestFirst.push(frame);
+		newestFirst.push({ frame: lazy ? { ...frame, data: lazy.read() } : frame });
 	}
-	keptNewestFirst.reverse();
-	return { images: images({ ...archive, frames: keptNewestFirst }), omittedFrames, omittedBytes };
+	newestFirst.reverse();
+	return newestFirst;
+}
+
+/** Collapse a run of unavailable frames into one in-place gap marker. */
+function unavailableFrameNotice(count: number): string {
+	return `-------------- ${count.toLocaleString()} archived image frame${count === 1 ? "" : "s"} unavailable here --------------`;
+}
+
+/** Blocks for the imaged middle, with both gap causes kept in chronological position. */
+function frameBlocks(slots: FrameSlot[]): (TextContent | ImageContent)[] {
+	const blocks: (TextContent | ImageContent)[] = [];
+	let pendingGap: "unavailable" | "budget" | undefined;
+	let pendingFrames = 0;
+	let pendingBytes = 0;
+	const flushGap = (): void => {
+		if (!pendingGap) return;
+		blocks.push({
+			type: "text",
+			text:
+				pendingGap === "unavailable"
+					? unavailableFrameNotice(pendingFrames)
+					: omittedFrameNotice(pendingFrames, pendingBytes),
+		});
+		pendingGap = undefined;
+		pendingFrames = 0;
+		pendingBytes = 0;
+	};
+	for (const slot of slots) {
+		if ("frame" in slot) {
+			flushGap();
+			blocks.push(...images({ frames: [slot.frame] } as Archive));
+			continue;
+		}
+		const gap = "unavailable" in slot ? "unavailable" : "budget";
+		if (pendingGap && pendingGap !== gap) flushGap();
+		pendingGap = gap;
+		pendingFrames++;
+		if ("omittedBytes" in slot) pendingBytes += slot.omittedBytes;
+	}
+	flushGap();
+	return blocks;
 }
 
 function omittedFrameNotice(omittedFrames: number, omittedBytes: number): string {
+	const budgetNote =
+		omittedBytes > 0
+			? ` ${formatFrameDataBytes(omittedBytes)} of base64 exceeded the per-request snapcompact payload budget.`
+			: "";
 	return [
 		"-------------- snapcompact image middle omitted",
-		`${omittedFrames.toLocaleString()} archived image frame${omittedFrames === 1 ? "" : "s"} (${formatFrameDataBytes(omittedBytes)} base64) exceeded the per-request snapcompact payload budget. The compacted summary and visible text edges remain available.`,
+		`${omittedFrames.toLocaleString()} archived image frame${omittedFrames === 1 ? "" : "s"} could not be included.${budgetNote} The compacted summary and visible text edges remain available.`,
 		"--------------",
 	].join("\n");
 }
@@ -1920,50 +2145,80 @@ export function historyBlocks(archive: Archive, options: HistoryBlockOptions = {
 		for (const [layoutIndex, part] of options.sourceRepresentation.layout.entries()) {
 			let block: TextContent | ImageContent | undefined;
 			if (part.kind === "source") continue;
-			if (part.kind === "text") block = { type: "text", text: toPlainText((archive.text ?? "").slice(part.range.start, part.range.end)) };
+			if (part.kind === "text")
+				block = { type: "text", text: toPlainText((archive.text ?? "").slice(part.range.start, part.range.end)) };
 			else if (part.kind === "frame") {
 				const frame = archive.frames[part.frameIndex];
-				if (frame && !overflow && (options.maxFrameDataBytes === undefined || usedBytes + frame.data.length <= options.maxFrameDataBytes)) {
-					block = { type: "image", data: frame.data, mimeType: frame.mimeType, ...(frame.detail ? { detail: frame.detail } : {}) }; usedBytes += frame.data.length;
-				} else { overflow = true; block = { type: "text", text: toPlainText((archive.text ?? "").slice(part.range.start, part.range.end)) }; }
+				const lazy = frame && !overflow ? options.resolveFrameData?.(frame.data) : undefined;
+				const available = frame && (lazy || (!options.resolveFrameData && !isUnresolvedBlobReference(frame.data)));
+				const bytes = lazy?.bytes ?? frame?.data.length ?? 0;
+				if (
+					available &&
+					!overflow &&
+					(options.maxFrameDataBytes === undefined || usedBytes + bytes <= options.maxFrameDataBytes)
+				) {
+					block = {
+						type: "image",
+						data: lazy ? lazy.read() : frame.data,
+						mimeType: frame.mimeType,
+						...(frame.detail ? { detail: frame.detail } : {}),
+					};
+					usedBytes += bytes;
+				} else {
+					overflow = true;
+					block = {
+						type: "text",
+						text: toPlainText((archive.text ?? "").slice(part.range.start, part.range.end)),
+					};
+				}
 			} else if (part.kind === "original-image") {
 				block = options.resolveSourceImage?.(part);
-				if (!block) throw new Error("Original snapcompact source image is unavailable: " + part.entryId + ":" + (part.currentBlockIndex ?? part.blockIndex));
+				if (!block)
+					throw new Error(
+						"Original snapcompact source image is unavailable: " +
+							part.entryId +
+							":" +
+							(part.currentBlockIndex ?? part.blockIndex),
+					);
 			} else if (part.kind === "gap") {
-				if (part.reason === "omitted-messages" && (part.wholeMessages ?? 0) > 0) block = { type: "text", text: "[" + part.wholeMessages + " earlier source messages omitted]" };
+				if (part.reason === "omitted-messages" && (part.wholeMessages ?? 0) > 0)
+					block = { type: "text", text: "[" + part.wholeMessages + " earlier source messages omitted]" };
 				else if (part.reason === "partial-text") block = { type: "text", text: "[truncated]" };
 				else if (part.reason === "image-deleted") block = { type: "text", text: "[source image deleted]" };
-				else if (part.reason === "unknown-source") block = { type: "text", text: "[earlier source coverage unknown]" };
+				else if (part.reason === "unknown-source")
+					block = { type: "text", text: "[earlier source coverage unknown]" };
 			}
 			const previousPart = options.sourceRepresentation.layout[layoutIndex - 1];
-			if (block?.type === "text" && (part.kind === "text" || part.kind === "frame") && previousPart?.kind === "frame" && blocks.at(-1)?.type === "image" && previousPart.range.end === part.range.start) {
+			if (
+				block?.type === "text" &&
+				(part.kind === "text" || part.kind === "frame") &&
+				previousPart?.kind === "frame" &&
+				blocks.at(-1)?.type === "image" &&
+				previousPart.range.end === part.range.start
+			) {
 				const boundary = part.range.start;
-				if (options.sourceRepresentation.coverage.some(run => run.normalized && run.normalized.start < boundary && run.normalized.end > boundary)) block.text = "[continued]\n" + block.text;
+				if (
+					options.sourceRepresentation.coverage.some(
+						run => run.normalized && run.normalized.start < boundary && run.normalized.end > boundary,
+					)
+				)
+					block.text = "[continued]\n" + block.text;
 			}
-			if (block) { options.onEmit?.(layoutIndex, blocks.length, block); blocks.push(block); }
+			if (block) {
+				options.onEmit?.(layoutIndex, blocks.length, block);
+				blocks.push(block);
+			}
 		}
 		return blocks;
 	}
-	const budgeted = imagesWithinBudget(archive, options.maxFrameDataBytes);
-	const hasImages = budgeted.images.length > 0;
-	const hasOmittedImages = budgeted.omittedFrames > 0;
+	const middle = frameBlocks(imagesWithinBudget(archive, options));
+	const hasImages = middle.some(block => block.type === "image");
+	const hasOmittedImages = middle.some(block => block.type === "text");
 	if (archive.textHead) {
-		const suffix = hasImages
-			? "\n-------------- imaged middle below\n"
-			: hasOmittedImages
-				? `\n${omittedFrameNotice(budgeted.omittedFrames, budgeted.omittedBytes)}\n`
-				: "";
+		const suffix = hasImages ? "\n-------------- imaged middle below\n" : "";
 		blocks.push({ type: "text", text: elideDataUrls(toPlainText(archive.textHead), "archive") + suffix });
-	} else if (hasOmittedImages && !hasImages) {
-		blocks.push({ type: "text", text: omittedFrameNotice(budgeted.omittedFrames, budgeted.omittedBytes) });
 	}
-	// Omitted frames are the OLDEST archived images: the byte budget keeps the
-	// newest tail frames, so the gap notice precedes the kept images to keep the
-	// reconstructed blocks oldest-to-newest.
-	if (hasImages && hasOmittedImages) {
-		blocks.push({ type: "text", text: omittedFrameNotice(budgeted.omittedFrames, budgeted.omittedBytes) });
-	}
-	blocks.push(...budgeted.images);
+	blocks.push(...middle);
 	if (archive.textTail) {
 		const prefix = hasImages
 			? "-------------- imaged middle above\n"
@@ -1997,7 +2252,11 @@ function denseCompanion(high: Shape, api: Api | undefined): Shape {
 }
 
 /** A rendered page and the exact consumed normalized-source interval. */
-interface PlanFrame { text: string; shape: Shape; range: SourceRange }
+interface PlanFrame {
+	text: string;
+	shape: Shape;
+	range: SourceRange;
+}
 interface ArchiveLayout {
 	frames: PlanFrame[];
 	textHead: string;
@@ -2025,7 +2284,11 @@ function sourcePages(text: string, shape: Shape, offset = 0, maxPages = Infinity
 	let currentCells = 0;
 	let start = 0;
 	const wide = usesWideCells(shape);
-	const flush = () => { if (current) lines.push({ text: current, start }); current = ""; currentCells = 0; };
+	const flush = () => {
+		if (current) lines.push({ text: current, start });
+		current = "";
+		currentCells = 0;
+	};
 	for (const token of text.matchAll(/\S+/g)) {
 		if (lines.length > 2 * geo.rows * maxPages) break;
 		let word = token[0];
@@ -2035,18 +2298,39 @@ function sourcePages(text: string, shape: Shape, offset = 0, maxPages = Infinity
 			flush();
 			const head = sliceCells(word, geo.cols, wide);
 			lines.push({ text: head, start: at });
-			at += head.length; word = word.slice(head.length); cells = cellLength(word, wide);
+			at += head.length;
+			word = word.slice(head.length);
+			cells = cellLength(word, wide);
 		}
-		if (!current) { current = word; currentCells = cells; start = at; }
-		else if (currentCells + 1 + cells <= geo.cols) { current += " " + word; currentCells += 1 + cells; }
-		else { flush(); current = word; currentCells = cells; start = at; }
+		if (!current) {
+			current = word;
+			currentCells = cells;
+			start = at;
+		} else if (currentCells + 1 + cells <= geo.cols) {
+			current += " " + word;
+			currentCells += 1 + cells;
+		} else {
+			flush();
+			current = word;
+			currentCells = cells;
+			start = at;
+		}
 	}
 	flush();
 	const pages: PlanFrame[] = [];
 	const perPage = 2 * geo.rows;
 	for (let i = 0; i < lines.length && pages.length < maxPages; i += perPage) {
-		pages.push({ text: lines.slice(i, i + perPage).map(line => line.text).join("\n"), shape,
-			range: { start: offset + (i === 0 ? 0 : lines[i]!.start), end: offset + (lines[i + perPage]?.start ?? text.length) } });
+		pages.push({
+			text: lines
+				.slice(i, i + perPage)
+				.map(line => line.text)
+				.join("\n"),
+			shape,
+			range: {
+				start: offset + (i === 0 ? 0 : lines[i]!.start),
+				end: offset + (lines[i + perPage]?.start ?? text.length),
+			},
+		});
 	}
 	return pages;
 }
@@ -2055,14 +2339,23 @@ function sourcePages(text: string, shape: Shape, offset = 0, maxPages = Infinity
  * planner on the union: the source-preserving prefix partition below does. */
 function planArchive(text: string, high: Shape, low: Shape, maxFrames: number): ArchiveLayout {
 	const edge = TEXT_EDGE_PAGES * geometry(high).capacity;
-	if (text.length <= 2 * edge) return { frames: [], textHead: text, textTail: "", keptText: text, truncatedChars: 0, ranges: [{ start: 0, end: text.length }] };
+	if (text.length <= 2 * edge)
+		return {
+			frames: [],
+			textHead: text,
+			textTail: "",
+			keptText: text,
+			truncatedChars: 0,
+			ranges: [{ start: 0, end: text.length }],
+		};
 	const textHead = text.slice(0, edge);
 	const textTail = text.slice(-edge);
 	const middleEnd = text.length - edge;
 	let planned = sourcePages(text.slice(edge, middleEnd), high, edge);
 	if (planned.length > maxFrames) {
 		if (high.columns === 2) {
-			planned = maxFrames > 0 ? [...planned.slice(0, 1), ...(maxFrames > 1 ? planned.slice(-(maxFrames - 1)) : [])] : [];
+			planned =
+				maxFrames > 0 ? [...planned.slice(0, 1), ...(maxFrames > 1 ? planned.slice(-(maxFrames - 1)) : [])] : [];
 		} else {
 			const edgeFrames = Math.min(HQ_EDGE_FRAMES, Math.floor(Math.max(0, maxFrames - 1) / 2));
 			const head = planned.slice(0, edgeFrames);
@@ -2102,11 +2395,18 @@ function stripThinkingSections(text: string): string {
 		.join(NEWLINE_GLYPH);
 }
 
-interface NormalizationRun { input: SourceRange; output: SourceRange }
+interface NormalizationRun {
+	input: SourceRange;
+	output: SourceRange;
+}
 interface MappedArchiveInput {
 	text: string;
 	coverage: SourceCoverageRun[];
-	images: { part: Extract<SourceLayoutPart, { kind: "original-image" }>; offset: number; atomicGroup?: SourceMessage<Message>["atomicGroup"] }[];
+	images: {
+		part: Extract<SourceLayoutPart, { kind: "original-image" }>;
+		offset: number;
+		atomicGroup?: SourceMessage<Message>["atomicGroup"];
+	}[];
 }
 
 /** Forward normalization map. Expansions/contractions remain indivisible runs;
@@ -2119,32 +2419,47 @@ function normalizeTracked(text: string, shape: Shape): { text: string; runs: Nor
 	const emit = (start: number, end: number, value: string) => {
 		if (!value) return;
 		const last = runs.at(-1);
-		if (last && last.input.end === start && last.output.end === length && last.input.end - last.input.start === last.output.end - last.output.start && end - start === value.length) {
-			last.input.end = end; last.output.end += value.length;
+		if (
+			last &&
+			last.input.end === start &&
+			last.output.end === length &&
+			last.input.end - last.input.start === last.output.end - last.output.start &&
+			end - start === value.length
+		) {
+			last.input.end = end;
+			last.output.end += value.length;
 		} else runs.push({ input: { start, end }, output: { start: length, end: length + value.length } });
-		chunks.push(value); length += value.length;
+		chunks.push(value);
+		length += value.length;
 	};
 	const replacements: { start: number; end: number; value: string }[] = [];
 	elideDataUrls(text, "source", (start, end, value) => replacements.push({ start, end, value }));
 	let replacementIndex = 0;
 	// ANSI is consumed in place, not stripped and reverse-matched afterwards.
-	const tokens = replacements.length > 0
-		? /\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007]*(?:\u0007|\u001b\\))|[\s\p{Cf}]+|[\s\S]/gu
-		: /\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007]*(?:\u0007|\u001b\\))|[\s\p{Cf}]+|[!-~\u00a1-\u00ac\u00ae-\u00ff]+|[\s\S]/gu;
+	const tokens =
+		replacements.length > 0
+			? /\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007]*(?:\u0007|\u001b\\))|[\s\p{Cf}]+|[\s\S]/gu
+			: /\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007]*(?:\u0007|\u001b\\))|[\s\p{Cf}]+|[!-~\u00a1-\u00ac\u00ae-\u00ff]+|[\s\S]/gu;
 	for (const match of text.matchAll(tokens)) {
-		while (replacementIndex < replacements.length && replacements[replacementIndex]!.end <= match.index) replacementIndex++;
+		while (replacementIndex < replacements.length && replacements[replacementIndex]!.end <= match.index)
+			replacementIndex++;
 		const replacement = replacements[replacementIndex];
 		if (replacement && match.index >= replacement.start && match.index < replacement.end) {
-			if (match.index === replacement.start) emit(replacement.start, replacement.end, normalize(replacement.value, { shape }));
+			if (match.index === replacement.start)
+				emit(replacement.start, replacement.end, normalize(replacement.value, { shape }));
 			continue;
 		}
 		const token = match[0];
 		let value: string;
 		if (token.startsWith("\u001b")) value = "";
-		else if (/^[\s\p{Cf}]+$/u.test(token)) value = LINE_BREAK.test(token) ? NEWLINE_GLYPH : /[^\p{Cf}]/u.test(token) ? " " : "";
+		else if (/^[\s\p{Cf}]+$/u.test(token))
+			value = LINE_BREAK.test(token) ? NEWLINE_GLYPH : /[^\p{Cf}]/u.test(token) ? " " : "";
 		else if (token === DIM_ON || token === DIM_OFF || token === NEWLINE_GLYPH) value = token;
 		else if (isAsciiOrLatin1(token.charCodeAt(0))) value = token;
-		else { value = cache.get(token) ?? normalize(token, { shape }); cache.set(token, value); }
+		else {
+			value = cache.get(token) ?? normalize(token, { shape });
+			cache.set(token, value);
+		}
 		emit(match.index, match.index + token.length, value);
 	}
 	const raw = chunks.join("");
@@ -2153,25 +2468,61 @@ function normalizeTracked(text: string, shape: Shape): { text: string; runs: Nor
 	const end = Math.max(leading, raw.length - trailing);
 	const kept: NormalizationRun[] = [];
 	for (const run of runs) {
-		const start = Math.max(leading, run.output.start), stop = Math.min(end, run.output.end);
+		const start = Math.max(leading, run.output.start),
+			stop = Math.min(end, run.output.end);
 		if (stop <= start) continue;
 		const affine = run.input.end - run.input.start === run.output.end - run.output.start;
-		kept.push({ input: affine ? { start: run.input.start + start - run.output.start, end: run.input.start + stop - run.output.start } : run.input,
-			output: { start: start - leading, end: stop - leading } });
+		kept.push({
+			input: affine
+				? { start: run.input.start + start - run.output.start, end: run.input.start + stop - run.output.start }
+				: run.input,
+			output: { start: start - leading, end: stop - leading },
+		});
 	}
 	return { text: raw.slice(leading, end), runs: kept };
 }
 
 function appendCoverage(runs: SourceCoverageRun[], run: SourceCoverageRun): void {
 	const last = runs.at(-1);
-	if (last?.normalizedUnit && run.normalizedUnit && last.entryId === run.entryId && last.projection === run.projection && last.status === run.status && last.contribution === run.contribution && last.snapshot.blockIndex === run.snapshot.blockIndex && last.snapshot.start === run.snapshot.start && last.snapshot.end === run.snapshot.end && last.normalized?.end === run.normalized?.start && last.normalizedUnit.end === run.normalizedUnit.start && last.normalizedUnit.length === run.normalizedUnit.length) {
-		last.normalized!.end = run.normalized!.end; last.normalizedUnit.end = run.normalizedUnit.end;
-		if (last.normalizedUnit.start === 0 && last.normalizedUnit.end === last.normalizedUnit.length) delete last.normalizedUnit;
+	if (
+		last?.normalizedUnit &&
+		run.normalizedUnit &&
+		last.entryId === run.entryId &&
+		last.projection === run.projection &&
+		last.status === run.status &&
+		last.contribution === run.contribution &&
+		last.snapshot.blockIndex === run.snapshot.blockIndex &&
+		last.snapshot.start === run.snapshot.start &&
+		last.snapshot.end === run.snapshot.end &&
+		last.normalized?.end === run.normalized?.start &&
+		last.normalizedUnit.end === run.normalizedUnit.start &&
+		last.normalizedUnit.length === run.normalizedUnit.length
+	) {
+		last.normalized!.end = run.normalized!.end;
+		last.normalizedUnit.end = run.normalizedUnit.end;
+		if (last.normalizedUnit.start === 0 && last.normalizedUnit.end === last.normalizedUnit.length)
+			delete last.normalizedUnit;
 		return;
 	}
-	if (last && !last.normalizedUnit && !run.normalizedUnit && last.entryId === run.entryId && last.projection === run.projection && last.status === run.status && last.contribution === run.contribution && last.snapshot.blockIndex === run.snapshot.blockIndex && last.snapshot.end === run.snapshot.start && last.normalized?.end === run.normalized?.start && last.current?.end === run.current?.start &&
-		last.normalized && run.normalized && last.snapshot.end - last.snapshot.start === last.normalized.end - last.normalized.start && run.snapshot.end - run.snapshot.start === run.normalized.end - run.normalized.start) {
-		last.snapshot.end = run.snapshot.end; last.normalized.end = run.normalized.end;
+	if (
+		last &&
+		!last.normalizedUnit &&
+		!run.normalizedUnit &&
+		last.entryId === run.entryId &&
+		last.projection === run.projection &&
+		last.status === run.status &&
+		last.contribution === run.contribution &&
+		last.snapshot.blockIndex === run.snapshot.blockIndex &&
+		last.snapshot.end === run.snapshot.start &&
+		last.normalized?.end === run.normalized?.start &&
+		last.current?.end === run.current?.start &&
+		last.normalized &&
+		run.normalized &&
+		last.snapshot.end - last.snapshot.start === last.normalized.end - last.normalized.start &&
+		run.snapshot.end - run.snapshot.start === run.normalized.end - run.normalized.start
+	) {
+		last.snapshot.end = run.snapshot.end;
+		last.normalized.end = run.normalized.end;
 		if (last.current && run.current) last.current.end = run.current.end;
 	} else runs.push(run);
 }
@@ -2179,18 +2530,51 @@ function appendCoverage(runs: SourceCoverageRun[], run: SourceCoverageRun): void
 function cropCoverage(run: SourceCoverageRun, start: number, end: number, outputStart: number): SourceCoverageRun {
 	const normalized = run.normalized!;
 	const affine = !run.normalizedUnit && normalized.end - normalized.start === run.snapshot.end - run.snapshot.start;
-	const snapshot = affine ? { ...run.snapshot, start: run.snapshot.start + start - normalized.start, end: run.snapshot.start + end - normalized.start } : { ...run.snapshot };
-	const current = run.current && affine ? { ...run.current, start: run.current.start + start - normalized.start, end: run.current.start + end - normalized.start } : run.current && { ...run.current };
-	const unit = run.normalizedUnit ?? { start: 0, end: normalized.end - normalized.start, length: normalized.end - normalized.start };
-	return { ...run, snapshot, current, ...(!affine ? { normalizedUnit: { start: unit.start + start - normalized.start, end: unit.start + end - normalized.start, length: unit.length } } : {}), normalized: { start: outputStart, end: outputStart + end - start } };
+	const snapshot = affine
+		? {
+				...run.snapshot,
+				start: run.snapshot.start + start - normalized.start,
+				end: run.snapshot.start + end - normalized.start,
+			}
+		: { ...run.snapshot };
+	const current =
+		run.current && affine
+			? {
+					...run.current,
+					start: run.current.start + start - normalized.start,
+					end: run.current.start + end - normalized.start,
+				}
+			: run.current && { ...run.current };
+	const unit = run.normalizedUnit ?? {
+		start: 0,
+		end: normalized.end - normalized.start,
+		length: normalized.end - normalized.start,
+	};
+	return {
+		...run,
+		snapshot,
+		current,
+		...(!affine
+			? {
+					normalizedUnit: {
+						start: unit.start + start - normalized.start,
+						end: unit.start + end - normalized.start,
+						length: unit.length,
+					},
+				}
+			: {}),
+		normalized: { start: outputStart, end: outputStart + end - start },
+	};
 }
 
 function captureSources<T>(sources: readonly SourceMessage<T>[], options: Options<T> | undefined, required = false) {
 	const messages: Message[] = [];
 	const sourceByMessage = new Map<Message, SourceMessage<T>>();
-	for (const source of sources) for (const message of (options?.convertToLlm ?? defaultConvertToLlm)([source.message])) {
-		messages.push(message); sourceByMessage.set(message, source);
-	}
+	for (const source of sources)
+		for (const message of (options?.convertToLlm ?? defaultConvertToLlm)([source.message])) {
+			messages.push(message);
+			sourceByMessage.set(message, source);
+		}
 
 	// The serializer owns actual call/result folding; this is representation
 	// metadata for that fold, not a second policy admission/closure pass.
@@ -2198,18 +2582,34 @@ function captureSources<T>(sources: readonly SourceMessage<T>[], options: Option
 	for (const message of messages) if (message.role === "toolResult") results.set(message.toolCallId, message);
 	for (const message of messages) {
 		if (message.role !== "assistant") continue;
-		const members = [message, ...message.content.flatMap(block => block.type === "toolCall" && results.has(block.id) ? [results.get(block.id)!] : [])];
+		const members = [
+			message,
+			...message.content.flatMap(block =>
+				block.type === "toolCall" && results.has(block.id) ? [results.get(block.id)!] : [],
+			),
+		];
 		if (members.length < 2) continue;
 		const first = sourceByMessage.get(message)!;
-		const atomicGroup = first.atomicGroup ?? { id: first.entryId, entryIds: [...new Set(members.map(member => sourceByMessage.get(member)!.entryId))] };
-		for (const member of members) { const source = sourceByMessage.get(member)!; sourceByMessage.set(member, { ...source, atomicGroup }); }
+		const atomicGroup = first.atomicGroup ?? {
+			id: first.entryId,
+			entryIds: [...new Set(members.map(member => sourceByMessage.get(member)!.entryId))],
+		};
+		for (const member of members) {
+			const source = sourceByMessage.get(member)!;
+			sourceByMessage.set(member, { ...source, atomicGroup });
+		}
 	}
 
 	const capture: SerializationCapture = { runs: [], images: [], required };
 	return { serialized: serializeConversationSource(messages, options, capture), capture, sourceByMessage };
 }
 
-function serializeSources<T>(sources: readonly SourceMessage<T>[], options: Options<T> | undefined, shape: Shape, required = false): MappedArchiveInput {
+function serializeSources<T>(
+	sources: readonly SourceMessage<T>[],
+	options: Options<T> | undefined,
+	shape: Shape,
+	required = false,
+): MappedArchiveInput {
 	return mapSerializedSources(captureSources(sources, options, required), sources, shape);
 }
 
@@ -2226,45 +2626,109 @@ function mapSerializedSources<T>(
 		while (index < normalized.runs.length && normalized.runs[index]!.input.end <= trace.start) index++;
 
 		if (trace.rawStart === trace.rawEnd) {
-			let start = Infinity, end = 0;
+			let start = Infinity,
+				end = 0;
 			for (let i = index; i < normalized.runs.length; i++) {
 				const mapped = normalized.runs[i]!;
 				if (mapped.input.start >= trace.end) break;
 				const affine = mapped.input.end - mapped.input.start === mapped.output.end - mapped.output.start;
-				start = Math.min(start, affine ? mapped.output.start + Math.max(0, trace.start - mapped.input.start) : mapped.output.start);
-				end = Math.max(end, affine ? mapped.output.end - Math.max(0, mapped.input.end - trace.end) : mapped.output.end);
+				start = Math.min(
+					start,
+					affine ? mapped.output.start + Math.max(0, trace.start - mapped.input.start) : mapped.output.start,
+				);
+				end = Math.max(
+					end,
+					affine ? mapped.output.end - Math.max(0, mapped.input.end - trace.end) : mapped.output.end,
+				);
 			}
-			if (end > start) { const snapshot = { blockIndex: trace.blockIndex, start: 0, end: 0 }; coverage.push({ entryId: source.entryId, ...(source.projection ? { projection: source.projection } : {}), order: source.order, atomicGroup: source.atomicGroup, snapshot,
-				...(trace.exact ? { current: { ...snapshot } } : {}), normalized: { start, end }, status: trace.exact ? "exact-current" : "unknown" }); }
+			if (end > start) {
+				const snapshot = { blockIndex: trace.blockIndex, start: 0, end: 0 };
+				coverage.push({
+					entryId: source.entryId,
+					...(source.projection ? { projection: source.projection } : {}),
+					order: source.order,
+					atomicGroup: source.atomicGroup,
+					snapshot,
+					...(trace.exact ? { current: { ...snapshot } } : {}),
+					normalized: { start, end },
+					status: trace.exact ? "exact-current" : "unknown",
+				});
+			}
 			continue;
 		}
 		for (let i = index; i < normalized.runs.length; i++) {
 			const mapped = normalized.runs[i]!;
 			if (mapped.input.start >= trace.end) break;
-			const start = Math.max(trace.start, mapped.input.start), end = Math.min(trace.end, mapped.input.end);
+			const start = Math.max(trace.start, mapped.input.start),
+				end = Math.min(trace.end, mapped.input.end);
 			const affine = mapped.input.end - mapped.input.start === mapped.output.end - mapped.output.start;
-			const output = affine ? { start: mapped.output.start + start - mapped.input.start, end: mapped.output.start + end - mapped.input.start } : mapped.output;
-			const snapshot = { blockIndex: trace.blockIndex, start: trace.exact ? trace.rawStart + start - trace.start : trace.rawStart, end: trace.exact ? trace.rawStart + end - trace.start : trace.rawEnd };
-			appendCoverage(coverage, { entryId: source.entryId, ...(source.projection ? { projection: source.projection } : {}), order: source.order, ...(source.atomicGroup ? { atomicGroup: source.atomicGroup } : {}), snapshot,
-				...(trace.exact ? { current: { ...snapshot } } : {}), normalized: { ...output }, status: trace.exact ? "exact-current" : "unknown" });
+			const output = affine
+				? {
+						start: mapped.output.start + start - mapped.input.start,
+						end: mapped.output.start + end - mapped.input.start,
+					}
+				: mapped.output;
+			const snapshot = {
+				blockIndex: trace.blockIndex,
+				start: trace.exact ? trace.rawStart + start - trace.start : trace.rawStart,
+				end: trace.exact ? trace.rawStart + end - trace.start : trace.rawEnd,
+			};
+			appendCoverage(coverage, {
+				entryId: source.entryId,
+				...(source.projection ? { projection: source.projection } : {}),
+				order: source.order,
+				...(source.atomicGroup ? { atomicGroup: source.atomicGroup } : {}),
+				snapshot,
+				...(trace.exact ? { current: { ...snapshot } } : {}),
+				normalized: { ...output },
+				status: trace.exact ? "exact-current" : "unknown",
+			});
 		}
 	}
 	const offsetAt = (offset: number) => {
-		let lo = 0, hi = normalized.runs.length;
-		while (lo < hi) { const mid = (lo + hi) >>> 1; if (normalized.runs[mid]!.input.end <= offset) lo = mid + 1; else hi = mid; }
+		let lo = 0,
+			hi = normalized.runs.length;
+		while (lo < hi) {
+			const mid = (lo + hi) >>> 1;
+			if (normalized.runs[mid]!.input.end <= offset) lo = mid + 1;
+			else hi = mid;
+		}
 		const run = normalized.runs[lo];
 		if (!run) return normalized.text.length;
-		return run.input.end - run.input.start === run.output.end - run.output.start ? run.output.start + Math.max(0, offset - run.input.start) : run.output.start;
+		return run.input.end - run.input.start === run.output.end - run.output.start
+			? run.output.start + Math.max(0, offset - run.input.start)
+			: run.output.start;
 	};
-	return pruneSerializedSources({ text: normalized.text, coverage, images: capture.images.map(image => {
-		const source = sourceByMessage.get(image.message)!;
-		return { part: { kind: "original-image", entryId: source.entryId, ...(source.projection ? { projection: source.projection } : {}), order: source.order, blockIndex: image.blockIndex, currentBlockIndex: image.blockIndex }, offset: offsetAt(image.offset), atomicGroup: source.atomicGroup };
-	}) }, sources);
+	return pruneSerializedSources(
+		{
+			text: normalized.text,
+			coverage,
+			images: capture.images.map(image => {
+				const source = sourceByMessage.get(image.message)!;
+				return {
+					part: {
+						kind: "original-image",
+						entryId: source.entryId,
+						...(source.projection ? { projection: source.projection } : {}),
+						order: source.order,
+						blockIndex: image.blockIndex,
+						currentBlockIndex: image.blockIndex,
+					},
+					offset: offsetAt(image.offset),
+					atomicGroup: source.atomicGroup,
+				};
+			}),
+		},
+		sources,
+	);
 }
 
 /** Apply already-admitted raw intervals to normalized source, retaining the
  * serializer's block positions. This is not raw-message materialization. */
-function pruneSerializedSources<T>(input: MappedArchiveInput, sources: readonly SourceMessage<T>[]): MappedArchiveInput {
+function pruneSerializedSources<T>(
+	input: MappedArchiveInput,
+	sources: readonly SourceMessage<T>[],
+): MappedArchiveInput {
 	if (!sources.some(source => source.spans)) return input;
 	const byId = new Map(sources.map(source => [compactionSourceKey(source), source]));
 	const ranges: SourceRange[] = [];
@@ -2275,40 +2739,63 @@ function pruneSerializedSources<T>(input: MappedArchiveInput, sources: readonly 
 		if (cursor < n.start) ranges.push({ start: cursor, end: n.start });
 		const spans = byId.get(compactionSourceKey(run))?.spans;
 		if (!spans) ranges.push({ ...n });
-		else if (run.current) for (const span of spans) {
-			if (span.blockIndex !== run.current.blockIndex) continue;
-			const start = Math.max(span.start, run.current.start), end = Math.min(span.end, run.current.end);
-			if (end <= start) continue;
-			const affine = n.end - n.start === run.current.end - run.current.start;
-			ranges.push(affine ? { start: n.start + start - run.current.start, end: n.start + end - run.current.start } : { ...n });
-		}
+		else if (run.current)
+			for (const span of spans) {
+				if (span.blockIndex !== run.current.blockIndex) continue;
+				const start = Math.max(span.start, run.current.start),
+					end = Math.min(span.end, run.current.end);
+				if (end <= start) continue;
+				const affine = n.end - n.start === run.current.end - run.current.start;
+				ranges.push(
+					affine
+						? { start: n.start + start - run.current.start, end: n.start + end - run.current.start }
+						: { ...n },
+				);
+			}
 		cursor = n.end;
 	}
 	if (cursor < input.text.length) ranges.push({ start: cursor, end: input.text.length });
 	ranges.sort((a, b) => a.start - b.start);
 	const merged: SourceRange[] = [];
-	for (const range of ranges) { const last = merged.at(-1); if (last && range.start <= last.end) last.end = Math.max(last.end, range.end); else merged.push({ ...range }); }
+	for (const range of ranges) {
+		const last = merged.at(-1);
+		if (last && range.start <= last.end) last.end = Math.max(last.end, range.end);
+		else merged.push({ ...range });
+	}
 	const coverage: SourceCoverageRun[] = [];
 	const chunks: string[] = [];
 	const mapped: { old: SourceRange; offset: number }[] = [];
-	let length = 0, previousEnd = 0;
+	let length = 0,
+		previousEnd = 0;
 	for (const range of merged) {
-		if (range.start > previousEnd) { chunks.push("[truncated]"); length += 11; }
+		if (range.start > previousEnd) {
+			chunks.push("[truncated]");
+			length += 11;
+		}
 		mapped.push({ old: range, offset: length });
 		for (const run of input.coverage) {
 			if (!run.normalized || run.normalized.end <= range.start) continue;
 			if (run.normalized.start >= range.end) break;
-			const start = Math.max(range.start, run.normalized.start), end = Math.min(range.end, run.normalized.end);
+			const start = Math.max(range.start, run.normalized.start),
+				end = Math.min(range.end, run.normalized.end);
 			appendCoverage(coverage, cropCoverage(run, start, end, length + start - range.start));
 		}
-		chunks.push(input.text.slice(range.start, range.end)); length += range.end - range.start; previousEnd = range.end;
+		chunks.push(input.text.slice(range.start, range.end));
+		length += range.end - range.start;
+		previousEnd = range.end;
 	}
 	if (previousEnd < input.text.length) chunks.push("[truncated]");
-	const images = input.images.filter(image => { const spans = byId.get(compactionSourceKey(image.part))?.spans; return !spans || spans.some(span => span.blockIndex === image.part.blockIndex); })
-		.map(image => { const run = mapped.find(range => range.old.end >= image.offset); return { ...image, offset: run ? run.offset + Math.max(0, image.offset - run.old.start) : length }; });
+	const images = input.images
+		.filter(image => {
+			const spans = byId.get(compactionSourceKey(image.part))?.spans;
+			return !spans || spans.some(span => span.blockIndex === image.part.blockIndex);
+		})
+		.map(image => {
+			const run = mapped.find(range => range.old.end >= image.offset);
+			return { ...image, offset: run ? run.offset + Math.max(0, image.offset - run.old.start) : length };
+		});
 	return { text: chunks.join(""), coverage, images };
 }
-
 
 interface SourcePiece {
 	text: string;
@@ -2329,7 +2816,10 @@ function coveredRawRanges(runs: readonly SourceCoverageRun[], blockIndex: number
 	for (const run of runs) {
 		if (run.status !== "exact-current" || run.current?.blockIndex !== blockIndex) continue;
 		const unit = run.normalizedUnit;
-		if (!unit || (unit.start === 0 && unit.end === unit.length)) { covered.push(run.current); continue; }
+		if (!unit || (unit.start === 0 && unit.end === unit.length)) {
+			covered.push(run.current);
+			continue;
+		}
 		const key = run.current.start + ":" + run.current.end + ":" + unit.length;
 		const group = partial.get(key);
 		if (group) group.ranges.push(unit);
@@ -2362,31 +2852,58 @@ function selectedMissing(span: SourceBlockRange, runs: readonly SourceCoverageRu
 
 /** Slice by forward coverage coordinates. Unattributed serializer punctuation
  * stays attached to its neighboring source; no text search recovers identity. */
-function sourcePieces(input: MappedArchiveInput, ranges: readonly SourceRange[], headEnd: number, tailStart: number): SourcePiece[] {
+function sourcePieces(
+	input: MappedArchiveInput,
+	ranges: readonly SourceRange[],
+	headEnd: number,
+	tailStart: number,
+): SourcePiece[] {
 	const pieces: SourcePiece[] = [];
 	const groupOrder = new Map<string, number>();
-	for (const run of input.coverage) if (run.atomicGroup) groupOrder.set(run.atomicGroup.id, Math.min(groupOrder.get(run.atomicGroup.id) ?? Infinity, run.order));
-	const historicalGroups = new Set(input.coverage.filter(run => run.atomicGroup && run.status === "historical-not-current").map(run => run.atomicGroup!.id));
+	for (const run of input.coverage)
+		if (run.atomicGroup)
+			groupOrder.set(run.atomicGroup.id, Math.min(groupOrder.get(run.atomicGroup.id) ?? Infinity, run.order));
+	const historicalGroups = new Set(
+		input.coverage
+			.filter(run => run.atomicGroup && run.status === "historical-not-current")
+			.map(run => run.atomicGroup!.id),
+	);
 	for (const range of ranges) {
 		let at = range.start;
 		for (const run of input.coverage) {
 			const n = run.normalized;
 			if (!n || n.end <= range.start) continue;
 			if (n.start >= range.end) break;
-			const start = Math.max(n.start, range.start), end = Math.min(n.end, range.end);
+			const start = Math.max(n.start, range.start),
+				end = Math.min(n.end, range.end);
 			if (end <= start) continue;
 			const pieceStart = Math.min(at, start);
 
-			const stops = [...input.images.filter(image => image.offset > pieceStart && image.offset < end).map(image => image.offset), end].sort((a, b) => a - b);
+			const stops = [
+				...input.images.filter(image => image.offset > pieceStart && image.offset < end).map(image => image.offset),
+				end,
+			].sort((a, b) => a - b);
 			let segmentStart = pieceStart;
 			for (const segmentEnd of stops) {
 				if (segmentEnd <= segmentStart) continue;
 				const rawStart = Math.max(start, segmentStart);
-				const cropped = segmentEnd > rawStart ? cropCoverage(run, rawStart, segmentEnd, rawStart - segmentStart) : undefined;
-				pieces.push({ text: input.text.slice(segmentStart, segmentEnd), coverage: cropped ? [cropped] : [], order: run.atomicGroup ? groupOrder.get(run.atomicGroup.id)! : run.order,
-					blockIndex: run.atomicGroup ? -1 : run.current?.blockIndex ?? run.snapshot.blockIndex, rawStart: run.atomicGroup ? segmentStart : cropped?.current?.start ?? cropped?.snapshot.start ?? run.snapshot.start,
+				const cropped =
+					segmentEnd > rawStart ? cropCoverage(run, rawStart, segmentEnd, rawStart - segmentStart) : undefined;
+				pieces.push({
+					text: input.text.slice(segmentStart, segmentEnd),
+					coverage: cropped ? [cropped] : [],
+					order: run.atomicGroup ? groupOrder.get(run.atomicGroup.id)! : run.order,
+					blockIndex: run.atomicGroup ? -1 : (run.current?.blockIndex ?? run.snapshot.blockIndex),
+					rawStart: run.atomicGroup
+						? segmentStart
+						: (cropped?.current?.start ?? cropped?.snapshot.start ?? run.snapshot.start),
 					historicalAtom: !!run.atomicGroup && historicalGroups.has(run.atomicGroup.id),
-					...(range.end <= headEnd ? { edge: "head" as const } : range.start >= tailStart ? { edge: "tail" as const } : {}) });
+					...(range.end <= headEnd
+						? { edge: "head" as const }
+						: range.start >= tailStart
+							? { edge: "tail" as const }
+							: {}),
+				});
 				segmentStart = segmentEnd;
 			}
 			at = end;
@@ -2397,8 +2914,18 @@ function sourcePieces(input: MappedArchiveInput, ranges: readonly SourceRange[],
 			else {
 				const next = input.coverage.find(run => (run.normalized?.start ?? -1) >= range.end);
 				const previous = input.coverage.findLast(run => run.normalized && run.normalized.end <= range.start);
-				pieces.push({ text: input.text.slice(at, range.end), coverage: [], order: next?.order ?? (previous ? previous.order + 0.5 : Number.NEGATIVE_INFINITY), blockIndex: -1, rawStart: 0,
-					...(range.end <= headEnd ? { edge: "head" as const } : range.start >= tailStart ? { edge: "tail" as const } : {}) });
+				pieces.push({
+					text: input.text.slice(at, range.end),
+					coverage: [],
+					order: next?.order ?? (previous ? previous.order + 0.5 : Number.NEGATIVE_INFINITY),
+					blockIndex: -1,
+					rawStart: 0,
+					...(range.end <= headEnd
+						? { edge: "head" as const }
+						: range.start >= tailStart
+							? { edge: "tail" as const }
+							: {}),
+				});
 			}
 		}
 	}
@@ -2410,18 +2937,34 @@ async function renderPlanned(page: PlanFrame, dimOpen: boolean): Promise<{ frame
 	dimOpen = text.lastIndexOf(DIM_ON) > text.lastIndexOf(DIM_OFF);
 	if (page.shape.stopwordDim) text = dimStopwords(text);
 	const rendered = await render(text, page.shape);
-	return { frame: { ...rendered, mimeType: "image/png", font: page.shape.font, variant: page.shape.variant, lineRepeat: page.shape.lineRepeat,
-		...(page.shape.columns === 2 ? { columns: 2 } : {}), ...(page.shape.stopwordDim ? { stopwordDim: true } : {}), ...(page.shape.imageDetail ? { detail: page.shape.imageDetail } : {}) }, dimOpen };
+	return {
+		frame: {
+			...rendered,
+			mimeType: "image/png",
+			font: page.shape.font,
+			variant: page.shape.variant,
+			lineRepeat: page.shape.lineRepeat,
+			...(page.shape.columns === 2 ? { columns: 2 } : {}),
+			...(page.shape.stopwordDim ? { stopwordDim: true } : {}),
+			...(page.shape.imageDetail ? { detail: page.shape.imageDetail } : {}),
+		},
+		dimOpen,
+	};
 }
 
 /** Rebuild only serializer-generated notices outside mapped source bytes. */
 function refreshSelectedUserGaps<T>(pieces: SourcePiece[], selected: readonly SourceMessage<T>[], shape: Shape): void {
-	const users = new Map(selected.filter(source => (source.message as Message).role === "user").map(source => [compactionSourceKey(source), source.message as Extract<Message, { role: "user" }>]));
+	const users = new Map(
+		selected
+			.filter(source => (source.message as Message).role === "user")
+			.map(source => [compactionSourceKey(source), source.message as Extract<Message, { role: "user" }>]),
+	);
 	const ends = new Map<string, number>();
 	const last = new Map<string, SourcePiece>();
 	for (const piece of pieces) {
 		const run = piece.coverage[0];
-		if (!run?.current || !run.normalized || !users.has(compactionSourceKey(run)) || run.status !== "exact-current") continue;
+		if (!run?.current || !run.normalized || !users.has(compactionSourceKey(run)) || run.status !== "exact-current")
+			continue;
 		const n = run.normalized;
 		let prefix = piece.text.slice(0, n.start).replaceAll("[truncated]", "");
 		const suffix = piece.text.slice(n.end).replaceAll("[truncated]", "");
@@ -2429,7 +2972,11 @@ function refreshSelectedUserGaps<T>(pieces: SourcePiece[], selected: readonly So
 		const message = users.get(compactionSourceKey(run))!;
 		const block = typeof message.content === "string" ? undefined : message.content[run.current.blockIndex];
 		const raw = typeof message.content === "string" ? message.content : block?.type === "text" ? block.text : "";
-		if (run.current.start > (ends.get(key) ?? 0) && normalize(raw.slice(ends.get(key) ?? 0, run.current.start), { shape })) prefix += "[truncated]";
+		if (
+			run.current.start > (ends.get(key) ?? 0) &&
+			normalize(raw.slice(ends.get(key) ?? 0, run.current.start), { shape })
+		)
+			prefix += "[truncated]";
 		const body = piece.text.slice(n.start, n.end);
 		piece.text = prefix + body + suffix;
 		run.normalized = { start: prefix.length, end: prefix.length + body.length };
@@ -2450,13 +2997,19 @@ function refreshSelectedUserGaps<T>(pieces: SourcePiece[], selected: readonly So
 
 /** Representation-only monotone writer. Retention and slot shapes are already fixed. */
 async function writeArchiveLayout(
-	text: string, vanilla: ArchiveLayout, headAnchor: number, tailAnchor: number,
-	imageOffsets: readonly { offset: number; part: Extract<SourceLayoutPart, { kind: "original-image" | "gap" }> }[],
-	unchanged: boolean, byteBudget: number,
+	text: string,
+	vanilla: ArchiveLayout,
+	headAnchor: number,
+	tailAnchor: number,
+	imageOffsets: readonly { offset: number; part: Exclude<SourceLayoutPart, { kind: "text" | "frame" }> }[],
+	unchanged: boolean,
+	byteBudget: number,
 ): Promise<{ frames: Frame[]; layout: SourceLayoutPart[]; overflow: boolean }> {
 	const layout: SourceLayoutPart[] = [];
 	const frames: Frame[] = [];
-	let usedBytes = 0, dimOpen = false, overflow = false;
+	let usedBytes = 0,
+		dimOpen = false,
+		overflow = false;
 	const emitText = (start: number, end: number) => {
 		if (end <= start) return;
 		layout.push({ kind: "text", range: { start, end } });
@@ -2464,75 +3017,229 @@ async function writeArchiveLayout(
 	};
 	const emitPages = async (start: number, end: number) => {
 		if (end <= start) return;
-		if (overflow) { emitText(start, end); return; }
+		if (overflow) {
+			emitText(start, end);
+			return;
+		}
 		let at = start;
 		while (at < end) {
-			if (frames.length >= vanilla.frames.length) { overflow = true; emitText(at, end); break; }
+			if (frames.length >= vanilla.frames.length) {
+				overflow = true;
+				emitText(at, end);
+				break;
+			}
 			const shape = vanilla.frames[frames.length]!.shape;
 			const page = sourcePages(text.slice(at, end), shape, at, 1)[0];
-			if (!page) { emitText(at, end); break; }
+			if (!page) {
+				emitText(at, end);
+				break;
+			}
 			const rendered = await renderPlanned(page, dimOpen);
-			if (usedBytes + rendered.frame.data.length > byteBudget) { overflow = true; emitText(at, end); break; }
+			if (usedBytes + rendered.frame.data.length > byteBudget) {
+				overflow = true;
+				emitText(at, end);
+				break;
+			}
 			layout.push({ kind: "frame", frameIndex: frames.length, range: page.range });
-			frames.push(rendered.frame); usedBytes += rendered.frame.data.length; dimOpen = rendered.dimOpen; at = page.range.end;
+			frames.push(rendered.frame);
+			usedBytes += rendered.frame.data.length;
+			dimOpen = rendered.dimOpen;
+			at = page.range.end;
 		}
 	};
 	if (unchanged) {
 		// No insertion: preserve the actual vanilla frame pixels and edge layout.
 		let at = 0;
-		emitText(0, vanilla.textHead.length); at += vanilla.textHead.length;
+		emitText(0, vanilla.textHead.length);
+		at += vanilla.textHead.length;
 		dimOpen = vanilla.textHead.lastIndexOf(DIM_ON) > vanilla.textHead.lastIndexOf(DIM_OFF);
 		for (const page of vanilla.frames) {
 			const end = at + page.range.end - page.range.start;
 			if (!overflow) {
 				const rendered = await renderPlanned(page, dimOpen);
-				if (usedBytes + rendered.frame.data.length <= byteBudget) { layout.push({ kind: "frame", frameIndex: frames.length, range: { start: at, end } }); frames.push(rendered.frame); usedBytes += rendered.frame.data.length; dimOpen = rendered.dimOpen; }
-				else { overflow = true; emitText(at, end); }
+				if (usedBytes + rendered.frame.data.length <= byteBudget) {
+					layout.push({ kind: "frame", frameIndex: frames.length, range: { start: at, end } });
+					frames.push(rendered.frame);
+					usedBytes += rendered.frame.data.length;
+					dimOpen = rendered.dimOpen;
+				} else {
+					overflow = true;
+					emitText(at, end);
+				}
 			} else emitText(at, end);
 			at = end;
 		}
 		emitText(at, text.length);
-		for (const event of imageOffsets) { const index = layout.findIndex(part => (part.kind === "text" || part.kind === "frame") && part.range.start >= event.offset); layout.splice(index < 0 ? layout.length : index, 0, event.part); }
+		for (const event of imageOffsets) {
+			const index = layout.findIndex(
+				part => (part.kind === "text" || part.kind === "frame") && part.range.start >= event.offset,
+			);
+			layout.splice(index < 0 ? layout.length : index, 0, event.part);
+		}
 	} else {
 		let at = 0;
 		const emitInterval = async (end: number) => {
-			if (at < headAnchor) { const stop = Math.min(end, headAnchor); emitText(at, stop); at = stop; }
-			if (at < end && at < tailAnchor) { const stop = Math.min(end, tailAnchor); await emitPages(at, stop); at = stop; }
-			if (at < end) { emitText(at, end); at = end; }
+			if (at < headAnchor) {
+				const stop = Math.min(end, headAnchor);
+				emitText(at, stop);
+				at = stop;
+			}
+			if (at < end && at < tailAnchor) {
+				const stop = Math.min(end, tailAnchor);
+				await emitPages(at, stop);
+				at = stop;
+			}
+			if (at < end) {
+				emitText(at, end);
+				at = end;
+			}
 		};
-		for (const image of imageOffsets) { await emitInterval(image.offset); layout.push(image.part); }
+		for (const image of imageOffsets) {
+			await emitInterval(image.offset);
+			layout.push(image.part);
+		}
 		await emitInterval(text.length);
 	}
 	return { frames, layout, overflow };
 }
 
+function archiveSummary(archive: Archive, high: Shape, files: string, includedPreviousSummary: boolean): string {
+	const { frames, text } = archive;
+	const cols = [...new Set(frames.map(frame => frame.cols))];
+	return !text && !frames.length && !files
+		? "No prior history."
+		: prompt.render(snapcompactSummaryPrompt, {
+				frameCount: frames.length,
+				multipleFrames: frames.length > 1,
+				docColumns: high.columns === 2,
+				cols: cols.length ? cols.join(" or ") : geometry(high).cols,
+				rows: geometry(high).rows,
+				sentenceInk: high.variant === "sent",
+				stopwordDimmed: high.stopwordDim === true,
+				lineRepeated: high.lineRepeat > 1,
+				truncatedChars: archive.truncatedChars,
+				includedPreviousSummary,
+				files: files || undefined,
+			});
+}
+
+/** Repartition an already source-aware archive without selecting or serializing source again. */
+export async function reframe(
+	previous: CompactionResult,
+	options?: Pick<Options, "model" | "shape" | "frameSize" | "maxFrames" | "maxFrameDataBytes">,
+): Promise<CompactionResult> {
+	const archive = getPreservedArchive(previous.preserveData);
+	const prior = previous.preserveData?.sourceRepresentation as SourceRepresentation | undefined;
+	if (typeof archive?.text !== "string" || prior?.version !== 1) {
+		throw new Error("Reframing requires a source-aware archive with retained text");
+	}
+	const text = archive.text;
+	const base = options?.shape ?? resolveShapeForText(text, options?.model);
+	const high = options?.frameSize === undefined ? base : { ...base, frameSize: options.frameSize };
+	const maxFrames = Math.max(1, Math.min(options?.maxFrames ?? MAX_FRAMES_DEFAULT, MAX_FRAMES_DEFAULT));
+	// The ordinary planner supplies only the frame-count/shape profile here.
+	// Its retained ranges MUST NOT select from this already-committed source.
+	const profile = planArchive(text, high, denseCompanion(high, options?.model?.api), maxFrames);
+	const headEnd = profile.textHead.length;
+	const tailStart = text.length - profile.textTail.length;
+	const events: { offset: number; part: Exclude<SourceLayoutPart, { kind: "text" | "frame" }> }[] = [];
+	let offset = 0;
+	for (const part of prior.layout) {
+		if (part.kind === "text" || part.kind === "frame") offset = part.range.end;
+		else events.push({ offset, part });
+	}
+	const { frames, layout } = await writeArchiveLayout(
+		text,
+		profile,
+		headEnd,
+		tailStart,
+		events,
+		false,
+		options?.maxFrameDataBytes ?? FRAME_DATA_BYTES_BUDGET,
+	);
+	const rebuilt: Archive = { ...archive, frames, textHead: text.slice(0, headEnd), textTail: text.slice(tailStart) };
+	const representation: SourceRepresentation = { ...prior, layout };
+	const readFiles = previous.details?.readFiles ?? [];
+	const modifiedFiles = previous.details?.modifiedFiles ?? [];
+	const files = formatFileList(readFiles, modifiedFiles);
+	const textChars = layout.reduce(
+		(sum, part) => sum + (part.kind === "text" ? part.range.end - part.range.start : 0),
+		0,
+	);
+	return {
+		...previous,
+		summary: archiveSummary(rebuilt, high, files, !!prior.aggregate),
+		shortSummary: `Archived ${archive.totalChars.toLocaleString()} chars of history onto ${frames.length} snapcompact frames (+${textChars.toLocaleString()} chars as text)`,
+		preserveData: { ...previous.preserveData, [PRESERVE_KEY]: rebuilt, sourceRepresentation: representation },
+	};
+}
+
 /** Serialize once, retain ordinary ranges once, then place the chronological union. */
-export async function compact<T = Message>(preparation: CompactionPreparation<T>, options?: Options<T>): Promise<CompactionResult> {
+export async function compact<T = Message>(
+	preparation: CompactionPreparation<T>,
+	options?: Options<T>,
+): Promise<CompactionResult> {
 	if (!preparation.firstKeptEntryId) throw new Error("First kept entry has no ID - session may need migration");
 	const previous = getPreservedArchive(preparation.previousPreserveData);
 	const prior = preparation.previousPreserveData?.sourceRepresentation as SourceRepresentation | undefined;
-	const sourceAware = preparation.sourcesToSummarize !== undefined || preparation.turnPrefixSources !== undefined || prior?.version === 1;
-	if (sourceAware && previous && prior?.version !== 1) throw new Error("Legacy snapcompact archive requires original-source rematerialization before source-aware compaction");
+	const sourceAware =
+		preparation.sourcesToSummarize !== undefined ||
+		preparation.turnPrefixSources !== undefined ||
+		prior?.version === 1;
+	if (sourceAware && previous && prior?.version !== 1)
+		throw new Error(
+			"Legacy snapcompact archive requires original-source rematerialization before source-aware compaction",
+		);
 	const sources = [...(preparation.sourcesToSummarize ?? []), ...(preparation.turnPrefixSources ?? [])];
-	const captured = preparation.sourcesToSummarize !== undefined || preparation.turnPrefixSources !== undefined ? captureSources(sources, options) : undefined;
-	const probe = captured?.serialized ?? serializeConversation((options?.convertToLlm ?? defaultConvertToLlm)(preparation.messagesToSummarize.concat(preparation.turnPrefixMessages)), options);
-	const base = options?.shape ?? resolveShapeForText(renderabilityProbeText(probe, preparation.previousPreserveData, preparation.previousSummary), options?.model);
+	const captured =
+		preparation.sourcesToSummarize !== undefined || preparation.turnPrefixSources !== undefined
+			? captureSources(sources, options)
+			: undefined;
+	const probe =
+		captured?.serialized ??
+		serializeConversation(
+			(options?.convertToLlm ?? defaultConvertToLlm)(
+				preparation.messagesToSummarize.concat(preparation.turnPrefixMessages),
+			),
+			options,
+		);
+	const base =
+		options?.shape ??
+		resolveShapeForText(
+			renderabilityProbeText(probe, preparation.previousPreserveData, preparation.previousSummary),
+			options?.model,
+		);
 	const high = options?.frameSize === undefined ? base : { ...base, frameSize: options.frameSize };
 	const low = denseCompanion(high, options?.model?.api);
-	const fresh: MappedArchiveInput = captured ? mapSerializedSources(captured, sources, high) : { text: normalize(probe, { shape: high }), coverage: [], images: [] };
-	let priorText = previous?.text ?? [previous?.textHead, previous?.textTail].filter(part => !!part).join(NEWLINE_GLYPH);
+	const fresh: MappedArchiveInput = captured
+		? mapSerializedSources(captured, sources, high)
+		: { text: normalize(probe, { shape: high }), coverage: [], images: [] };
+	let priorText =
+		previous?.text ?? [previous?.textHead, previous?.textTail].filter(part => !!part).join(NEWLINE_GLYPH);
 	if (!prior) {
 		priorText = elideDataUrls(priorText, "archive");
 		if (options?.includeThinking === false) priorText = stripThinkingSections(priorText);
 	}
 	const includedPreviousSummary = !priorText && !!preparation.previousSummary;
-	if (includedPreviousSummary) priorText = "[Summary of earlier history] " + normalize(preparation.previousSummary!, { shape: high });
-	const separator = priorText && fresh.text ? includedPreviousSummary ? " [Recent conversation] " : NEWLINE_GLYPH : "";
+	if (includedPreviousSummary)
+		priorText = "[Summary of earlier history] " + normalize(preparation.previousSummary!, { shape: high });
+	const separator =
+		priorText && fresh.text ? (includedPreviousSummary ? " [Recent conversation] " : NEWLINE_GLYPH) : "";
 	const prefix = priorText.length + separator.length;
 	const input: MappedArchiveInput = {
 		text: priorText + separator + fresh.text,
-		coverage: [...(prior?.coverage ?? []).map(run => ({ ...run, snapshot: { ...run.snapshot }, current: run.current && { ...run.current }, normalized: run.normalized && { ...run.normalized } })),
-			...fresh.coverage.map(run => ({ ...run, normalized: run.normalized && { start: run.normalized.start + prefix, end: run.normalized.end + prefix } }))],
+		coverage: [
+			...(prior?.coverage ?? []).map(run => ({
+				...run,
+				snapshot: { ...run.snapshot },
+				current: run.current && { ...run.current },
+				normalized: run.normalized && { ...run.normalized },
+			})),
+			...fresh.coverage.map(run => ({
+				...run,
+				normalized: run.normalized && { start: run.normalized.start + prefix, end: run.normalized.end + prefix },
+			})),
+		],
 		images: fresh.images.map(image => ({ ...image, offset: image.offset + prefix })),
 	};
 	let priorOffset = 0;
@@ -2550,41 +3257,101 @@ export async function compact<T = Message>(preparation: CompactionPreparation<T>
 	const recentEntryIds = new Set((preparation.recentSources ?? []).map(source => source.entryId));
 	let added = false;
 	const vanillaCoverage = pieces.flatMap(piece => piece.coverage);
-	const images = new Map<string, { part: Extract<SourceLayoutPart, { kind: "original-image" }>; coverage: SourceCoverageRun }>();
+	const images = new Map<
+		string,
+		{ part: Extract<SourceLayoutPart, { kind: "original-image" }>; coverage: SourceCoverageRun }
+	>();
 	const imagePositions = new Map<string, { order: number; rawStart: number }>();
-	for (const image of input.images) { const owner = input.coverage.find(run => run.entryId === image.part.entryId && run.atomicGroup); if (owner?.atomicGroup) imagePositions.set(compactionSourceKey(image.part) + ":" + image.part.blockIndex, { order: Math.min(...input.coverage.filter(run => run.atomicGroup?.id === owner.atomicGroup!.id).map(run => run.order)), rawStart: image.offset }); }
+	for (const image of input.images) {
+		const owner = input.coverage.find(run => run.entryId === image.part.entryId && run.atomicGroup);
+		if (owner?.atomicGroup)
+			imagePositions.set(compactionSourceKey(image.part) + ":" + image.part.blockIndex, {
+				order: Math.min(
+					...input.coverage.filter(run => run.atomicGroup?.id === owner.atomicGroup!.id).map(run => run.order),
+				),
+				rawStart: image.offset,
+			});
+	}
 	// Original images already committed remain actual archive input, not former-P shadows.
 	for (const image of input.images) {
-		if (!prior?.layout.some(part => part.kind === "original-image" && part.entryId === image.part.entryId && part.projection === image.part.projection && part.blockIndex === image.part.blockIndex)) continue;
+		if (
+			!prior?.layout.some(
+				part =>
+					part.kind === "original-image" &&
+					part.entryId === image.part.entryId &&
+					part.projection === image.part.projection &&
+					part.blockIndex === image.part.blockIndex,
+			)
+		)
+			continue;
 		const part = image.part;
-		const previousRun = input.coverage.find(run => run.entryId === part.entryId && run.projection === part.projection && run.snapshot.blockIndex === part.blockIndex && !run.normalized);
+		const previousRun = input.coverage.find(
+			run =>
+				run.entryId === part.entryId &&
+				run.projection === part.projection &&
+				run.snapshot.blockIndex === part.blockIndex &&
+				!run.normalized,
+		);
 		const atomicGroup = previousRun?.atomicGroup ?? image.atomicGroup;
-		images.set(compactionSourceKey(part) + ":" + part.blockIndex, { part, coverage: {
-			entryId: part.entryId, ...(part.projection ? { projection: part.projection } : {}), order: part.order, ...(atomicGroup ? { atomicGroup } : {}),
-			snapshot: { blockIndex: part.blockIndex, start: 0, end: 1 },
-			...(part.currentBlockIndex !== undefined ? { current: { blockIndex: part.currentBlockIndex, start: 0, end: 1 } } : {}),
-			status: part.currentBlockIndex !== undefined ? "exact-current" : previousRun?.status ?? "unknown", contribution: "ordinary",
-		} });
+		images.set(compactionSourceKey(part) + ":" + part.blockIndex, {
+			part,
+			coverage: {
+				entryId: part.entryId,
+				...(part.projection ? { projection: part.projection } : {}),
+				order: part.order,
+				...(atomicGroup ? { atomicGroup } : {}),
+				snapshot: { blockIndex: part.blockIndex, start: 0, end: 1 },
+				...(part.currentBlockIndex !== undefined
+					? { current: { blockIndex: part.currentBlockIndex, start: 0, end: 1 } }
+					: {}),
+				status: part.currentBlockIndex !== undefined ? "exact-current" : (previousRun?.status ?? "unknown"),
+				contribution: "ordinary",
+			},
+		});
 	}
 	const selectedById = new Map((preparation.selectedSources ?? []).map(source => [source.entryId, source]));
 	const processed = new Set<string>();
 	for (const source of preparation.selectedSources ?? []) {
 		if (processed.has(compactionSourceKey(source))) continue;
 		const nonUser = (source.message as unknown as Message).role !== "user";
-		const group = nonUser && source.atomicGroup ? source.atomicGroup.entryIds.flatMap(id => selectedById.has(id) ? [selectedById.get(id)!] : []) : [source];
+		const group =
+			nonUser && source.atomicGroup
+				? source.atomicGroup.entryIds.flatMap(id => (selectedById.has(id) ? [selectedById.get(id)!] : []))
+				: [source];
 		for (const member of group) processed.add(compactionSourceKey(member));
-		if (group.every(member => retained.has(compactionSourceKey(member))) || (!nonUser && recentEntryIds.has(source.entryId))) continue;
-		const candidate = serializeSources(group, nonUser ? { ...options, toolResultMaxChars: Infinity, toolArgMaxChars: Infinity, toolCallMaxChars: Infinity } : options, high, nonUser);
-		for (const run of candidate.coverage) run.contribution = (source.message as unknown as Message).role === "user" ? "selected-user" : "manual-nonuser";
+		if (
+			group.every(member => retained.has(compactionSourceKey(member))) ||
+			(!nonUser && recentEntryIds.has(source.entryId))
+		)
+			continue;
+		const candidate = serializeSources(
+			group,
+			nonUser
+				? { ...options, toolResultMaxChars: Infinity, toolArgMaxChars: Infinity, toolCallMaxChars: Infinity }
+				: options,
+			high,
+			nonUser,
+		);
+		for (const run of candidate.coverage)
+			run.contribution = (source.message as unknown as Message).role === "user" ? "selected-user" : "manual-nonuser";
 
-		if (nonUser && candidate.coverage.every(run => {
-			if (!run.current) return false;
-			const existing = vanillaCoverage.filter(old => old.entryId === run.entryId && old.projection === run.projection);
-			return run.current.start === run.current.end
-				? coveredRawRanges(existing, run.current.blockIndex).some(raw => raw.start === 0 && raw.end === 0)
-				: selectedMissing(run.current, existing).length === 0;
-		}) && candidate.images.every(image => images.has(compactionSourceKey(image.part) + ":" + image.part.blockIndex))) continue;
-		const existing = vanillaCoverage.filter(run => run.entryId === source.entryId && run.projection === source.projection);
+		if (
+			nonUser &&
+			candidate.coverage.every(run => {
+				if (!run.current) return false;
+				const existing = vanillaCoverage.filter(
+					old => old.entryId === run.entryId && old.projection === run.projection,
+				);
+				return run.current.start === run.current.end
+					? coveredRawRanges(existing, run.current.blockIndex).some(raw => raw.start === 0 && raw.end === 0)
+					: selectedMissing(run.current, existing).length === 0;
+			}) &&
+			candidate.images.every(image => images.has(compactionSourceKey(image.part) + ":" + image.part.blockIndex))
+		)
+			continue;
+		const existing = vanillaCoverage.filter(
+			run => run.entryId === source.entryId && run.projection === source.projection,
+		);
 		const spans = source.spans ?? candidate.coverage.filter(run => run.current).map(run => run.current!);
 		const wanted = spans.flatMap(span => selectedMissing(span, existing));
 		const candidateRanges: SourceRange[] = [];
@@ -2592,18 +3359,39 @@ export async function compact<T = Message>(preparation: CompactionPreparation<T>
 			if (!run.current || !run.normalized) continue;
 			for (const span of wanted) {
 				if (span.blockIndex !== run.current.blockIndex) continue;
-				const start = Math.max(span.start, run.current.start), end = Math.min(span.end, run.current.end);
+				const start = Math.max(span.start, run.current.start),
+					end = Math.min(span.end, run.current.end);
 				if (end <= start) continue;
-				const affine = !run.normalizedUnit && run.current.end - run.current.start === run.normalized.end - run.normalized.start;
+				const affine =
+					!run.normalizedUnit && run.current.end - run.current.start === run.normalized.end - run.normalized.start;
 
-				let missingNormalized = [affine ? { start: run.normalized.start + start - run.current.start, end: run.normalized.start + end - run.current.start } : { ...run.normalized }];
+				let missingNormalized = [
+					affine
+						? {
+								start: run.normalized.start + start - run.current.start,
+								end: run.normalized.start + end - run.current.start,
+							}
+						: { ...run.normalized },
+				];
 				for (const old of existing) {
-					if (old.status !== "exact-current" || !old.current || !old.normalizedUnit || old.current.blockIndex !== run.current.blockIndex || old.current.start !== run.current.start || old.current.end !== run.current.end) continue;
+					if (
+						old.status !== "exact-current" ||
+						!old.current ||
+						!old.normalizedUnit ||
+						old.current.blockIndex !== run.current.blockIndex ||
+						old.current.start !== run.current.start ||
+						old.current.end !== run.current.end
+					)
+						continue;
 					const shift = run.normalized.start - (run.normalizedUnit?.start ?? 0);
-					const coveredStart = shift + old.normalizedUnit.start, coveredEnd = shift + old.normalizedUnit.end;
+					const coveredStart = shift + old.normalizedUnit.start,
+						coveredEnd = shift + old.normalizedUnit.end;
 					missingNormalized = missingNormalized.flatMap(range => {
 						if (coveredEnd <= range.start || coveredStart >= range.end) return [range];
-						return [...(coveredStart > range.start ? [{ start: range.start, end: coveredStart }] : []), ...(coveredEnd < range.end ? [{ start: coveredEnd, end: range.end }] : [])];
+						return [
+							...(coveredStart > range.start ? [{ start: range.start, end: coveredStart }] : []),
+							...(coveredEnd < range.end ? [{ start: coveredEnd, end: range.end }] : []),
+						];
 					});
 				}
 				candidateRanges.push(...missingNormalized);
@@ -2617,155 +3405,353 @@ export async function compact<T = Message>(preparation: CompactionPreparation<T>
 			const freshIds = new Set(sources.map(member => member.entryId));
 			for (let i = pieces.length - 1; i >= 0; i--) {
 				const runs = pieces[i]!.coverage;
-				if (runs.length && runs.every(run => memberIds.has(run.entryId) && (freshIds.has(run.entryId) || (run.status === "exact-current" && run.current && candidate.coverage.some(next => next.entryId === run.entryId && next.current?.blockIndex === run.current!.blockIndex && next.current.start <= run.current!.start && next.current.end >= run.current!.end))))) pieces.splice(i, 1);
+				if (
+					runs.length &&
+					runs.every(
+						run =>
+							memberIds.has(run.entryId) &&
+							(freshIds.has(run.entryId) ||
+								(run.status === "exact-current" &&
+									run.current &&
+									candidate.coverage.some(
+										next =>
+											next.entryId === run.entryId &&
+											next.current?.blockIndex === run.current!.blockIndex &&
+											next.current.start <= run.current!.start &&
+											next.current.end >= run.current!.end,
+									))),
+					)
+				)
+					pieces.splice(i, 1);
 			}
 			candidateRanges.push({ start: 0, end: candidate.text.length });
 		}
 		candidateRanges.sort((a, b) => a.start - b.start);
 		const merged: SourceRange[] = [];
-		for (const range of candidateRanges) { const last = merged.at(-1); if (last && range.start <= last.end) last.end = Math.max(last.end, range.end); else merged.push({ ...range }); }
+		for (const range of candidateRanges) {
+			const last = merged.at(-1);
+			if (last && range.start <= last.end) last.end = Math.max(last.end, range.end);
+			else merged.push({ ...range });
+		}
 		if (merged.length) {
 			if (!existing.length && merged[0]!.start === candidate.coverage[0]?.normalized?.start) merged[0]!.start = 0;
-			pieces.push(...sourcePieces(candidate, merged, -1, Infinity)); added = true;
+			pieces.push(...sourcePieces(candidate, merged, -1, Infinity));
+			added = true;
 		}
 		for (const image of candidate.images) {
 			if (source.spans && !source.spans.some(span => span.blockIndex === image.part.blockIndex)) continue;
 			const key = compactionSourceKey(image.part) + ":" + image.part.blockIndex;
-			if (nonUser && source.atomicGroup) imagePositions.set(key, { order: Math.min(...group.map(member => member.order)), rawStart: image.offset });
+			if (nonUser && source.atomicGroup)
+				imagePositions.set(key, { order: Math.min(...group.map(member => member.order)), rawStart: image.offset });
 			if (!images.has(key)) {
 				const snapshot = { blockIndex: image.part.blockIndex, start: 0, end: 1 };
-				images.set(key, { part: image.part, coverage: {
-					entryId: image.part.entryId, ...(image.part.projection ? { projection: image.part.projection } : {}), order: image.part.order, ...(image.atomicGroup ? { atomicGroup: image.atomicGroup } : {}),
-					snapshot, current: { ...snapshot }, status: "exact-current", contribution: nonUser ? "manual-nonuser" : "selected-user",
-				} });
+				images.set(key, {
+					part: image.part,
+					coverage: {
+						entryId: image.part.entryId,
+						...(image.part.projection ? { projection: image.part.projection } : {}),
+						order: image.part.order,
+						...(image.atomicGroup ? { atomicGroup: image.atomicGroup } : {}),
+						snapshot,
+						current: { ...snapshot },
+						status: "exact-current",
+						contribution: nonUser ? "manual-nonuser" : "selected-user",
+					},
+				});
 				added = true;
 			}
 		}
 	}
-	for (const { part: image, coverage } of images.values()) { const position = imagePositions.get(compactionSourceKey(image) + ":" + image.blockIndex); pieces.push({ text: "", coverage: [coverage], order: position?.order ?? image.order, blockIndex: position ? -1 : image.currentBlockIndex ?? image.blockIndex, rawStart: position?.rawStart ?? 0, image }); }
+	for (const { part: image, coverage } of images.values()) {
+		const position = imagePositions.get(compactionSourceKey(image) + ":" + image.blockIndex);
+		pieces.push({
+			text: "",
+			coverage: [coverage],
+			order: position?.order ?? image.order,
+			blockIndex: position ? -1 : (image.currentBlockIndex ?? image.blockIndex),
+			rawStart: position?.rawStart ?? 0,
+			image,
+		});
+	}
 
 	const present = new Set(pieces.flatMap(piece => piece.coverage.map(run => run.entryId)));
-	const universe = new Map<string, { entryId: string; order: number; atomicGroup?: SourceMessage<T>["atomicGroup"] }>();
+	const universe = new Map<
+		string,
+		{ entryId: string; order: number; atomicGroup?: SourceMessage<T>["atomicGroup"] }
+	>();
 	for (const run of input.coverage) universe.set(run.entryId, run);
-	for (const source of sources) universe.set(source.entryId, { ...source, atomicGroup: source.atomicGroup ?? universe.get(source.entryId)?.atomicGroup });
+	for (const source of sources)
+		universe.set(source.entryId, {
+			...source,
+			atomicGroup: source.atomicGroup ?? universe.get(source.entryId)?.atomicGroup,
+		});
 	const orderedSources = [...universe.values()].sort((a, b) => a.order - b.order);
 	const pendingGaps: typeof orderedSources = [];
 	let beforeEntryId: string | undefined;
 	const flushGap = (afterEntryId?: string) => {
 		if (!pendingGaps.length) return;
-		pieces.push({ text: "", coverage: [], order: pendingGaps[0]!.order, blockIndex: -1, rawStart: 0,
-			notice: { kind: "gap", reason: "omitted-messages", wholeMessages: pendingGaps.length, beforeEntryId, afterEntryId } });
+		pieces.push({
+			text: "",
+			coverage: [],
+			order: pendingGaps[0]!.order,
+			blockIndex: -1,
+			rawStart: 0,
+			notice: {
+				kind: "gap",
+				reason: "omitted-messages",
+				wholeMessages: pendingGaps.length,
+				beforeEntryId,
+				afterEntryId,
+			},
+		});
 		pendingGaps.length = 0;
 	};
 	for (const source of orderedSources) {
 		// A retained dependency atom is never split by a whole-message notice.
 		const represented = present.has(source.entryId) || source.atomicGroup?.entryIds.some(id => present.has(id));
-		if (represented) { flushGap(source.entryId); beforeEntryId = source.entryId; }
-		else pendingGaps.push(source);
+		if (represented) {
+			flushGap(source.entryId);
+			beforeEntryId = source.entryId;
+		} else pendingGaps.push(source);
 	}
 	flushGap(preparation.recentSources?.[0]?.entryId);
 	// Previously omitted IDs have no coverage rows. Keep their durable gap facts;
 	// only genuinely restored source IDs inside that gap reduce its count.
 	if (prior) {
-		const orders = new Map([...input.coverage, ...prior.layout.flatMap(part => part.kind === "source" || part.kind === "original-image" ? [part] : []), ...sources, ...(preparation.recentSources ?? []), ...(preparation.selectedSources ?? [])].map(source => [source.entryId, source.order]));
+		const orders = new Map(
+			[
+				...input.coverage,
+				...prior.layout.flatMap(part => (part.kind === "source" || part.kind === "original-image" ? [part] : [])),
+				...sources,
+				...(preparation.recentSources ?? []),
+				...(preparation.selectedSources ?? []),
+			].map(source => [source.entryId, source.order]),
+		);
 		const previouslyPresent = new Set(prior.coverage.map(run => run.entryId));
 		for (const part of prior.layout) {
 			if (part.kind !== "gap" || part.reason !== "omitted-messages" || !part.wholeMessages) continue;
-			const before = part.beforeEntryId ? orders.get(part.beforeEntryId) ?? -Infinity : -Infinity;
-			const after = part.afterEntryId ? orders.get(part.afterEntryId) ?? Infinity : Infinity;
+			const before = part.beforeEntryId ? (orders.get(part.beforeEntryId) ?? -Infinity) : -Infinity;
+			const after = part.afterEntryId ? (orders.get(part.afterEntryId) ?? Infinity) : Infinity;
 			let restored = 0;
-			for (const id of selectedById.keys()) if (present.has(id) && !previouslyPresent.has(id) && orders.get(id)! > before && orders.get(id)! < after) restored++;
+			for (const id of selectedById.keys())
+				if (present.has(id) && !previouslyPresent.has(id) && orders.get(id)! > before && orders.get(id)! < after)
+					restored++;
 			const wholeMessages = Math.max(0, part.wholeMessages - restored);
-			if (wholeMessages) pieces.push({ text: "", coverage: [], order: after, blockIndex: -1, rawStart: -Infinity, notice: { ...part, wholeMessages } });
+			if (wholeMessages)
+				pieces.push({
+					text: "",
+					coverage: [],
+					order: after,
+					blockIndex: -1,
+					rawStart: -Infinity,
+					notice: { ...part, wholeMessages },
+				});
 		}
 	}
 
 	// Stable positional union. Equal strings at different source IDs never meet.
-	pieces.sort((a, b) => a.order - b.order || Number(a.coverage[0]?.projection === "original") - Number(b.coverage[0]?.projection === "original") || Number(!!b.historicalAtom) - Number(!!a.historicalAtom) || a.blockIndex - b.blockIndex || a.rawStart - b.rawStart || (a.coverage[0]?.normalizedUnit?.start ?? 0) - (b.coverage[0]?.normalizedUnit?.start ?? 0) || Number(!!b.image) - Number(!!a.image));
+	pieces.sort(
+		(a, b) =>
+			a.order - b.order ||
+			Number(a.coverage[0]?.projection === "original") - Number(b.coverage[0]?.projection === "original") ||
+			Number(!!b.historicalAtom) - Number(!!a.historicalAtom) ||
+			a.blockIndex - b.blockIndex ||
+			a.rawStart - b.rawStart ||
+			(a.coverage[0]?.normalizedUnit?.start ?? 0) - (b.coverage[0]?.normalizedUnit?.start ?? 0) ||
+			Number(!!b.image) - Number(!!a.image),
+	);
 	if (added) refreshSelectedUserGaps(pieces, preparation.selectedSources ?? [], high);
 	const coverage: SourceCoverageRun[] = [];
 	const chunks: string[] = [];
 	let length = 0;
-	let headAnchor = 0, tailAnchor = Infinity;
+	let headAnchor = 0,
+		tailAnchor = Infinity;
 	const imageOffsets: { offset: number; part: Extract<SourceLayoutPart, { kind: "original-image" | "gap" }> }[] = [];
 	for (const piece of pieces) {
-		if (piece.image) { imageOffsets.push({ offset: length, part: piece.image }); coverage.push(...piece.coverage); continue; }
-		if (piece.notice) { imageOffsets.push({ offset: length, part: piece.notice }); continue; }
+		if (piece.image) {
+			imageOffsets.push({ offset: length, part: piece.image });
+			coverage.push(...piece.coverage);
+			continue;
+		}
+		if (piece.notice) {
+			imageOffsets.push({ offset: length, part: piece.notice });
+			continue;
+		}
 		if (piece.edge === "head") headAnchor = length + piece.text.length;
 		if (piece.edge === "tail") tailAnchor = Math.min(tailAnchor, length);
-		for (const run of piece.coverage) if (run.normalized) appendCoverage(coverage, { ...run, normalized: { start: run.normalized.start + length, end: run.normalized.end + length } });
-		chunks.push(piece.text); length += piece.text.length;
+		for (const run of piece.coverage)
+			if (run.normalized)
+				appendCoverage(coverage, {
+					...run,
+					normalized: { start: run.normalized.start + length, end: run.normalized.end + length },
+				});
+		chunks.push(piece.text);
+		length += piece.text.length;
 	}
 	const text = chunks.join("");
 	if (!Number.isFinite(tailAnchor)) tailAnchor = text.length;
-	const { frames, layout, overflow } = await writeArchiveLayout(text, vanilla, headAnchor, tailAnchor, imageOffsets, !added && images.size === 0, options?.maxFrameDataBytes ?? FRAME_DATA_BYTES_BUDGET);
-	const representation: SourceRepresentation = { version: 1, coverage, layout, ...(prior?.aggregate ? { aggregate: prior.aggregate } : preparation.previousSummary && !previous ? { aggregate: { entryIds: [], reason: "summary" as const } } : {}) };
+	const { frames, layout, overflow } = await writeArchiveLayout(
+		text,
+		vanilla,
+		headAnchor,
+		tailAnchor,
+		imageOffsets,
+		!added && images.size === 0,
+		options?.maxFrameDataBytes ?? FRAME_DATA_BYTES_BUDGET,
+	);
+	const representation: SourceRepresentation = {
+		version: 1,
+		coverage,
+		layout,
+		...(prior?.aggregate
+			? { aggregate: prior.aggregate }
+			: preparation.previousSummary && !previous
+				? { aggregate: { entryIds: [], reason: "summary" as const } }
+				: {}),
+	};
 	for (const source of preparation.recentSources ?? []) {
 		const selected = selectedById.get(source.entryId);
 		let spans = source.spans;
 		if (selected && selected.projection === source.projection && spans) {
 			if (!selected.spans) spans = undefined;
 			else {
-				const sorted = [...spans, ...selected.spans].sort((a, b) => a.blockIndex - b.blockIndex || a.start - b.start);
+				const sorted = [...spans, ...selected.spans].sort(
+					(a, b) => a.blockIndex - b.blockIndex || a.start - b.start,
+				);
 				spans = [];
 				for (const span of sorted) {
 					const last = spans.at(-1);
-					if (last && last.blockIndex === span.blockIndex && span.start <= last.end) last.end = Math.max(last.end, span.end);
+					if (last && last.blockIndex === span.blockIndex && span.start <= last.end)
+						last.end = Math.max(last.end, span.end);
 					else spans.push({ ...span });
 				}
 			}
 		}
-		layout.push({ kind: "source", entryId: source.entryId, ...(source.projection ? { projection: source.projection } : {}), order: source.order, ...(spans ? { spans } : {}) });
+		layout.push({
+			kind: "source",
+			entryId: source.entryId,
+			...(source.projection ? { projection: source.projection } : {}),
+			order: source.order,
+			...(spans ? { spans } : {}),
+		});
 		if (selected && selected.projection !== source.projection && !retained.has(compactionSourceKey(selected))) {
-			layout.push({ kind: "source", entryId: selected.entryId, ...(selected.projection ? { projection: selected.projection } : {}), order: selected.order, ...(selected.spans ? { spans: selected.spans } : {}), contribution: "selected-user" });
+			layout.push({
+				kind: "source",
+				entryId: selected.entryId,
+				...(selected.projection ? { projection: selected.projection } : {}),
+				order: selected.order,
+				...(selected.spans ? { spans: selected.spans } : {}),
+				contribution: "selected-user",
+			});
 			const message = selected.message as Message;
 			const content = "content" in message ? message.content : undefined;
-			const selectedSpans = selected.spans ?? (typeof content === "string" ? [{ blockIndex: 0, start: 0, end: content.length }] : Array.isArray(content) ? content.flatMap((block, blockIndex) => block.type === "text" ? [{ blockIndex, start: 0, end: block.text.length }] : block.type === "image" ? [{ blockIndex, start: 0, end: 1 }] : []) : []);
-			for (const span of selectedSpans) coverage.push({ entryId: selected.entryId, ...(selected.projection ? { projection: selected.projection } : {}), order: selected.order, snapshot: { ...span }, current: { ...span }, status: "exact-current", contribution: "selected-user" });
+			const selectedSpans =
+				selected.spans ??
+				(typeof content === "string"
+					? [{ blockIndex: 0, start: 0, end: content.length }]
+					: Array.isArray(content)
+						? content.flatMap((block, blockIndex) =>
+								block.type === "text"
+									? [{ blockIndex, start: 0, end: block.text.length }]
+									: block.type === "image"
+										? [{ blockIndex, start: 0, end: 1 }]
+										: [],
+							)
+						: []);
+			for (const span of selectedSpans)
+				coverage.push({
+					entryId: selected.entryId,
+					...(selected.projection ? { projection: selected.projection } : {}),
+					order: selected.order,
+					snapshot: { ...span },
+					current: { ...span },
+					status: "exact-current",
+					contribution: "selected-user",
+				});
 		}
 	}
-	representation.throughEntryId = preparation.recentSources?.at(-1)?.entryId ?? sources.at(-1)?.entryId ?? prior?.throughEntryId;
-	const textChars = layout.reduce((sum, part) => sum + (part.kind === "text" ? part.range.end - part.range.start : 0), 0);
+	representation.throughEntryId =
+		preparation.recentSources?.at(-1)?.entryId ?? sources.at(-1)?.entryId ?? prior?.throughEntryId;
+	const textChars = layout.reduce(
+		(sum, part) => sum + (part.kind === "text" ? part.range.end - part.range.start : 0),
+		0,
+	);
 	const totalChars = textChars + frames.reduce((sum, frame) => sum + frame.chars, 0);
 
 	let droppedChars = vanilla.truncatedChars;
 	if (added) {
 		droppedChars = 0;
 		const bySource = new Map<string, SourceCoverageRun[]>();
-		for (const run of coverage) { const key = compactionSourceKey(run) + ":" + run.snapshot.blockIndex; const existing = bySource.get(key); if (existing) existing.push(run); else bySource.set(key, [run]); }
+		for (const run of coverage) {
+			const key = compactionSourceKey(run) + ":" + run.snapshot.blockIndex;
+			const existing = bySource.get(key);
+			if (existing) existing.push(run);
+			else bySource.set(key, [run]);
+		}
 		for (const run of input.coverage) {
 			if (!run.normalized) continue;
-			const compatible = (bySource.get(compactionSourceKey(run) + ":" + run.snapshot.blockIndex) ?? []).filter(next => run.status !== "historical-not-current" || next.status === "historical-not-current");
-			const represented = compatible.map(next => ({ ...next, current: next.snapshot, status: "exact-current" as const }));
+			const compatible = (bySource.get(compactionSourceKey(run) + ":" + run.snapshot.blockIndex) ?? []).filter(
+				next => run.status !== "historical-not-current" || next.status === "historical-not-current",
+			);
+			const represented = compatible.map(next => ({
+				...next,
+				current: next.snapshot,
+				status: "exact-current" as const,
+			}));
 			const missing = selectedMissing(run.snapshot, represented);
 			const rawLength = run.snapshot.end - run.snapshot.start;
 			const normalizedLength = run.normalized.end - run.normalized.start;
-			if (!run.normalizedUnit && rawLength === normalizedLength) droppedChars += missing.reduce((sum, span) => sum + span.end - span.start, 0);
+			if (!run.normalizedUnit && rawLength === normalizedLength)
+				droppedChars += missing.reduce((sum, span) => sum + span.end - span.start, 0);
 			else {
 				const unit = run.normalizedUnit ?? { start: 0, end: normalizedLength };
-				const ranges = compatible.filter(next => next.snapshot.start === run.snapshot.start && next.snapshot.end === run.snapshot.end && next.normalized)
-					.map(next => next.normalizedUnit ?? { start: 0, end: next.normalized!.end - next.normalized!.start }).sort((a, b) => a.start - b.start);
-				let at = unit.start, present = 0;
+				const ranges = compatible
+					.filter(
+						next =>
+							next.snapshot.start === run.snapshot.start &&
+							next.snapshot.end === run.snapshot.end &&
+							next.normalized,
+					)
+					.map(next => next.normalizedUnit ?? { start: 0, end: next.normalized!.end - next.normalized!.start })
+					.sort((a, b) => a.start - b.start);
+				let at = unit.start,
+					present = 0;
 				for (const range of ranges) {
-					const start = Math.max(at, range.start), end = Math.min(unit.end, range.end);
-					if (end > start) { present += end - start; at = end; }
+					const start = Math.max(at, range.start),
+						end = Math.min(unit.end, range.end);
+					if (end > start) {
+						present += end - start;
+						at = end;
+					}
 				}
 				droppedChars += unit.end - unit.start - present;
 			}
 		}
 	}
 	// Unmapped callers need no invented source descriptor for a physical suffix.
-	const ordinaryTailStart = !sourceAware && overflow ? layout.findLast(part => part.kind === "frame")?.range.end ?? headAnchor : tailAnchor;
-	const archive: Archive = { frames, text, totalChars, truncatedChars: (previous?.truncatedChars ?? 0) + droppedChars,
-		textHead: text.slice(0, headAnchor), textTail: text.slice(ordinaryTailStart) };
+	const ordinaryTailStart =
+		!sourceAware && overflow ? (layout.findLast(part => part.kind === "frame")?.range.end ?? headAnchor) : tailAnchor;
+	const archive: Archive = {
+		frames,
+		text,
+		totalChars,
+		truncatedChars: (previous?.truncatedChars ?? 0) + droppedChars,
+		textHead: text.slice(0, headAnchor),
+		textTail: text.slice(ordinaryTailStart),
+	};
 	const { readFiles, modifiedFiles } = computeFileLists(preparation.fileOps);
 	const files = formatFileList(readFiles, modifiedFiles, preparation.fileOps.read);
-	const cols = [...new Set(frames.map(frame => frame.cols))];
-	const summary = !text && !frames.length && !files ? "No prior history." : prompt.render(snapcompactSummaryPrompt, { frameCount: frames.length, multipleFrames: frames.length > 1, docColumns: high.columns === 2, cols: cols.length ? cols.join(" or ") : geometry(high).cols, rows: geometry(high).rows,
-		sentenceInk: high.variant === "sent", stopwordDimmed: high.stopwordDim === true, lineRepeated: high.lineRepeat > 1, truncatedChars: archive.truncatedChars,
-		includedPreviousSummary: includedPreviousSummary || !!representation.aggregate, files: files || undefined });
-	return { summary, shortSummary: `Archived ${totalChars.toLocaleString()} chars of history onto ${frames.length} snapcompact frames (+${textChars.toLocaleString()} chars as text)`,
-		firstKeptEntryId: preparation.firstKeptEntryId, tokensBefore: preparation.tokensBefore, details: { readFiles, modifiedFiles },
-		preserveData: { ...stripOpenAiRemoteCompactionPreserveData(preparation.previousPreserveData), [PRESERVE_KEY]: archive, ...(sourceAware ? { sourceRepresentation: representation } : {}) } };
+	const summary = archiveSummary(archive, high, files, includedPreviousSummary || !!representation.aggregate);
+	return {
+		summary,
+		shortSummary: `Archived ${totalChars.toLocaleString()} chars of history onto ${frames.length} snapcompact frames (+${textChars.toLocaleString()} chars as text)`,
+		firstKeptEntryId: preparation.firstKeptEntryId,
+		tokensBefore: preparation.tokensBefore,
+		details: { readFiles, modifiedFiles },
+		preserveData: {
+			...stripProviderCompactionPreserveData(preparation.previousPreserveData),
+			[PRESERVE_KEY]: archive,
+			...(sourceAware ? { sourceRepresentation: representation } : {}),
+		},
+	};
 }
-

@@ -16,7 +16,13 @@
 
 import { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type { Context, ImageContent, Model, TextContent, ToolResultMessage, UserMessage } from "@oh-my-pi/pi-ai";
-import { combineContentSourceOrigins, getInlinePhysical, type InlinePhysical, setSourceOrigin, transferSourceOrigin } from "@oh-my-pi/pi-ai/utils/source-origin";
+import {
+	combineContentSourceOrigins,
+	getInlinePhysical,
+	type InlinePhysical,
+	setSourceOrigin,
+	transferSourceOrigin,
+} from "@oh-my-pi/pi-ai/utils/source-origin";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { SnapcompactFrameSink } from "../blob-broker/service";
 import contextFramesNote from "../prompts/system/snapcompact-context-frames-note.md" with { type: "text" };
@@ -40,21 +46,39 @@ export function getInlineTextAccounting(block: TextContent): Extract<InlinePhysi
 }
 
 function inlineNote(text: string, owner: InlinePhysical["owner"], toolCallId?: string): TextContent {
-	return setSourceOrigin({ type: "text", text }, {
-		kind: "synthetic",
-		reason: "raster-control",
-		inlinePhysical: { kind: "note", owner, ...(toolCallId === undefined ? {} : { toolCallId }) },
-	});
+	return setSourceOrigin(
+		{ type: "text", text },
+		{
+			kind: "synthetic",
+			reason: "raster-control",
+			inlinePhysical: { kind: "note", owner, ...(toolCallId === undefined ? {} : { toolCallId }) },
+		},
+	);
 }
 
-function emittedFrames(frames: readonly ImageContent[], shape: snapcompact.Shape, owner: InlinePhysical["owner"], toolCallId?: string): ImageContent[] {
+function emittedFrames(
+	frames: readonly ImageContent[],
+	shape: snapcompact.Shape,
+	owner: InlinePhysical["owner"],
+	toolCallId?: string,
+): ImageContent[] {
 	// Provider hooks may mutate outgoing blocks. Never expose a render-cache block
 	// or restamp a prior request with a later model or owner estimate.
-	return frames.map(frame => setSourceOrigin({ ...frame }, {
-		kind: "synthetic",
-		reason: owner === "tool" ? "tool-result-raster" : "system-prompt-raster",
-		inlinePhysical: { kind: "frame", owner, estimatedTokens: shape.frameTokenEstimate, ...(toolCallId === undefined ? {} : { toolCallId }) },
-	}));
+	return frames.map(frame =>
+		setSourceOrigin(
+			{ ...frame },
+			{
+				kind: "synthetic",
+				reason: owner === "tool" ? "tool-result-raster" : "system-prompt-raster",
+				inlinePhysical: {
+					kind: "frame",
+					owner,
+					estimatedTokens: shape.frameTokenEstimate,
+					...(toolCallId === undefined ? {} : { toolCallId }),
+				},
+			},
+		),
+	);
 }
 
 export interface SnapcompactInlineOptions {
@@ -532,19 +556,18 @@ export class SnapcompactInlineTransformer {
 			if (!target) continue;
 			const cachedFrames = await this.#framesFor(this.#toolCache, swap.id, target.text, shape, shapeKey);
 			const frames = emittedFrames(cachedFrames, shape, "tool", swap.id);
-			const content: (TextContent | ImageContent)[] = [
-				inlineNote(toolResultNote, "tool", swap.id),
-				...frames,
-			];
+			const content: (TextContent | ImageContent)[] = [inlineNote(toolResultNote, "tool", swap.id), ...frames];
 			let sourceImageIndex = 0;
 			for (const block of target.message.content) {
 				if (block.type !== "image") continue;
 				sourceImageIndex++;
-				content.push(inlineNote(
-					`[Original source image ${sourceImageIndex}; corresponds to its marker in the compacted text.]`,
-					"tool",
-					swap.id,
-				));
+				content.push(
+					inlineNote(
+						`[Original source image ${sourceImageIndex}; corresponds to its marker in the compacted text.]`,
+						"tool",
+						swap.id,
+					),
+				);
 				content.push(block);
 			}
 			messages[target.index] = setSourceOrigin({ ...target.message, content }, combineContentSourceOrigins(content));
@@ -584,7 +607,9 @@ export class SnapcompactInlineTransformer {
 			const frames = emittedFrames(cached.frames, shape, owner);
 			const original = messages[userIndex] as UserMessage;
 			const originalContent: (TextContent | ImageContent)[] =
-				typeof original.content === "string" ? [transferSourceOrigin(original, { type: "text", text: original.content })] : original.content;
+				typeof original.content === "string"
+					? [transferSourceOrigin(original, { type: "text", text: original.content })]
+					: original.content;
 			const content: (TextContent | ImageContent)[] = [
 				inlineNote(systemPromptTarget.userNote, owner),
 				...frames,

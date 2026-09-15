@@ -62,13 +62,13 @@ import type { MCPServerConfig } from "../../mcp/types";
 import { loadAllExtensions } from "../../modes/components/extensions/state-manager";
 import { theme } from "../../modes/theme/theme";
 import { normalizePlanTitle, type PlanApprovalDetails, resolveApprovedPlan } from "../../plan-mode/approved-plan";
+import { autosaveApprovedPlan } from "../../plan-mode/plan-autosave";
 import type { AgentSession, AgentSessionEvent } from "../../session/agent-session";
 import { BlobStore, resolveImageDataSync } from "../../session/blob-store";
 import { isSilentAbort, SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import type { UsageStatistics } from "../../session/session-entries";
 import type { SessionInfo as StoredSessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
-import { parseCompactionOverridePrompt } from "../../session/preserved-message-settings";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands, toAcpAvailableCommands } from "../../slash-commands/available-commands";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS } from "../../stt/models";
@@ -129,6 +129,7 @@ type PromptQueueState = {
 type PromptLifecycleError = Error & { readonly code: "ACP_SESSION_CLOSED" };
 
 type PromptTurnState = {
+	abortController: AbortController;
 	cancelRequested: boolean;
 	settled: boolean;
 	/**
@@ -855,13 +856,13 @@ export class AcpAgent implements Agent {
 				.filter(block => block.type === "text")
 				.map(block => block.text)
 				.join("\n\n");
-
+			const originalImages = params.prompt
+				.filter(block => block.type === "image")
+				.map(block => ({ type: "image" as const, data: block.data, mimeType: block.mimeType }));
 			const converted = this.#convertPromptBlocks(params.prompt);
-			const directive = parseCompactionOverridePrompt(originalText);
-			if (directive && !directive.text.trim())
-				throw new Error(`Usage: /${directive.compactionOverride === "keep" ? "keep" : "once"} <message>`);
 			const pendingPrompt = Promise.withResolvers<PromptResponse>();
 			record.promptTurn = {
+				abortController: new AbortController(),
 				cancelRequested: false,
 				settled: false,
 				errorTextDelivery: undefined,
@@ -882,20 +883,25 @@ export class AcpAgent implements Agent {
 			// guard above cannot fire and a client prompt lands on AgentSession's busy
 			// guard. Type that failure for the wire instead of letting transport.ts wrap
 			// it as a generic -32603 internal error.
-			this.#runPromptOrCommand(record, converted.text, converted.images, converted.imageLinks, { text: originalText, images: converted.images, imageLinks: converted.imageLinks }, originalText)
-				.catch((error: unknown) => {
-					if (record.promptTurn !== promptTurn || promptTurn.settled) return;
-					this.#finishPrompt(
-						record,
-						undefined,
-						error instanceof AgentBusyError
-							? RequestError.sessionBusy(error.message, {
-									reason: "session_busy",
-									hint: "steer|followUp|wait",
-								})
-							: error,
-					);
-				});
+			this.#runPromptOrCommand(
+				record,
+				converted.text,
+				converted.images,
+				{ text: originalText, images: originalImages },
+				originalText,
+			).catch((error: unknown) => {
+				if (record.promptTurn !== promptTurn || promptTurn.settled) return;
+				this.#finishPrompt(
+					record,
+					undefined,
+					error instanceof AgentBusyError
+						? RequestError.sessionBusy(error.message, {
+								reason: "session_busy",
+								hint: "steer|followUp|wait",
+							})
+						: error,
+				);
+			});
 
 			return await pendingPrompt.promise;
 		});
@@ -974,20 +980,21 @@ export class AcpAgent implements Agent {
 		record: ManagedSessionRecord,
 		text: string,
 		images: AgentImageContent[],
-		imageLinks: (string | undefined)[],
 		originalSubmission: OriginalSubmission,
 		originalText: string,
 	): Promise<void> {
+		const promptTurn = record.promptTurn;
 		const skillResult = await this.#tryRunSkillCommand(record, originalText, originalSubmission);
-		if (skillResult) {
+		if (skillResult || promptTurn?.cancelRequested) {
 			return;
 		}
 
-		const builtinResult = await executeAcpBuiltinSlashCommand(parseCompactionOverridePrompt(originalText) ? text : originalText, {
+		const builtinResult = await executeAcpBuiltinSlashCommand(originalText, {
 			session: record.session,
 			sessionManager: record.session.sessionManager,
 			settings: record.session.settings,
 			cwd: record.session.sessionManager.getCwd(),
+			signal: promptTurn?.abortController.signal,
 			output: output => this.#emitCommandOutput(record, output),
 			refreshCommands: () => this.#emitAvailableCommandsUpdate(record),
 			reloadPlugins: () => this.#reloadPluginState(record),
@@ -1015,10 +1022,15 @@ export class AcpAgent implements Agent {
 				await this.#pushConfigOptionUpdate(record);
 			},
 		});
+		if (promptTurn?.cancelRequested) return;
 		if (builtinResult !== false) {
 			if ("prompt" in builtinResult) {
 				const residualBaseline = new Set(record.extensionUserMessageTasks);
-				const residualAgentInvoked = await record.session.prompt(builtinResult.prompt, { images, imageLinks, originalSubmission, compactionOverride: builtinResult.compactionOverride });
+				const residualAgentInvoked = await record.session.prompt(builtinResult.prompt, {
+					images,
+					originalSubmission,
+					producer: { type: "human" },
+				});
 				// A residual prompt can itself resolve locally (extension command,
 				// custom-TS command, file prompt template). No agent turn means no
 				// `agent_end`, so the prompt turn must be settled here — same pairing
@@ -1031,7 +1043,6 @@ export class AcpAgent implements Agent {
 				}
 				return;
 			}
-			const promptTurn = record.promptTurn;
 			this.#finishPrompt(record, {
 				stopReason: "end_turn",
 				usage: this.#buildTurnUsage(
@@ -1044,7 +1055,11 @@ export class AcpAgent implements Agent {
 		}
 
 		const extensionPromptBaseline = new Set(record.extensionUserMessageTasks);
-		const agentInvoked = await record.session.prompt(text, { images, imageLinks, originalSubmission });
+		const agentInvoked = await record.session.prompt(text, {
+			images,
+			originalSubmission,
+			producer: { type: "human" },
+		});
 		// Extension and custom-TS commands are handled locally inside session.prompt().
 		// An ACP extension command can still call pi.sendUserMessage(), which starts
 		// an async nested prompt through the extension runtime. Keep the ACP turn
@@ -1057,7 +1072,11 @@ export class AcpAgent implements Agent {
 		}
 	}
 
-	async #tryRunSkillCommand(record: ManagedSessionRecord, text: string, originalSubmission: OriginalSubmission): Promise<boolean> {
+	async #tryRunSkillCommand(
+		record: ManagedSessionRecord,
+		text: string,
+		originalSubmission: OriginalSubmission,
+	): Promise<boolean> {
 		if (!record.session.skillsSettings?.enableSkillCommands) {
 			return false;
 		}
@@ -1069,7 +1088,7 @@ export class AcpAgent implements Agent {
 		if (!skill) {
 			return false;
 		}
-		const built = await buildSkillPromptMessage(skill, parsed.args, "user");
+		const built = await buildSkillPromptMessage(skill, parsed, "user");
 		await record.session.promptCustomMessage(
 			{
 				customType: SKILL_PROMPT_MESSAGE_TYPE,
@@ -1110,6 +1129,7 @@ export class AcpAgent implements Agent {
 			return promptTurn.cleanup;
 		}
 		promptTurn.cancelRequested = true;
+		promptTurn.abortController.abort();
 		promptTurn.unsubscribe?.();
 		const cleanup = this.#runCancelCleanup(record, promptTurn);
 		promptTurn.cleanup = cleanup;
@@ -1699,14 +1719,9 @@ export class AcpAgent implements Agent {
 		}
 	}
 
-	#convertPromptBlocks(blocks: PromptRequest["prompt"]): {
-		text: string;
-		images: AgentImageContent[];
-		imageLinks: (string | undefined)[];
-	} {
+	#convertPromptBlocks(blocks: PromptRequest["prompt"]): { text: string; images: AgentImageContent[] } {
 		const textParts: string[] = [];
 		const images: AgentImageContent[] = [];
-		const imageLinks: (string | undefined)[] = [];
 		for (const block of blocks) {
 			switch (block.type) {
 				case "text":
@@ -1714,7 +1729,6 @@ export class AcpAgent implements Agent {
 					break;
 				case "image":
 					images.push({ type: "image", data: block.data, mimeType: block.mimeType });
-					imageLinks.push(undefined);
 					break;
 				case "resource":
 					if ("text" in block.resource) {
@@ -1725,7 +1739,6 @@ export class AcpAgent implements Agent {
 						// to the images array so the user's intent survives; everything
 						// else falls back to the URI placeholder below.
 						images.push({ type: "image", data: block.resource.blob, mimeType: block.resource.mimeType });
-						imageLinks.push(block.resource.uri);
 					} else {
 						textParts.push(`[embedded resource: ${block.resource.uri}]`);
 					}
@@ -1740,7 +1753,6 @@ export class AcpAgent implements Agent {
 		}
 		return {
 			text: textParts.join("\n\n").trim(),
-			imageLinks,
 			images,
 		};
 	}
@@ -1944,10 +1956,24 @@ export class AcpAgent implements Agent {
 		}
 		// Approved. Set the plan reference so the next turn injects the plan
 		// content as context (the file keeps its agent-chosen name — no rename),
-		// then exit plan mode so the agent regains full tools.
 		session.setPlanReferencePath(planFilePath);
 		session.setPlanProposalHandler?.(null);
 		session.setPlanModeState(undefined);
+		let autosaveFailed = false;
+		try {
+			await autosaveApprovedPlan({
+				settings: session.settings,
+				cwd: session.sessionManager.getCwd(),
+				title: resolvedTitle,
+				planContent,
+			});
+		} catch (error) {
+			logger.warn("Failed to autosave approved plan", {
+				sessionId: session.sessionId,
+				error,
+			});
+			autosaveFailed = true;
+		}
 		try {
 			await this.#connection.sessionUpdate({
 				sessionId: session.sessionId,
@@ -1964,7 +1990,9 @@ export class AcpAgent implements Agent {
 			content: [
 				{
 					type: "text" as const,
-					text: `Plan approved at ${planFilePath}. Plan mode exited; proceed with the implementation.`,
+					text: autosaveFailed
+						? `Plan approved at ${planFilePath}. Plan mode exited; proceed with the implementation. (Plan autosave failed; continuing.)`
+						: `Plan approved at ${planFilePath}. Plan mode exited; proceed with the implementation.`,
 				},
 			],
 			details,

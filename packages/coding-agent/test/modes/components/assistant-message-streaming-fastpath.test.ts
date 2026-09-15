@@ -54,6 +54,79 @@ afterEach(() => {
 // the same message — at every step. If they ever diverge, the optimization
 // silently corrupts the transcript.
 describe("AssistantMessageComponent streaming fast path", () => {
+	it("replays retired thinking prefixes after cache eviction, reflow, and finalization", () => {
+		const component = new AssistantMessageComponent();
+		const widths = [36, W];
+		const prefixes: Array<{ count: number; rows: readonly string[][] }> = [];
+		let thinking = "";
+		for (let step = 0; step < 80; step++) {
+			thinking += `Paragraph ${step} has **emphasis** and enough words to wrap at narrow widths.\n\n`;
+			component.updateContent(msg([{ type: "thinking", thinking: `${thinking}Pending paragraph` }]), {
+				transient: true,
+			});
+			component.render(W);
+			const count = component.getTranscriptStableRows().length;
+			if (count > (prefixes.at(-1)?.count ?? 0)) {
+				prefixes.push({
+					count,
+					rows: widths.map(width => [...component.renderTranscriptStableRows(count, width)]),
+				});
+			}
+		}
+		expect(prefixes.length).toBeGreaterThan(64);
+		const keys = component.getTranscriptStableRows().map(row => row.key);
+		expect(keys.reduce((length, key) => length + key.length, 0)).toBeLessThan(keys.length * 32);
+		component.updateContent(
+			msg([
+				{ type: "thinking", thinking },
+				{ type: "text", text: "Final answer" },
+			]),
+		);
+		component.markTranscriptBlockFinalized();
+		for (const prefix of prefixes) {
+			for (const [index, width] of widths.entries()) {
+				expect(component.renderTranscriptStableRows(prefix.count, width)).toEqual(prefix.rows[index]);
+			}
+		}
+		expect(component.getTranscriptStableRows().map(row => row.key)).toEqual(keys);
+	});
+
+	it("keeps explicitly closed block boundaries immutable when later thinking blocks grow or revise", () => {
+		const component = new AssistantMessageComponent();
+		const first = "First reasoning paragraph.\n\nSecond paragraph.\n\nStill thinking";
+		component.updateContent(msg([{ type: "thinking", thinking: first }]), { transient: true });
+		component.render(W);
+		const firstCount = component.getTranscriptStableRows().length;
+		const firstRows = [...component.renderTranscriptStableRows(firstCount, 40)];
+		expect(Bun.stripANSI(firstRows.join("\n"))).toContain("First reasoning paragraph.");
+		expect(Bun.stripANSI(firstRows.join("\n"))).not.toContain("Still thinking");
+		const content: AssistantMessage["content"] = [
+			{ type: "thinking", thinking: first },
+			{ type: "thinking", thinking: "Another block.\n\nMore reasoning.\n\nPending" },
+		];
+		component.markContentBlockClosed(0);
+		component.updateContent(msg(content), { transient: true });
+		component.render(W);
+		const count = component.getTranscriptStableRows().length;
+		const rows = [...component.renderTranscriptStableRows(count, 40)];
+		expect(Bun.stripANSI(rows.join("\n"))).toContain("Still thinking");
+		expect(Bun.stripANSI(rows.join("\n"))).toContain("Another block.");
+		component.updateContent(msg([{ type: "thinking", thinking: `Rewritten ${first}` }]), { transient: true });
+		component.render(W);
+		expect(component.getTranscriptStableRows()).toHaveLength(count);
+		component.renderTranscriptStableRows(count, 60);
+		component.renderTranscriptStableRows(count, 80);
+		expect(component.renderTranscriptStableRows(firstCount, 40)).toEqual(firstRows);
+		expect(component.renderTranscriptStableRows(count, 40)).toEqual(rows);
+		component.setHideThinkingBlock(true);
+		component.resetTranscriptStableRows();
+		component.updateContent(msg(content), { transient: true });
+		component.render(W);
+		expect(component.getTranscriptStableRows()).toEqual([]);
+		expect(component.renderTranscriptStableRows(count, 40)).toEqual([]);
+		component.markTranscriptBlockFinalized();
+	});
+
 	it("matches teardown output across a growing thinking + text stream", () => {
 		const reused = new AssistantMessageComponent();
 		const thinking = "Reasoning about the **problem** with `code` and a list:\n- a\n- b";
@@ -216,6 +289,38 @@ Average Latency: 1,240 ms
 		reused.updateContent(filled);
 		expect(reused.render(W).join("\n")).toBe(teardownRender(filled));
 	});
+
+	it("matches fresh live output across hidden thinking emptiness transitions and reveal", () => {
+		const reused = new AssistantMessageComponent(undefined, true);
+		const latestReasoning = "Latest canonical reasoning";
+		try {
+			// A comment is raw-nonempty but display-empty; whitespace is canonically empty.
+			// Neither transition may leave the live pulse missing or stale.
+			for (const thinking of ["", "<!-- -->", " \n", latestReasoning]) {
+				const message = msg([
+					{ type: "text", text: "Visible answer" },
+					{ type: "thinking", thinking },
+				]);
+				const fresh = new AssistantMessageComponent(undefined, true);
+				try {
+					reused.updateContent(message, { transient: true });
+					fresh.updateContent(message, { transient: true });
+					expect(reused.render(W).join("\n")).toBe(fresh.render(W).join("\n"));
+				} finally {
+					fresh.dispose();
+				}
+			}
+
+			reused.setHideThinkingBlock(false);
+			reused.invalidate();
+			const revealed = Bun.stripANSI(reused.render(W).join("\n"));
+			expect(revealed).toContain(latestReasoning);
+			expect(revealed).toContain("Visible answer");
+		} finally {
+			reused.dispose();
+		}
+	});
+
 	it("does not re-format an already-display thinking block (rawThinking set)", () => {
 		// buildDisplayMessage emits a thinking block whose `thinking` is already the
 		// formatted display text and stamps the original under `rawThinking`.

@@ -1660,18 +1660,24 @@ describe("AgentSession auto-compaction progress guard", () => {
 			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6mQAAAABJRU5ErkJggg==",
 		};
 		const imageEntryId = sessionManager.appendMessage({
-			role: "user", content: [{ ...image }, { ...image }], timestamp: Date.now(),
+			role: "user",
+			content: [{ ...image }, { ...image }],
+			timestamp: Date.now(),
 		});
 		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
 		const sourceImageCount = () => {
 			const entry = sessionManager.getEntry(imageEntryId);
 			if (entry?.type !== "message" || entry.message.role !== "user") throw new Error("Missing image source");
-			return Array.isArray(entry.message.content) ? entry.message.content.filter(block => block.type === "image").length : 0;
+			return Array.isArray(entry.message.content)
+				? entry.message.content.filter(block => block.type === "image").length
+				: 0;
 		};
 		const continuationImageCounts: number[] = [];
 		vi.spyOn(session.agent, "prompt").mockImplementation(async () => {
 			const images = session.messages.flatMap(message =>
-				"content" in message && Array.isArray(message.content) ? message.content.filter(block => block.type === "image") : [],
+				"content" in message && Array.isArray(message.content)
+					? message.content.filter(block => block.type === "image")
+					: [],
 			);
 			continuationImageCounts.push(images.length);
 		});

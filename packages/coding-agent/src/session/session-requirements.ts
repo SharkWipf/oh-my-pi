@@ -17,10 +17,7 @@ import {
 	reviewRequirementsCandidates,
 	verifyRequirementsEvidence,
 } from "../requirements/pipeline";
-import {
-	type ResolvedRequirementsSource,
-	resolveRequirementsSource,
-} from "../requirements/source-capture";
+import { type ResolvedRequirementsSource, resolveRequirementsSource } from "../requirements/source-capture";
 import { RequirementsStore } from "../requirements/store";
 import type {
 	RequirementsApplicable,
@@ -110,40 +107,41 @@ export function composeProviderRequirements(
 	const text =
 		enabled && (active.length || snapshot.conflicts.length || ledgerHoles)
 			? prompt.render(recallTemplate, {
-				memory: {
-					requirements: active.map(revision => ({
-						id: revision.requirementId,
-						revision: revision.id,
-						statement: revision.statement,
-						scope: revision.scope,
-						source: revision.sourceKey,
-					})),
-					conflicts: snapshot.conflicts.map(group =>
-						group.map(revision => ({
-							id: revision.id,
+					memory: {
+						requirements: active.map(revision => ({
+							id: revision.requirementId,
+							revision: revision.id,
+							statement: revision.statement,
+							scope: revision.scope,
 							source: revision.sourceKey,
-							lifecycle: revision.lifecycle,
-							kind: revision.kind,
-							...(revision.lifecycle === "accepted" && revision.kind !== "withdraw"
-								? { statement: revision.statement }
-								: {}),
 						})),
-					),
-					coverage: {
-						scope: "entire durable requirements ledger; not branch-local coverage",
-						...snapshot.ledgerCoverage,
-						originals: "Cold source availability is last-observed; consumed requirement evidence is freshly checked",
-						ledger: "/memory requirements coverage",
-						source: "/memory requirements source <source-key>",
-						retry: "/memory requirements retry [source-key]",
+						conflicts: snapshot.conflicts.map(group =>
+							group.map(revision => ({
+								id: revision.id,
+								source: revision.sourceKey,
+								lifecycle: revision.lifecycle,
+								kind: revision.kind,
+								...(revision.lifecycle === "accepted" && revision.kind !== "withdraw"
+									? { statement: revision.statement }
+									: {}),
+							})),
+						),
+						coverage: {
+							scope: "entire durable requirements ledger; not branch-local coverage",
+							...snapshot.ledgerCoverage,
+							originals:
+								"Cold source availability is last-observed; consumed requirement evidence is freshly checked",
+							ledger: "/memory requirements coverage",
+							source: "/memory requirements source <source-key>",
+							retry: "/memory requirements retry [source-key]",
+						},
+						pendingSources: snapshot.pendingSources.map(source => ({
+							source: source.key,
+							state: source.state,
+							reason: source.reason,
+						})),
 					},
-					pendingSources: snapshot.pendingSources.map(source => ({
-						source: source.key,
-						state: source.state,
-						reason: source.reason,
-					})),
-				},
-			})
+				})
 			: "";
 	const base = context.systemPrompt ?? [];
 	const parts = text ? [...base, text] : base;
@@ -173,7 +171,9 @@ export class SessionRequirements {
 	readonly #pendingLive = new Map<string, { entryId: string; integrity: string }>();
 	#pendingGeneration = 0;
 	#pendingSessionId: string | undefined;
-	#pendingSnapshot: Readonly<{ sessionId: string; epoch: number; generation: number; entryIds: readonly string[] }> | undefined;
+	#pendingSnapshot:
+		| Readonly<{ sessionId: string; epoch: number; generation: number; entryIds: readonly string[] }>
+		| undefined;
 	#epoch = 0;
 	#bypass: RequirementsRecoveryMode = "off";
 	#controller = new AbortController();
@@ -203,8 +203,10 @@ export class SessionRequirements {
 		this.#volatile = new RequirementsStore();
 		this.#unsubscribeSettings = host.settings.onEffectiveChange((path, value) => {
 			if (path !== "requirements.enabled") return;
-			if (!value) { this.cancelPending("Requirements disabled"); this.releasePendingLive(); }
-			else
+			if (!value) {
+				this.cancelPending("Requirements disabled");
+				this.releasePendingLive();
+			} else
 				void this.observeCommittedSources().catch(error => {
 					this.#error = error instanceof Error ? error.message : String(error);
 				});
@@ -290,9 +292,19 @@ export class SessionRequirements {
 					const { source } = next.value;
 					keys.add(source.key);
 					const prior = this.#storage.getRequirementsSourceMetadata(source.key);
-					if (!prior || source.locators.some(locator => !prior.locators.some(current =>
-						current.sessionId === locator.sessionId && current.entryId === locator.entryId && current.journalPath === locator.journalPath
-					))) changed.push(source);
+					if (
+						!prior ||
+						source.locators.some(
+							locator =>
+								!prior.locators.some(
+									current =>
+										current.sessionId === locator.sessionId &&
+										current.entryId === locator.entryId &&
+										current.journalPath === locator.journalPath,
+								),
+						)
+					)
+						changed.push(source);
 					// A scheduling quantum, not a source count/retention limit: drain every descriptor.
 					if (performance.now() - sliceStarted >= 8) {
 						intake();
@@ -362,7 +374,10 @@ export class SessionRequirements {
 		this.#storage.reconcileRequirementsSources(observations);
 		return verified;
 	}
-	async #reconcileReviewedEvidence(input: RequirementsEvidencePackage, batch?: RequirementsBatch): Promise<Record<string, string>> {
+	async #reconcileReviewedEvidence(
+		input: RequirementsEvidencePackage,
+		batch?: RequirementsBatch,
+	): Promise<Record<string, string>> {
 		// Explicit restore/publication consumes its frozen input even when routine recall excludes its scope.
 		const sources = new Map(this.#consumedEvidence().map(source => [source.key, source]));
 		for (const resolved of [input.source, ...input.references]) sources.set(resolved.source.key, resolved.source);
@@ -377,11 +392,14 @@ export class SessionRequirements {
 		const resolved = await resolveRequirementsSource(this.host.sessionManager, sourceKey, descriptor, { context });
 		if (!resolved || resolved.source.state === "orphaned") {
 			if (descriptor) this.#storage.reconcileRequirementsSources([{ key: sourceKey, integrity: null }]);
-			throw new Error(`Original requirements source unavailable: ${sourceKey}; derived records are not replacement evidence`);
+			throw new Error(
+				`Original requirements source unavailable: ${sourceKey}; derived records are not replacement evidence`,
+			);
 		}
 		if (descriptor && descriptor.units.length && descriptor.integrity !== resolved.source.integrity)
 			await this.#reconcileIntegrity([descriptor]);
-		if (descriptor?.authorityGeneration !== undefined) resolved.source.authorityGeneration = descriptor.authorityGeneration;
+		if (descriptor?.authorityGeneration !== undefined)
+			resolved.source.authorityGeneration = descriptor.authorityGeneration;
 		this.#storage.intakeRequirementsSource(resolved.source);
 		descriptor = this.#storage.getRequirementsSource(sourceKey);
 		if (descriptor?.integrity === resolved.source.integrity) resolved.source = descriptor;
@@ -399,20 +417,34 @@ export class SessionRequirements {
 
 	currentSignature(): string {
 		if (this.#enabled && this.#bypass === "off") this.#syncEpoch();
-		if (!this.#enabled || this.#bypass !== "off") return `${this.host.sessionManager.getSessionId()}:${this.#lifecycle}:${this.#enabled}:${this.#bypass}`;
+		if (!this.#enabled || this.#bypass !== "off")
+			return `${this.host.sessionManager.getSessionId()}:${this.#lifecycle}:${this.#enabled}:${this.#bypass}`;
 		const state = this.#storage.getRequirementsState();
 		return `${this.host.sessionManager.getSessionId()}:${this.#epoch}:${this.#lifecycle}:${state.generation}:${state.publicationRevision}:${this.#enabled}:${this.#bypass}:${this.host.sessionManager.getRequirementsSourceVersion()}`;
 	}
 
 	async refreshCurrentEvidence(): Promise<void> {
 		if (!this.#enabled || this.#bypass !== "off") return;
-		if (!this.#hasObserved && !this.#observing) void this.observeCommittedSources().catch(error => { this.#error = String(error); });
+		if (!this.#hasObserved && !this.#observing)
+			void this.observeCommittedSources().catch(error => {
+				this.#error = String(error);
+			});
 		await this.#reconcileApplicableIntegrity();
 	}
 
 	prepareFragment(countTokens?: (text: string) => number): { fragment: string; receipt: RequirementsCallReceipt } {
 		if (!this.#enabled || this.#bypass !== "off") {
-			const receipt: RequirementsCallReceipt = { revisionIds: [], publicationRevision: 0, generation: this.#lifecycle, coverageComplete: false, bypass: this.#bypass, tokens: 0, tokenProvenance: "estimated", signature: this.currentSignature(), phase: "prepared" };
+			const receipt: RequirementsCallReceipt = {
+				revisionIds: [],
+				publicationRevision: 0,
+				generation: this.#lifecycle,
+				coverageComplete: false,
+				bypass: this.#bypass,
+				tokens: 0,
+				tokenProvenance: "estimated",
+				signature: this.currentSignature(),
+				phase: "prepared",
+			};
 			this.recordCallReceipt(receipt);
 			return { fragment: "", receipt };
 		}
@@ -429,11 +461,16 @@ export class SessionRequirements {
 			const source = this.#storage.getRequirementsSource(key);
 			return source && source.state !== "complete" && source.state !== "gap" ? [source] : [];
 		});
-		return this.#applicableCache = {
-			...snapshot.applicable, ledgerCoverage: snapshot.coverage, pendingSources,
-			publicationRevision: snapshot.state.publicationRevision, generation: snapshot.state.generation,
-			enabled: this.#enabled, bypass: this.#bypass, signature,
-		};
+		return (this.#applicableCache = {
+			...snapshot.applicable,
+			ledgerCoverage: snapshot.coverage,
+			pendingSources,
+			publicationRevision: snapshot.state.publicationRevision,
+			generation: snapshot.state.generation,
+			enabled: this.#enabled,
+			bypass: this.#bypass,
+			signature,
+		});
 	}
 	composeProviderContext(
 		context: Context,
@@ -491,18 +528,40 @@ export class SessionRequirements {
 		this.#sourceKeys.add(source.key);
 		this.#pendingLive.set(source.key, { entryId, integrity: source.integrity });
 		this.#pendingGeneration++;
-		void this.processPending(source.key).catch(error => { this.#error = String(error); });
+		void this.processPending(source.key).catch(error => {
+			this.#error = String(error);
+		});
 	}
 
-	pendingLiveSnapshot(): Readonly<{sessionId: string; epoch: number; generation: number; entryIds: readonly string[]}> {
+	pendingLiveSnapshot(): Readonly<{
+		sessionId: string;
+		epoch: number;
+		generation: number;
+		entryIds: readonly string[];
+	}> {
 		const sessionId = this.host.sessionManager.getSessionId();
-		if (this.#pendingSessionId !== undefined && this.#pendingSessionId !== sessionId) { this.releasePendingLive(); this.#pendingSessionId = sessionId; }
-		if (this.#pendingSnapshot?.sessionId === sessionId && this.#pendingSnapshot.epoch === this.#epoch && this.#pendingSnapshot.generation === this.#pendingGeneration) return this.#pendingSnapshot;
-		return this.#pendingSnapshot = Object.freeze({ sessionId, epoch: this.#epoch, generation: this.#pendingGeneration, entryIds: Object.freeze([...this.#pendingLive.values()].map(value => value.entryId)) });
+		if (this.#pendingSessionId !== undefined && this.#pendingSessionId !== sessionId) {
+			this.releasePendingLive();
+			this.#pendingSessionId = sessionId;
+		}
+		if (
+			this.#pendingSnapshot?.sessionId === sessionId &&
+			this.#pendingSnapshot.epoch === this.#epoch &&
+			this.#pendingSnapshot.generation === this.#pendingGeneration
+		)
+			return this.#pendingSnapshot;
+		return (this.#pendingSnapshot = Object.freeze({
+			sessionId,
+			epoch: this.#epoch,
+			generation: this.#pendingGeneration,
+			entryIds: Object.freeze([...this.#pendingLive.values()].map(value => value.entryId)),
+		}));
 	}
 	status(): Omit<RequirementsStatus, "snapshot">;
 	status(options: { includeLedger: true }): RequirementsStatus;
-	status(options?: { includeLedger: true }): Omit<RequirementsStatus, "snapshot"> & { snapshot?: RequirementsSnapshot } {
+	status(options?: {
+		includeLedger: true;
+	}): Omit<RequirementsStatus, "snapshot"> & { snapshot?: RequirementsSnapshot } {
 		const applicable = this.snapshotApplicable();
 		const activeTokens =
 			this.#composition?.signature === applicable.signature ? this.#composition.activeTokens : null;
@@ -510,8 +569,12 @@ export class SessionRequirements {
 			enabled: this.#enabled,
 			bypass: this.#bypass,
 			running: !!this.#run,
-			sourceCatalog: this.#observedVersion === this.host.sessionManager.getRequirementsSourceVersion()
-				? "last-observed" : this.#observing ? "observing" : "unobserved",
+			sourceCatalog:
+				this.#observedVersion === this.host.sessionManager.getRequirementsSourceVersion()
+					? "last-observed"
+					: this.#observing
+						? "observing"
+						: "unobserved",
 			models: requirementsModelStatus(this.host),
 			...(options?.includeLedger ? { snapshot: this.#snapshot() } : {}),
 			applicable,
@@ -527,7 +590,10 @@ export class SessionRequirements {
 	recordCallReceipt(receipt: RequirementsCallReceipt): void {
 		this.#receipt = structuredClone(receipt);
 	}
-	async #evidencePackage(source: ResolvedRequirementsSource, restoringRevisionId?: string): Promise<RequirementsEvidencePackage> {
+	async #evidencePackage(
+		source: ResolvedRequirementsSource,
+		restoringRevisionId?: string,
+	): Promise<RequirementsEvidencePackage> {
 		const sourceKey = source.source.key;
 		if (source.source.referenceOnly)
 			throw new Error("Referents are evidence only; process the human source that adopted them");
@@ -564,7 +630,8 @@ export class SessionRequirements {
 				...revision.evidence.map(span => span.sourceKey),
 				...(revision.referents ?? []).map(span => span.sourceKey),
 				...(revision.relations ?? []).flatMap(relation => [
-					relation.predecessorSourceKey, relation.successorSourceKey,
+					relation.predecessorSourceKey,
+					relation.successorSourceKey,
 					...relation.evidence.map(span => span.sourceKey),
 				]),
 			]),
@@ -623,9 +690,11 @@ export class SessionRequirements {
 				throw new Error("Foreign requirements source is not associated with the current scope");
 			// Indexed current input, not historical unknown-origin descriptors, drives automatic work.
 			const candidates = selected ? [selected] : this.#storage.getRequirementsPendingSources();
-			const pending = candidates.filter(source =>
-				!source.referenceOnly && source.state === "pending" &&
-				(sourceKey === source.key || this.#sourceKeys.has(source.key)),
+			const pending = candidates.filter(
+				source =>
+					!source.referenceOnly &&
+					source.state === "pending" &&
+					(sourceKey === source.key || this.#sourceKeys.has(source.key)),
 			);
 			for (const source of pending) {
 				signal.throwIfAborted();
@@ -689,7 +758,10 @@ export class SessionRequirements {
 		if (this.#bypass !== "off" && mode === "off")
 			throw new Error("Memory recovery bypass is sticky for this run; restart explicitly to resume memory");
 		this.#bypass = mode;
-		if (mode !== "off") { this.cancelPending(`Memory ${mode} recovery`); this.releasePendingLive(); }
+		if (mode !== "off") {
+			this.cancelPending(`Memory ${mode} recovery`);
+			this.releasePendingLive();
+		}
 	}
 	releasePendingLive(): void {
 		this.#pendingLive.clear();
@@ -716,8 +788,24 @@ export class SessionRequirements {
 		}
 		if (action.kind === "clear") {
 			this.cancelPending("Operator cleared requirements");
-			const kinds: RequirementsScope["kind"][] = action.scope === "all" ? ["session", "task", "project", "global"] : action.scope === "session" ? ["session", "task"] : [action.scope];
-			const result = kinds.map(kind => this.#storage.clearRequirements({ kind, sessionId: this.host.sessionManager.getSessionId(), epoch: this.#epoch, projectId: this.host.sessionManager.getCwd() }, actor, action.reason));
+			const kinds: RequirementsScope["kind"][] =
+				action.scope === "all"
+					? ["session", "task", "project", "global"]
+					: action.scope === "session"
+						? ["session", "task"]
+						: [action.scope];
+			const result = kinds.map(kind =>
+				this.#storage.clearRequirements(
+					{
+						kind,
+						sessionId: this.host.sessionManager.getSessionId(),
+						epoch: this.#epoch,
+						projectId: this.host.sessionManager.getCwd(),
+					},
+					actor,
+					action.reason,
+				),
+			);
 			this.releasePendingLive();
 			return result;
 		}
@@ -732,14 +820,21 @@ export class SessionRequirements {
 			if (!action.sourceKey) await this.observeCommittedSources(true);
 			this.#assertAvailable(signal);
 			const sources = action.sourceKey
-				? [this.#storage.getRequirementsSource(action.sourceKey)].filter((source): source is RequirementsSource => !!source)
+				? [this.#storage.getRequirementsSource(action.sourceKey)].filter(
+						(source): source is RequirementsSource => !!source,
+					)
 				: this.#storage.getRequirementsPendingSources();
 			for (const source of sources) {
 				if (source.referenceOnly || source.state === "complete") continue;
 				if (!this.#sourceInScope(source)) continue;
 				const resolved = await this.inspectSource(source.key);
 				this.#assertAvailable(signal);
-				this.#storage.setRequirementsSourceDisposition(source.key, resolved.source.integrity, "pending", "Operator requested original-position retry/backfill");
+				this.#storage.setRequirementsSourceDisposition(
+					source.key,
+					resolved.source.integrity,
+					"pending",
+					"Operator requested original-position retry/backfill",
+				);
 				await this.processPending(source.key);
 				this.#assertAvailable(signal);
 			}
@@ -820,7 +915,15 @@ export class SessionRequirements {
 									unitId: unit.id,
 								},
 							],
-							referents: adopted ? [{ sourceKey: selected.source.key, integrity: selected.source.integrity, unitId: selectedUnit.id }] : [],
+							referents: adopted
+								? [
+										{
+											sourceKey: selected.source.key,
+											integrity: selected.source.integrity,
+											unitId: selectedUnit.id,
+										},
+									]
+								: [],
 							predecessorRevisionIds: [],
 						},
 					],
@@ -845,7 +948,9 @@ export class SessionRequirements {
 				reviewRevision: `${REQUIREMENTS_FORMAT}:${input.publicationRevision}:literal:${unit.id}`,
 				manifest: input.source.source.units,
 				readHeads: input.readHeads,
-				readSourceIntegrities: Object.fromEntries([input.source, ...input.references].map(resolved => [resolved.source.key, resolved.source.integrity])),
+				readSourceIntegrities: Object.fromEntries(
+					[input.source, ...input.references].map(resolved => [resolved.source.key, resolved.source.integrity]),
+				),
 				authority: input.authority,
 				operationIds: candidate.map(operation => operation.id),
 				operations: candidate.map(({ id: _id, ...op }) => op),
@@ -856,7 +961,11 @@ export class SessionRequirements {
 			const verified = await this.#reconcileReviewedEvidence(input, batch);
 			this.#assertAvailable(signal);
 			const result = this.#storage.publishRequirementsBatch(batch.id, input.authority, verified);
-			if (this.#storage.getRequirementsSource(action.sourceKey)?.state === "complete" && this.#pendingLive.delete(action.sourceKey)) this.#pendingGeneration++;
+			if (
+				this.#storage.getRequirementsSource(action.sourceKey)?.state === "complete" &&
+				this.#pendingLive.delete(action.sourceKey)
+			)
+				this.#pendingGeneration++;
 			return result;
 		}
 		if (action.kind === "restore") {

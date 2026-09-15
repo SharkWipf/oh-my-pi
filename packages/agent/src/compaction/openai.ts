@@ -16,7 +16,21 @@
  */
 
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
-import { cloneWithSourceOrigins, combineSourceOrigins, exportItemOrigins, getSourceOrigin, importItemOrigins, mergeSourceHistory, setSourceOrigin, transferSourceOrigin, transferTransformedSourceOrigin, validateNativeItemOrigins, validateNativeSourceParts, type NativeItemOrigin, type NativeSourcePart } from "@oh-my-pi/pi-ai/utils/source-origin";
+import {
+	cloneWithSourceOrigins,
+	combineSourceOrigins,
+	exportItemOrigins,
+	getSourceOrigin,
+	importItemOrigins,
+	mergeSourceHistory,
+	setSourceOrigin,
+	transferSourceOrigin,
+	transferTransformedSourceOrigin,
+	validateNativeItemOrigins,
+	validateNativeSourceParts,
+	type NativeItemOrigin,
+	type NativeSourcePart,
+} from "@oh-my-pi/pi-ai/utils/source-origin";
 import { applyCodexResponsesLiteShape } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
 import {
 	createOpenAICodexCompactionRequestContext,
@@ -72,14 +86,14 @@ export * from "./compaction-v2-streaming";
 export const OPENAI_REMOTE_COMPACTION_PRESERVE_KEY = "openaiRemoteCompaction";
 
 /**
- * Hard ceiling on remote compaction HTTP requests. Unlike every provider
- * stream (guarded by first-event/idle watchdogs in pi-ai), these are raw
- * fetches awaiting one non-streamed JSON body — a connection silently dropped
- * by a middlebox would otherwise hang the whole compaction pipeline forever
- * (frozen "Auto context-full maintenance…" spinner, manual /compact queueing
- * behind it). On timeout the caller falls back to local summarization.
+ * Hard ceiling on remote compaction HTTP requests (5 minutes). Unlike every
+ * provider stream (guarded by first-event/idle watchdogs in pi-ai), these are
+ * raw fetches awaiting one non-streamed JSON body — a connection silently
+ * dropped by a middlebox would otherwise hang the whole compaction pipeline
+ * forever (frozen "Auto context-full maintenance…" spinner, manual /compact
+ * queueing behind it). On timeout the caller falls back to local summarization.
  */
-export const REMOTE_COMPACTION_TIMEOUT_MS = 180_000;
+export const REMOTE_COMPACTION_TIMEOUT_MS = 300_000;
 
 const DEFAULT_AZURE_API_VERSION = "v1";
 
@@ -166,9 +180,23 @@ function probeRemoteCompactionInputBudget(
 
 function incompleteNativeItem(source: object, item: Record<string, unknown>): Record<string, unknown> {
 	const origin = getSourceOrigin(source);
-	return setSourceOrigin(item, origin?.kind === "source"
-		? { kind: "source", parts: origin.parts.map(part => ({ ...part, coverage: "derived", representation: "transformed-text", sourceSpan: undefined, currentSourceSpan: undefined, transportSpan: undefined, transportBlockIndex: undefined })) }
-		: origin ?? { kind: "unknown", reason: "unmapped-native-transform" });
+	return setSourceOrigin(
+		item,
+		origin?.kind === "source"
+			? {
+					kind: "source",
+					parts: origin.parts.map(part => ({
+						...part,
+						coverage: "derived",
+						representation: "transformed-text",
+						sourceSpan: undefined,
+						currentSourceSpan: undefined,
+						transportSpan: undefined,
+						transportBlockIndex: undefined,
+					})),
+				}
+			: (origin ?? { kind: "unknown", reason: "unmapped-native-transform" }),
+	);
 }
 
 function emittedNativeItem(source: object, item: Record<string, unknown>): Record<string, unknown> {
@@ -179,7 +207,8 @@ function emittedNativeItem(source: object, item: Record<string, unknown>): Recor
 		for (let index = 0; index < content.length; index++) {
 			const block = content[index];
 			const origin = block && typeof block === "object" ? getSourceOrigin(block) : undefined;
-			if (origin?.kind === "source") parts.push(...origin.parts.map(part => ({ ...part, transportBlockIndex: index })));
+			if (origin?.kind === "source")
+				parts.push(...origin.parts.map(part => ({ ...part, transportBlockIndex: index })));
 		}
 	}
 	return parts.length ? setSourceOrigin(item, { kind: "source", parts }) : transferSourceOrigin(source, item);
@@ -321,15 +350,22 @@ export interface RemoteCompactionResponse {
 // OpenAI provider gating + endpoint resolution
 // ============================================================================
 
-function isOpenAiRemoteCompactionApi(api: Api | undefined): boolean {
+export function isOpenAiRemoteCompactionApi(api: Api | undefined): boolean {
 	return api === "openai-responses" || api === "azure-openai-responses" || api === "openai-codex-responses";
 }
 
 export function shouldUseOpenAiRemoteCompaction(model: Model): boolean {
 	if (model.remoteCompaction?.enabled === false) return false;
-	if (model.provider === "openai" || model.provider === "openai-codex") return true;
+	const compactionApi = model.remoteCompaction?.api ?? model.api;
+	// ChatGPT's Codex backend exposes V2 compaction on /codex/responses, but
+	// does not expose the OpenAI V1 /responses/compact endpoint. Only use the
+	// V1 path for Codex when an explicit compatible endpoint was configured.
+	if (model.provider === "openai-codex") {
+		return (model.remoteCompaction?.endpoint?.trim().length ?? 0) > 0;
+	}
+	if (model.provider === "openai") return true;
 	if (model.remoteCompaction?.enabled !== true) return false;
-	return isOpenAiRemoteCompactionApi(model.remoteCompaction.api ?? model.api);
+	return isOpenAiRemoteCompactionApi(compactionApi);
 }
 
 function resolveOpenAiCompactEndpoint(model: Model): string {
@@ -406,7 +442,13 @@ export function getPreservedOpenAiRemoteCompactionData(
 ): OpenAiRemoteCompactionPreserveData | undefined {
 	const candidate = preserveData?.[OPENAI_REMOTE_COMPACTION_PRESERVE_KEY];
 	if (!candidate || typeof candidate !== "object") return undefined;
-	const maybeData = candidate as { provider?: unknown; replacementHistory?: unknown; replacementOrigins?: unknown; allUserSources?: unknown; compactionItem?: unknown };
+	const maybeData = candidate as {
+		provider?: unknown;
+		replacementHistory?: unknown;
+		replacementOrigins?: unknown;
+		allUserSources?: unknown;
+		compactionItem?: unknown;
+	};
 	if (!Array.isArray(maybeData.replacementHistory)) return undefined;
 	const maybeItem = maybeData.compactionItem;
 	if (!maybeItem || typeof maybeItem !== "object") return undefined;
@@ -589,11 +631,13 @@ export function buildOpenAiNativeHistory(
 						continue;
 					}
 					if (block.type === "image") {
-						contentBlocks.push(transferSourceOrigin(block, {
-							type: "input_image",
-							detail: "auto",
-							image_url: `data:${block.mimeType};base64,${block.data}`,
-						}));
+						contentBlocks.push(
+							transferSourceOrigin(block, {
+								type: "input_image",
+								detail: "auto",
+								image_url: `data:${block.mimeType};base64,${block.data}`,
+							}),
+						);
 					}
 				}
 			}
@@ -760,12 +804,17 @@ export function buildOpenAiNativeHistory(
 				if (message.providerMetadata?.type === "computer") {
 					const screenshot = cloneWithSourceOrigins(message.providerMetadata.screenshot);
 					const safetyChecks = cloneWithSourceOrigins(message.providerMetadata.acknowledgedSafetyChecks);
-					emit(setSourceOrigin({
-						type: "computer_call_output",
-						call_id: normalized.callId,
-						output: screenshot,
-						acknowledged_safety_checks: safetyChecks,
-					}, combineSourceOrigins([screenshot, ...safetyChecks])));
+					emit(
+						setSourceOrigin(
+							{
+								type: "computer_call_output",
+								call_id: normalized.callId,
+								output: screenshot,
+								acknowledged_safety_checks: safetyChecks,
+							},
+							combineSourceOrigins([screenshot, ...safetyChecks]),
+						),
+					);
 					msgIndex++;
 					continue;
 				}
@@ -800,29 +849,51 @@ export function buildOpenAiNativeHistory(
 // Endpoint requests
 // ============================================================================
 
-function historicalText(source: object, role: Message["role"], block: Record<string, unknown>, component?: string): Record<string, unknown> {
-	const item = { type: "input_text", text: JSON.stringify({ type: "historical_context", attribution: "agent", role, block }) };
+function historicalText(
+	source: object,
+	role: Message["role"],
+	block: Record<string, unknown>,
+	component?: string,
+): Record<string, unknown> {
+	const item = {
+		type: "input_text",
+		text: JSON.stringify({ type: "historical_context", attribution: "agent", role, block }),
+	};
 	const origin = getSourceOrigin(source);
 	if (origin?.kind !== "source") return transferSourceOrigin(source, item);
 	const sourceParts = component ? origin.parts.slice(0, 1) : origin.parts;
-	return setSourceOrigin(item, { kind: "source", parts: sourceParts.map(part => ({
-		...part, ...(component ? { blockIndex: component, sourceSpan: undefined } : {}),
-		representation: "json-quoted-block", transportSpan: undefined, transportBlockIndex: undefined,
-	})) });
+	return setSourceOrigin(item, {
+		kind: "source",
+		parts: sourceParts.map(part => ({
+			...part,
+			...(component ? { blockIndex: component, sourceSpan: undefined } : {}),
+			representation: "json-quoted-block",
+			transportSpan: undefined,
+			transportBlockIndex: undefined,
+		})),
+	});
 }
 
 function historicalMetadata(message: Message): Record<string, unknown> | undefined {
-	if (message.role === "toolResult") return {
-		type: "toolResult", toolCallId: message.toolCallId, toolName: message.toolName,
-		isError: message.isError, details: message.details,
-		...(message.providerMetadata?.type === "computer" ? { acknowledgedSafetyChecks: message.providerMetadata.acknowledgedSafetyChecks } : {}),
-	};
+	if (message.role === "toolResult")
+		return {
+			type: "toolResult",
+			toolCallId: message.toolCallId,
+			toolName: message.toolName,
+			isError: message.isError,
+			details: message.details,
+			...(message.providerMetadata?.type === "computer"
+				? { acknowledgedSafetyChecks: message.providerMetadata.acknowledgedSafetyChecks }
+				: {}),
+		};
 	return undefined;
 }
 
 /** Project the shared logical native traversal as historical request content. */
 function appendHistoricalNativeContent(
-	item: Record<string, unknown>, role: Message["role"], content: Array<Record<string, unknown>>,
+	item: Record<string, unknown>,
+	role: Message["role"],
+	content: Array<Record<string, unknown>>,
 ): void {
 	visitOpenAIResponsesLogicalContent(item, {
 		text: (logical, origin) => content.push(historicalText(setSourceOrigin(logical, origin), role, logical)),
@@ -834,94 +905,160 @@ function appendHistoricalNativeContent(
 export function buildOpenAiHistoricalInput(messages: readonly Message[]): Array<Record<string, unknown>> {
 	const items: Array<Record<string, unknown>> = [];
 	for (const message of messages) {
-		const content: Array<Record<string, unknown>> = [setSourceOrigin({ type: "input_text", text: JSON.stringify({ type: "historical_context", attribution: "agent", role: message.role }) }, { kind: "synthetic", reason: "historical-role-label" })];
+		const content: Array<Record<string, unknown>> = [
+			setSourceOrigin(
+				{
+					type: "input_text",
+					text: JSON.stringify({ type: "historical_context", attribution: "agent", role: message.role }),
+				},
+				{ kind: "synthetic", reason: "historical-role-label" },
+			),
+		];
 		const metadata = historicalMetadata(message);
 		if (metadata) content.push(historicalText(message, message.role, metadata, "metadata"));
-		if (typeof message.content === "string") content.push(historicalText(message, message.role, { type: "text", text: message.content }));
-		else for (const block of message.content) {
-			if (block.type === "image") {
-				content.push(transferSourceOrigin(block, { type: "input_image", detail: block.detail ?? "auto", image_url: `data:${block.mimeType};base64,${block.data}` }));
-				continue;
+		if (typeof message.content === "string")
+			content.push(historicalText(message, message.role, { type: "text", text: message.content }));
+		else
+			for (const block of message.content) {
+				if (block.type === "image") {
+					content.push(
+						transferSourceOrigin(block, {
+							type: "input_image",
+							detail: block.detail ?? "auto",
+							image_url: `data:${block.mimeType};base64,${block.data}`,
+						}),
+					);
+					continue;
+				}
+				const logical = getAssistantLogicalBlock(block);
+				if (logical) content.push(historicalText(block, message.role, logical));
 			}
-			const logical = getAssistantLogicalBlock(block);
-			if (logical) content.push(historicalText(block, message.role, logical));
-		}
 		if (message.role === "toolResult" && message.providerMetadata?.type === "computer") {
 			appendHistoricalNativeContent(message.providerMetadata.screenshot, message.role, content);
 		}
-		if (message.role === "assistant") visitOpenAIResponsesSourceContent(message, {
-			text: (logical, origin) => content.push(historicalText(setSourceOrigin(logical, origin), message.role, logical)),
-			image: (image, origin) => content.push(setSourceOrigin(materializeOpenAIResponsesImage(image), origin)),
-		});
+		if (message.role === "assistant")
+			visitOpenAIResponsesSourceContent(message, {
+				text: (logical, origin) =>
+					content.push(historicalText(setSourceOrigin(logical, origin), message.role, logical)),
+				image: (image, origin) => content.push(setSourceOrigin(materializeOpenAIResponsesImage(image), origin)),
+			});
 		if (content.length) items.push(emittedNativeItem(message, { type: "message", role: "user", content }));
 	}
 	return items;
 }
 
 /** Native calls/results remain executable; supplement only logical fields their serializer omits. */
-export function buildCompleteNativeAtomItems(nativeItems: Array<Record<string, unknown>>, messages: readonly Message[]): Array<Record<string, unknown>> {
+export function buildCompleteNativeAtomItems(
+	nativeItems: Array<Record<string, unknown>>,
+	messages: readonly Message[],
+): Array<Record<string, unknown>> {
 	const covered = new Set<string>();
 	const coveredImages = new Set<string>();
 	for (const item of nativeItems) {
 		const origin = getSourceOrigin(item);
-		if (origin?.kind === "source") for (const part of origin.parts) if (part.coverage === "full") covered.add(JSON.stringify([part.entryId, part.blockIndex]));
-		visitOpenAIResponsesLogicalContent(item, { image: (image, imageOrigin) => {
-			if (image.type !== "reference" || !image.input || imageOrigin.kind !== "source") return;
-			for (const part of imageOrigin.parts) if (part.coverage === "full") coveredImages.add(JSON.stringify([part.entryId, part.blockIndex]));
-		} });
+		if (origin?.kind === "source")
+			for (const part of origin.parts)
+				if (part.coverage === "full") covered.add(JSON.stringify([part.entryId, part.blockIndex]));
+		visitOpenAIResponsesLogicalContent(item, {
+			image: (image, imageOrigin) => {
+				if (image.type !== "reference" || !image.input || imageOrigin.kind !== "source") return;
+				for (const part of imageOrigin.parts)
+					if (part.coverage === "full") coveredImages.add(JSON.stringify([part.entryId, part.blockIndex]));
+			},
+		});
 	}
 	const supplements: Array<Record<string, unknown>> = [];
 	for (const message of messages) {
 		const content: Array<Record<string, unknown>> = [];
 		const metadata = historicalMetadata(message);
 		if (metadata) content.push(historicalText(message, message.role, metadata, "metadata"));
-		if (Array.isArray(message.content)) for (let index = 0; index < message.content.length; index++) {
-			const block = message.content[index]!;
-			const origin = getSourceOrigin(block);
-			const represented = origin?.kind === "source" && origin.parts.every(part => (block.type === "image" ? coveredImages : covered).has(JSON.stringify([part.entryId, part.blockIndex])));
-			if (block.type === "toolCall" && represented) {
-				const fields = { rawBlock: block.rawBlock, intent: block.intent, customWireName: block.customWireName,
-					...(block.providerMetadata?.type === "computer" ? { actions: block.providerMetadata.actions, pendingSafetyChecks: block.providerMetadata.pendingSafetyChecks } : {}) };
-				if (Object.values(fields).some(value => value !== undefined)) content.push(historicalText(block, message.role, fields, `${index}:metadata`));
-			} else if (block.type === "thinking" || !represented) {
-				if (block.type === "image") content.push(transferSourceOrigin(block, { type: "input_image", detail: block.detail ?? "auto", image_url: `data:${block.mimeType};base64,${block.data}` }));
-				else {
-					const logical = getAssistantLogicalBlock(block);
-					if (logical) content.push(historicalText(block, message.role, logical));
+		if (Array.isArray(message.content))
+			for (let index = 0; index < message.content.length; index++) {
+				const block = message.content[index]!;
+				const origin = getSourceOrigin(block);
+				const represented =
+					origin?.kind === "source" &&
+					origin.parts.every(part =>
+						(block.type === "image" ? coveredImages : covered).has(
+							JSON.stringify([part.entryId, part.blockIndex]),
+						),
+					);
+				if (block.type === "toolCall" && represented) {
+					const fields = {
+						rawBlock: block.rawBlock,
+						intent: block.intent,
+						customWireName: block.customWireName,
+						...(block.providerMetadata?.type === "computer"
+							? {
+									actions: block.providerMetadata.actions,
+									pendingSafetyChecks: block.providerMetadata.pendingSafetyChecks,
+								}
+							: {}),
+					};
+					if (Object.values(fields).some(value => value !== undefined))
+						content.push(historicalText(block, message.role, fields, `${index}:metadata`));
+				} else if (block.type === "thinking" || !represented) {
+					if (block.type === "image")
+						content.push(
+							transferSourceOrigin(block, {
+								type: "input_image",
+								detail: block.detail ?? "auto",
+								image_url: `data:${block.mimeType};base64,${block.data}`,
+							}),
+						);
+					else {
+						const logical = getAssistantLogicalBlock(block);
+						if (logical) content.push(historicalText(block, message.role, logical));
+					}
 				}
 			}
-		}
 		if (message.role === "toolResult" && message.providerMetadata?.type === "computer") {
 			const screenshot = message.providerMetadata.screenshot;
 			const origin = getSourceOrigin(screenshot);
-			if (origin?.kind !== "source" || !origin.parts.every(part => covered.has(JSON.stringify([part.entryId, part.blockIndex])))) {
+			if (
+				origin?.kind !== "source" ||
+				!origin.parts.every(part => covered.has(JSON.stringify([part.entryId, part.blockIndex])))
+			) {
 				appendHistoricalNativeContent(screenshot, message.role, content);
 			}
 		}
-		if (message.role === "assistant") visitOpenAIResponsesSourceContent(message, {
-			text: (logical, origin) => {
-				if (origin.kind !== "source" || !origin.parts.every(part => covered.has(JSON.stringify([part.entryId, part.blockIndex])))) {
-					content.push(historicalText(setSourceOrigin(logical, origin), message.role, logical));
-				}
-			},
-			image: (image, origin) => content.push(setSourceOrigin(materializeOpenAIResponsesImage(image), origin)),
-		});
+		if (message.role === "assistant")
+			visitOpenAIResponsesSourceContent(message, {
+				text: (logical, origin) => {
+					if (
+						origin.kind !== "source" ||
+						!origin.parts.every(part => covered.has(JSON.stringify([part.entryId, part.blockIndex])))
+					) {
+						content.push(historicalText(setSourceOrigin(logical, origin), message.role, logical));
+					}
+				},
+				image: (image, origin) => content.push(setSourceOrigin(materializeOpenAIResponsesImage(image), origin)),
+			});
 		if (content.length) supplements.push(emittedNativeItem(message, { type: "message", role: "user", content }));
 	}
 	return mergeSourceHistory(supplements, nativeItems);
 }
 
 /** Source-ID replacement, never content comparison or executable/historical duplication. */
-export function composeOpenAiHistoricalInput(input: Array<Record<string, unknown>>, userCandidates: Array<Record<string, unknown>>, nonUserMessages: readonly Message[]): Array<Record<string, unknown>> {
+export function composeOpenAiHistoricalInput(
+	input: Array<Record<string, unknown>>,
+	userCandidates: Array<Record<string, unknown>>,
+	nonUserMessages: readonly Message[],
+): Array<Record<string, unknown>> {
 	const nonUserIds = new Set<string>();
 	for (const message of nonUserMessages) {
 		const origin = getSourceOrigin(message);
 		if (origin?.kind === "source") for (const part of origin.parts) nonUserIds.add(part.entryId);
 		if (message.role === "toolResult" && message.providerMetadata?.type === "computer") {
 			const screenshotOrigin = getSourceOrigin(message.providerMetadata.screenshot);
-			if (screenshotOrigin?.kind === "source") for (const part of screenshotOrigin.parts) nonUserIds.add(part.entryId);
+			if (screenshotOrigin?.kind === "source")
+				for (const part of screenshotOrigin.parts) nonUserIds.add(part.entryId);
 		}
-		if (message.role === "assistant" && message.providerPayload?.type === "openaiResponsesHistory" && message.providerPayload.dt === true) {
+		if (
+			message.role === "assistant" &&
+			message.providerPayload?.type === "openaiResponsesHistory" &&
+			message.providerPayload.dt === true
+		) {
 			for (const item of message.providerPayload.items) {
 				const itemOrigin = getSourceOrigin(item);
 				if (itemOrigin?.kind === "source") for (const part of itemOrigin.parts) nonUserIds.add(part.entryId);
@@ -932,7 +1069,10 @@ export function composeOpenAiHistoricalInput(input: Array<Record<string, unknown
 		const origin = getSourceOrigin(item);
 		return origin?.kind !== "source" || !origin.parts.some(part => nonUserIds.has(part.entryId));
 	});
-	return unionNativeUserHistory(mergeSourceHistory(buildOpenAiHistoricalInput(nonUserMessages), ordinary), userCandidates);
+	return unionNativeUserHistory(
+		mergeSourceHistory(buildOpenAiHistoricalInput(nonUserMessages), ordinary),
+		userCandidates,
+	);
 }
 
 export async function requestOpenAiRemoteCompaction(
@@ -1059,7 +1199,8 @@ export async function requestOpenAiRemoteCompaction(
 
 	const data = (await response.json()) as { output?: unknown[] } | undefined;
 	const rawOutput = data?.output ?? [];
-	if (!rawOutput.every(item => isRecord(item))) throw new Error("Remote compaction response contains a non-object item");
+	if (!rawOutput.every(item => isRecord(item)))
+		throw new Error("Remote compaction response contains a non-object item");
 	const replacementHistory = rawOutput as Array<Record<string, unknown>>;
 	const compactionItem = replacementHistory.findLast((item): item is OpenAiRemoteCompactionItem => {
 		if (item.type === "compaction" && typeof item.encrypted_content === "string") return true;
@@ -1086,8 +1227,15 @@ export async function requestOpenAiRemoteCompaction(
 		const origin = getSourceOrigin(item);
 		if (origin?.kind === "source") allUserSources.push(...origin.parts);
 	}
-	for (const item of replacementHistory) setSourceOrigin(item, { kind: "unknown", reason: "v1-canonical-output-unmapped" });
-	return { provider: model.provider, replacementHistory, replacementOrigins: exportItemOrigins(replacementHistory), allUserSources, compactionItem };
+	for (const item of replacementHistory)
+		setSourceOrigin(item, { kind: "unknown", reason: "v1-canonical-output-unmapped" });
+	return {
+		provider: model.provider,
+		replacementHistory,
+		replacementOrigins: exportItemOrigins(replacementHistory),
+		allUserSources,
+		compactionItem,
+	};
 }
 
 /**

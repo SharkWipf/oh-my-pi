@@ -58,6 +58,7 @@ import {
 	type ToolResultMessage,
 	type Usage,
 } from "../types";
+import { resolveCopilotRequestIdentity } from "./github-copilot-headers";
 
 export type { OpenAIPromptCacheOptions } from "../types";
 
@@ -91,11 +92,14 @@ import { getOpenRouterHeaders } from "../utils/openrouter-headers";
 import { isForcedToolChoice } from "../utils/tool-choice";
 import {
 	buildCopilotDynamicHeaders,
+	getCachedCopilotIntegrationId,
+	getCopilotIntegrationCacheKey,
 	hasCopilotVisionInput,
 	resolveGitHubCopilotBaseUrl,
 } from "./github-copilot-headers";
+import { servedModelFromOpenRouterReasoning } from "./anthropic-signature";
 import type { ChatCompletionCreateParamsStreaming } from "./openai-chat-wire";
-import type { InputItem } from "./openai-codex/request-transformer";
+import { type InputItem, sanitizeCodexCallId } from "./openai-codex/request-transformer";
 import type {
 	Response as OpenAIResponse,
 	ResponseComputerToolCall,
@@ -202,6 +206,14 @@ export interface OpenAIRequestSetup {
 	headers: Record<string, string>;
 	query: Record<string, string> | undefined;
 	requestHeaders: Record<string, string>;
+	/** Working-identity cache key for this credential+host; undefined off the Copilot path. */
+	copilotCacheKey: string | undefined;
+	/**
+	 * Build-time cache provenance for the wrapper: the cached value the
+	 * outgoing headers were built from, or `null` when the cache was empty at
+	 * build. `undefined` off the Copilot path (wrapper rereads at dispatch).
+	 */
+	copilotCacheSnapshot: string | null | undefined;
 }
 
 function normalizeSakanaRequestBaseUrl(baseUrl: string | undefined): string | undefined {
@@ -254,6 +266,8 @@ export function resolveOpenAIRequestSetup(
 	}
 
 	let copilotPremiumRequests: number | undefined;
+	let copilotCacheKey: string | undefined;
+	let copilotCacheSnapshot: string | null | undefined;
 	let baseUrl = model.baseUrl;
 	if (model.provider === "moonshot") {
 		// Bundled `moonshot` catalog models hardcode the international endpoint
@@ -272,17 +286,25 @@ export function resolveOpenAIRequestSetup(
 		}
 	}
 	if (model.provider === "github-copilot") {
-		apiKey = parseGitHubCopilotApiKey(rawApiKey).accessToken;
+		const copilotApiKey = parseGitHubCopilotApiKey(rawApiKey);
+		apiKey = copilotApiKey.accessToken;
+		const copilotBaseUrl = resolveGitHubCopilotBaseUrl(model.baseUrl, rawApiKey) ?? model.baseUrl;
+		copilotCacheKey = getCopilotIntegrationCacheKey(rawApiKey, copilotBaseUrl);
+		const copilotCached = getCachedCopilotIntegrationId(copilotCacheKey);
 		const copilot = buildCopilotDynamicHeaders({
 			messages: options.messages,
 			hasImages: hasCopilotVisionInput(options.messages),
 			premiumMultiplier: model.premiumMultiplier,
 			headers,
 			initiatorOverride: options.initiatorOverride,
+			enterpriseUrl: copilotApiKey.enterpriseUrl,
+			integrationId: resolveCopilotRequestIdentity(options.extraHeaders),
+			cachedIntegrationId: copilotCached,
 		});
 		Object.assign(headers, copilot.headers);
 		copilotPremiumRequests = copilot.premiumRequests;
-		baseUrl = resolveGitHubCopilotBaseUrl(model.baseUrl, rawApiKey) ?? model.baseUrl;
+		baseUrl = copilotBaseUrl;
+		copilotCacheSnapshot = copilotCached ?? null;
 	}
 
 	if (model.provider === "alibaba-token-plan") {
@@ -347,7 +369,7 @@ export function resolveOpenAIRequestSetup(
 	if (apiKey !== NO_AUTH_SENTINEL) {
 		headers.Authorization ??= `Bearer ${apiKey}`;
 	}
-	return { copilotPremiumRequests, baseUrl, headers, query, requestHeaders };
+	return { copilotPremiumRequests, baseUrl, headers, query, requestHeaders, copilotCacheKey, copilotCacheSnapshot };
 }
 
 export function applyOpenAIServiceTier(
@@ -769,6 +791,32 @@ export function applyOpenAIExtraBody<P extends object>(
 }
 
 /**
+ * Normalize `content: null` to `[]` in place across a list of inbound wire
+ * message items.
+ *
+ * Codex (and other OpenAI clients) emit `content: null` on empty message items
+ * during multi-turn/tool turns; OpenAI tolerates it. Normalizing before the
+ * auth-gateway's request schema validation lets the item take the same path as
+ * an explicit empty content array — for both validation and any native
+ * history-replay clone — instead of 400ing. Shared by the `/v1/responses`
+ * (`input[]`) and `/v1/chat/completions` (`messages[]`) routes.
+ *
+ * `isEligible` lets a route skip items whose content is not array-typed, e.g.
+ * the chat `function` role whose content is `string | null`. See issue #10956.
+ */
+export function coerceNullMessageContentInPlace(
+	items: unknown,
+	isEligible?: (item: Record<string, unknown>) => boolean,
+): void {
+	if (!Array.isArray(items)) return;
+	for (const item of items) {
+		if (typeof item !== "object" || item === null || Array.isArray(item)) continue;
+		const record = item as Record<string, unknown>;
+		if (record.content === null && (isEligible?.(record) ?? true)) record.content = [];
+	}
+}
+
+/**
  * Chat Completions streaming request body shaped by the OpenAI-family providers.
  * (binary `thinking`, Qwen `enable_thinking`/`chat_template_kwargs`, Venice
  * `venice_parameters`, nested `reasoning`, gateway `provider`/`providerOptions`,
@@ -806,7 +854,7 @@ export interface ChatCompletionsReasoningOptions {
 
 export type OpenAICompatEndpoint = "chat-completions" | "responses";
 
-export type OpenAIReasoningDisableReason = "caller" | "forced-tool-choice" | "tool-choice" | "not-requested";
+export type OpenAIReasoningDisableReason = "caller" | "forced-tool-choice" | "tool-choice" | "tools" | "not-requested";
 
 export type OpenAICompatPolicyCompat = ResolvedOpenAISharedCompat &
 	Partial<ResolvedOpenAICompat> &
@@ -818,6 +866,7 @@ export interface ResolveOpenAICompatPolicyOptions {
 	reasoning?: string;
 	disableReasoning?: boolean;
 	toolChoice?: unknown;
+	hasTools?: boolean;
 	strictResponsesPairing?: boolean;
 	includeEncryptedReasoning?: boolean;
 	filterReasoningHistory?: boolean;
@@ -925,12 +974,19 @@ export function resolveOpenAICompatPolicy<TApi extends Api>(
 		!forcedToolChoiceSuppressesReasoning &&
 		baseCompat.disableReasoningOnToolChoice &&
 		options.toolChoice !== undefined;
+	const toolsSuppressReasoning =
+		!forcedToolChoiceSuppressesReasoning &&
+		!anyToolChoiceSuppressesReasoning &&
+		baseCompat.disableReasoningWithTools &&
+		options.hasTools === true;
 	const requestedAndAllowed = requestedEffort !== undefined && !options.disableReasoning && modelSupported;
 	const conflictDisableReason: OpenAIReasoningDisableReason | undefined = forcedToolChoiceSuppressesReasoning
 		? "forced-tool-choice"
 		: anyToolChoiceSuppressesReasoning
 			? "tool-choice"
-			: undefined;
+			: toolsSuppressReasoning
+				? "tools"
+				: undefined;
 	const disableReason: OpenAIReasoningDisableReason | undefined = options.disableReasoning
 		? "caller"
 		: conflictDisableReason;
@@ -1188,7 +1244,7 @@ export function applyChatCompletionsReasoningParams(
 	params: OpenAICompletionsParams,
 	model: Model<"openai-completions">,
 	compat: ResolvedOpenAICompat,
-	options: (ChatCompletionsReasoningOptions & { toolChoice?: unknown }) | undefined,
+	options: (ChatCompletionsReasoningOptions & { toolChoice?: unknown; hasTools?: boolean }) | undefined,
 ): void {
 	const policy = resolveOpenAICompatPolicy(model, {
 		endpoint: "chat-completions",
@@ -1196,6 +1252,7 @@ export function applyChatCompletionsReasoningParams(
 		reasoning: options?.reasoning,
 		disableReasoning: options?.disableReasoning,
 		toolChoice: options?.toolChoice,
+		hasTools: options?.hasTools,
 	});
 	applyChatCompletionsCompatPolicy(params, policy);
 	if (
@@ -1418,18 +1475,14 @@ export function normalizeResponsesToolCallIdForTransform(
 	model?: Model<Api>,
 	source?: AssistantMessage,
 ): string {
-	if (!id.includes("|")) return id;
+	const sep = id.search(/[\n|]/);
+	if (sep < 0 && id.length <= 64 && /^[a-zA-Z0-9_-]+$/.test(id)) return id;
 	const isForeignToolCall =
 		source != null && model != null && (source.provider !== model.provider || source.api !== model.api);
-	if (isForeignToolCall) {
-		const [callId, itemId] = id.split("|");
-		const normalizeIdPart = (part: string): string => {
-			const sanitized = part.replace(/[^a-zA-Z0-9_-]/g, "_");
-			const truncated = sanitized.length > 64 ? sanitized.slice(0, 64) : sanitized;
-			return truncated.replace(/_+$/, "");
-		};
-		const normalizedCallId = normalizeIdPart(callId);
-		let normalizedItemId = `fc_${Bun.hash(itemId).toString(36)}`;
+	if (isForeignToolCall || sep >= 0 || id.length > 64) {
+		const [callId, itemId] = sep > 0 ? [id.slice(0, sep), id.slice(sep + 1)] : [id, undefined];
+		const normalizedCallId = sanitizeCodexCallId(callId);
+		let normalizedItemId = itemId ? `fc_${Bun.hash(itemId).toString(36)}` : `fc_${Bun.hash(id).toString(36)}`;
 		if (normalizedItemId.length > 64) normalizedItemId = normalizedItemId.slice(0, 64);
 		return `${normalizedCallId}|${normalizedItemId}`;
 	}
@@ -1542,11 +1595,17 @@ export function repairOrphanResponsesToolOutputs(input: ResponseInput): Response
 		}
 		const ORPHAN_OUTPUT_LIMIT = 16_000;
 		if (text.length > ORPHAN_OUTPUT_LIMIT) text = `${text.slice(0, ORPHAN_OUTPUT_LIMIT)}\n...[truncated]`;
-		repaired.push(transferTransformedSourceOrigin(item, {
-			type: "message",
-			role: "assistant",
-			content: `[Orphan ${toolName} result; call_id=${callId}]: ${text}`,
-		} as ResponseInput[number], "derived"));
+		repaired.push(
+			transferTransformedSourceOrigin(
+				item,
+				{
+					type: "message",
+					role: "assistant",
+					content: `[Orphan ${toolName} result; call_id=${callId}]: ${text}`,
+				} as ResponseInput[number],
+				"derived",
+			),
+		);
 	}
 	return repaired ?? input;
 }
@@ -1597,19 +1656,29 @@ export function repairOrphanResponsesToolCalls(input: ResponseInput): ResponseIn
 			continue;
 		}
 		if (kind === "computer") {
-			repaired.push(setSourceOrigin({
-				type: "message",
-				role: "assistant",
-				content: `[Computer call interrupted before a screenshot was recorded; call_id=${callId}]`,
-			} as ResponseInput[number], { kind: "synthetic", reason: "interrupted-computer-call" }));
+			repaired.push(
+				setSourceOrigin(
+					{
+						type: "message",
+						role: "assistant",
+						content: `[Computer call interrupted before a screenshot was recorded; call_id=${callId}]`,
+					} as ResponseInput[number],
+					{ kind: "synthetic", reason: "interrupted-computer-call" },
+				),
+			);
 			continue;
 		}
 		repaired.push(item);
-		repaired.push(setSourceOrigin({
-			type: kind === "custom" ? "custom_tool_call_output" : "function_call_output",
-			call_id: callId,
-			output: ORPHAN_TOOL_CALL_PLACEHOLDER,
-		} as ResponseInput[number], { kind: "synthetic", reason: "interrupted-tool-output" }));
+		repaired.push(
+			setSourceOrigin(
+				{
+					type: kind === "custom" ? "custom_tool_call_output" : "function_call_output",
+					call_id: callId,
+					output: ORPHAN_TOOL_CALL_PLACEHOLDER,
+				} as ResponseInput[number],
+				{ kind: "synthetic", reason: "interrupted-tool-output" },
+			),
+		);
 	}
 	return repaired;
 }
@@ -1734,19 +1803,31 @@ export function convertResponsesInputContent(
 		const raw = item.text.toWellFormed();
 		const text = escapeControlTokens ? escapeHarmonyControlTokens(raw) : raw;
 		if (text.trim().length === 0) continue;
-		normalizedContent.push(responsesTextOrigin(item, {
-			type: "input_text",
-			text,
-		} satisfies ResponseInputText, item.text, text));
+		normalizedContent.push(
+			responsesTextOrigin(
+				item,
+				{
+					type: "input_text",
+					text,
+				} satisfies ResponseInputText,
+				item.text,
+				text,
+			),
+		);
 	}
 	for (const item of imageBlocks) {
 		normalizedContent.push(convertResponsesInputImage(item, supportsImageDetailOriginal));
 	}
 	if (omittedImages) {
-		normalizedContent.push(setSourceOrigin({
-			type: "input_text",
-			text: NON_VISION_IMAGE_PLACEHOLDER,
-		} satisfies ResponseInputText, { kind: "synthetic", reason: "omitted-image-placeholder" }));
+		normalizedContent.push(
+			setSourceOrigin(
+				{
+					type: "input_text",
+					text: NON_VISION_IMAGE_PLACEHOLDER,
+				} satisfies ResponseInputText,
+				{ kind: "synthetic", reason: "omitted-image-placeholder" },
+			),
+		);
 	}
 	return normalizedContent.length > 0 ? normalizedContent : undefined;
 }
@@ -1787,33 +1868,39 @@ function adaptResponsesReplayItemsForModel(
 	for (const item of input) {
 		if (!supportsCustomToolCalls && item.type === "custom_tool_call") {
 			changed = true;
-			adapted.push(transferTransformedSourceOrigin(item, {
-				type: "function_call",
-				...(item.id ? { id: item.id } : {}),
-				call_id: item.call_id,
-				name: resolveReplayCustomToolName(item.name, wireNameMap),
-				arguments: JSON.stringify({ input: item.input }),
-				...(item.namespace ? { namespace: item.namespace } : {}),
-			}));
+			adapted.push(
+				transferTransformedSourceOrigin(item, {
+					type: "function_call",
+					...(item.id ? { id: item.id } : {}),
+					call_id: item.call_id,
+					name: resolveReplayCustomToolName(item.name, wireNameMap),
+					arguments: JSON.stringify({ input: item.input }),
+					...(item.namespace ? { namespace: item.namespace } : {}),
+				}),
+			);
 			continue;
 		}
 		if (!supportsCustomToolCalls && item.type === "custom_tool_call_output") {
 			changed = true;
-			adapted.push(transferSourceOrigin(item, {
-				type: "function_call_output",
-				call_id: item.call_id,
-				output: item.output,
-			}));
+			adapted.push(
+				transferSourceOrigin(item, {
+					type: "function_call_output",
+					call_id: item.call_id,
+					output: item.output,
+				}),
+			);
 			continue;
 		}
 		if (!supportsComputerUse && (item.type === "computer_call" || item.type === "computer_call_output")) {
 			changed = true;
 			const callId = responseInputCallId(item) ?? "unknown";
-			adapted.push(transferTransformedSourceOrigin(item, {
-				type: "message",
-				role: "assistant",
-				content: `[Previous computer ${item.type === "computer_call" ? "call" : "result"}; call_id=${callId}]: ${stringifyJson(item) ?? ""}`,
-			} as ResponseInput[number]));
+			adapted.push(
+				transferTransformedSourceOrigin(item, {
+					type: "message",
+					role: "assistant",
+					content: `[Previous computer ${item.type === "computer_call" ? "call" : "result"}; call_id=${callId}]: ${stringifyJson(item) ?? ""}`,
+				} as ResponseInput[number]),
+			);
 			continue;
 		}
 		adapted.push(item);
@@ -1875,7 +1962,8 @@ export function escapeReplayedControlTokens(items: ResponseInput): ResponseInput
 			changed ||= next !== value;
 			return next;
 		};
-		const optionalText = <T extends string | null | undefined>(value: T): T => (typeof value === "string" ? text(value) : value) as T;
+		const optionalText = <T extends string | null | undefined>(value: T): T =>
+			(typeof value === "string" ? text(value) : value) as T;
 		const part = <T extends { text: string }>(value: T): T => {
 			const next = text(value.text);
 			return next === value.text ? value : transferTransformedSourceOrigin(value, { ...value, text: next });
@@ -1895,39 +1983,152 @@ export function escapeReplayedControlTokens(items: ResponseInput): ResponseInput
 		const escaped: ResponseInput[number] = (() => {
 			switch (item.type) {
 				case "function_call_output":
-					return { ...item, output: typeof item.output === "string" ? text(item.output) : item.output.map(value => value.type === "input_text" ? part(value) : value) };
+					return {
+						...item,
+						output:
+							typeof item.output === "string"
+								? text(item.output)
+								: item.output.map(value => (value.type === "input_text" ? part(value) : value)),
+					};
 				case "custom_tool_call_output":
-					return { ...item, output: typeof item.output === "string" ? text(item.output) : item.output.map(value => value.type === "input_text" ? part(value) : value) };
-				case "function_call": return { ...item, arguments: text(item.arguments, true) };
-				case "custom_tool_call": return { ...item, input: text(item.input) };
+					return {
+						...item,
+						output:
+							typeof item.output === "string"
+								? text(item.output)
+								: item.output.map(value => (value.type === "input_text" ? part(value) : value)),
+					};
+				case "function_call":
+					return { ...item, arguments: text(item.arguments, true) };
+				case "custom_tool_call":
+					return { ...item, input: text(item.input) };
 				case "computer_call": {
-					const action = item.action?.type === "type" ? { ...item.action, text: text(item.action.text) } : item.action;
-					const actions = item.actions?.map(action => action.type === "type" ? { ...action, text: text(action.text) } : action);
-					return { ...item, ...(action !== undefined ? { action } : {}), ...(actions !== undefined ? { actions } : {}), pending_safety_checks: item.pending_safety_checks.map(safetyCheck) };
+					const action =
+						item.action?.type === "type" ? { ...item.action, text: text(item.action.text) } : item.action;
+					const actions = item.actions?.map(action =>
+						action.type === "type" ? { ...action, text: text(action.text) } : action,
+					);
+					return {
+						...item,
+						...(action !== undefined ? { action } : {}),
+						...(actions !== undefined ? { actions } : {}),
+						pending_safety_checks: item.pending_safety_checks.map(safetyCheck),
+					};
 				}
-				case "computer_call_output": return { ...item, ...(item.acknowledged_safety_checks ? { acknowledged_safety_checks: item.acknowledged_safety_checks.map(safetyCheck) } : {}) };
+				case "computer_call_output":
+					return {
+						...item,
+						...(item.acknowledged_safety_checks
+							? { acknowledged_safety_checks: item.acknowledged_safety_checks.map(safetyCheck) }
+							: {}),
+					};
 				case "web_search_call": {
 					const action = item.action;
-					if (action.type === "search") return { ...item, action: { ...action, ...(action.query !== undefined ? { query: text(action.query) } : {}), ...(action.queries ? { queries: action.queries.map(query => text(query)) } : {}), ...(action.sources ? { sources: action.sources.map(source => ({ ...source, url: text(source.url) })) } : {}) } };
-					if (action.type === "find_in_page") return { ...item, action: { ...action, url: text(action.url), pattern: text(action.pattern) } };
+					if (action.type === "search")
+						return {
+							...item,
+							action: {
+								...action,
+								...(action.query !== undefined ? { query: text(action.query) } : {}),
+								...(action.queries ? { queries: action.queries.map(query => text(query)) } : {}),
+								...(action.sources
+									? { sources: action.sources.map(source => ({ ...source, url: text(source.url) })) }
+									: {}),
+							},
+						};
+					if (action.type === "find_in_page")
+						return { ...item, action: { ...action, url: text(action.url), pattern: text(action.pattern) } };
 					return { ...item, action: { ...action, url: optionalText(action.url) } };
 				}
-				case "file_search_call": return { ...item, queries: item.queries.map(query => text(query)), ...(item.results ? { results: item.results.map(result => ({ ...result, filename: optionalText(result.filename), text: optionalText(result.text) })) } : {}) };
-				case "reasoning": return { ...item, summary: item.summary.map(part), ...(item.content ? { content: item.content.map(part) } : {}) };
-				case "code_interpreter_call": return { ...item, code: optionalText(item.code), ...(item.outputs ? { outputs: item.outputs.map(output => output.type === "logs" ? { ...output, logs: text(output.logs) } : output) } : {}) };
-				case "mcp_call": return { ...item, arguments: text(item.arguments, true), ...(item.output !== undefined ? { output: optionalText(item.output) } : {}), ...(item.error !== undefined ? { error: optionalText(item.error) } : {}) };
-				case "mcp_list_tools": return { ...item, tools: item.tools.map(toolDescription), ...(item.error !== undefined ? { error: optionalText(item.error) } : {}) };
-				case "mcp_approval_request": return { ...item, arguments: text(item.arguments, true) };
-				case "mcp_approval_response": return { ...item, ...(item.reason !== undefined ? { reason: optionalText(item.reason) } : {}) };
-				case "shell_call": return { ...item, action: { ...item.action, commands: item.action.commands.map(command => text(command)) } };
-				case "shell_call_output": return { ...item, output: item.output.map(output => ({ ...output, stdout: text(output.stdout), stderr: text(output.stderr) })) };
-				case "local_shell_call": return { ...item, action: { ...item.action, command: item.action.command.map(command => text(command)), env: Object.fromEntries(Object.entries(item.action.env).map(([key, value]) => [key, text(value)])), ...(item.action.working_directory !== undefined ? { working_directory: optionalText(item.action.working_directory) } : {}) } };
-				case "local_shell_call_output": return { ...item, output: text(item.output, true) };
+				case "file_search_call":
+					return {
+						...item,
+						queries: item.queries.map(query => text(query)),
+						...(item.results
+							? {
+									results: item.results.map(result => ({
+										...result,
+										filename: optionalText(result.filename),
+										text: optionalText(result.text),
+									})),
+								}
+							: {}),
+					};
+				case "reasoning":
+					return {
+						...item,
+						summary: item.summary.map(part),
+						...(item.content ? { content: item.content.map(part) } : {}),
+					};
+				case "code_interpreter_call":
+					return {
+						...item,
+						code: optionalText(item.code),
+						...(item.outputs
+							? {
+									outputs: item.outputs.map(output =>
+										output.type === "logs" ? { ...output, logs: text(output.logs) } : output,
+									),
+								}
+							: {}),
+					};
+				case "mcp_call":
+					return {
+						...item,
+						arguments: text(item.arguments, true),
+						...(item.output !== undefined ? { output: optionalText(item.output) } : {}),
+						...(item.error !== undefined ? { error: optionalText(item.error) } : {}),
+					};
+				case "mcp_list_tools":
+					return {
+						...item,
+						tools: item.tools.map(toolDescription),
+						...(item.error !== undefined ? { error: optionalText(item.error) } : {}),
+					};
+				case "mcp_approval_request":
+					return { ...item, arguments: text(item.arguments, true) };
+				case "mcp_approval_response":
+					return { ...item, ...(item.reason !== undefined ? { reason: optionalText(item.reason) } : {}) };
+				case "shell_call":
+					return {
+						...item,
+						action: { ...item.action, commands: item.action.commands.map(command => text(command)) },
+					};
+				case "shell_call_output":
+					return {
+						...item,
+						output: item.output.map(output => ({
+							...output,
+							stdout: text(output.stdout),
+							stderr: text(output.stderr),
+						})),
+					};
+				case "local_shell_call":
+					return {
+						...item,
+						action: {
+							...item.action,
+							command: item.action.command.map(command => text(command)),
+							env: Object.fromEntries(Object.entries(item.action.env).map(([key, value]) => [key, text(value)])),
+							...(item.action.working_directory !== undefined
+								? { working_directory: optionalText(item.action.working_directory) }
+								: {}),
+						},
+					};
+				case "local_shell_call_output":
+					return { ...item, output: text(item.output, true) };
 				case "apply_patch_call": {
 					const operation = item.operation;
-					return { ...item, operation: operation.type === "delete_file" ? { ...operation, path: text(operation.path) } : { ...operation, path: text(operation.path), diff: text(operation.diff) } };
+					return {
+						...item,
+						operation:
+							operation.type === "delete_file"
+								? { ...operation, path: text(operation.path) }
+								: { ...operation, path: text(operation.path), diff: text(operation.diff) },
+					};
 				}
-				case "apply_patch_call_output": return { ...item, ...(item.output !== undefined ? { output: optionalText(item.output) } : {}) };
+				case "apply_patch_call_output":
+					return { ...item, ...(item.output !== undefined ? { output: optionalText(item.output) } : {}) };
 				case "tool_search_call": {
 					// This field is model-authored arguments, not an unknown metadata tree.
 					const serialized = stringifyJson(item.arguments);
@@ -1935,22 +2136,49 @@ export function escapeReplayedControlTokens(items: ResponseInput): ResponseInput
 					const escaped = text(serialized, true);
 					return escaped === serialized ? item : { ...item, arguments: JSON.parse(escaped) };
 				}
-				case "tool_search_output": case "additional_tools": return { ...item, tools: item.tools.map(definition) };
+				case "tool_search_output":
+				case "additional_tools":
+					return { ...item, tools: item.tools.map(definition) };
 			}
 			// EasyInputMessage may omit type; protocol-only and unknown items are not walked.
-			if ((item.type !== "message" && item.type !== undefined) || !("content" in item) || !("role" in item)) return item;
+			if ((item.type !== "message" && item.type !== undefined) || !("content" in item) || !("role" in item))
+				return item;
 			if (item.role === "assistant") {
 				if (!("status" in item) || !Array.isArray(item.content)) return item;
-				return { ...item, content: item.content.map(value => value.type === "output_text" ? part(value) : value.type === "refusal" ? { ...value, refusal: text(value.refusal) } : value) };
+				return {
+					...item,
+					content: item.content.map(value =>
+						value.type === "output_text"
+							? part(value)
+							: value.type === "refusal"
+								? { ...value, refusal: text(value.refusal) }
+								: value,
+					),
+				};
 			}
-			return { ...item, content: typeof item.content === "string" ? text(item.content) : item.content.map(value => value.type === "input_text" ? part(value) : value) };
+			return {
+				...item,
+				content:
+					typeof item.content === "string"
+						? text(item.content)
+						: item.content.map(value => (value.type === "input_text" ? part(value) : value)),
+			};
 		})();
 		if (!changed) return item;
 		transferTransformedSourceOrigin(item, escaped);
 		const original = getSourceOrigin(item);
 		const transformed = getSourceOrigin(escaped);
-		if (original?.kind === "source" && transformed?.kind === "source" && original.parts.some(part => part.representation === "original-image")) {
-			setSourceOrigin(escaped, { kind: "source", parts: transformed.parts.map((part, index) => original.parts[index]!.representation === "original-image" ? original.parts[index]! : part) });
+		if (
+			original?.kind === "source" &&
+			transformed?.kind === "source" &&
+			original.parts.some(part => part.representation === "original-image")
+		) {
+			setSourceOrigin(escaped, {
+				kind: "source",
+				parts: transformed.parts.map((part, index) =>
+					original.parts[index]!.representation === "original-image" ? original.parts[index]! : part,
+				),
+			});
 		}
 		if ("content" in escaped && Array.isArray(escaped.content)) responsesContentOrigin(escaped.content, escaped);
 		if ("output" in escaped && Array.isArray(escaped.output)) responsesContentOrigin(escaped.output, escaped);
@@ -1962,7 +2190,12 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 	const messages: ResponseInput = [];
 	const systemPrompts = options.systemRole ? normalizeSystemPrompts(options.context.systemPrompt) : [];
 	for (const systemPrompt of systemPrompts) {
-		messages.push(setSourceOrigin({ role: options.systemRole as "system" | "developer", content: systemPrompt }, { kind: "synthetic", reason: "system-prefix" }));
+		messages.push(
+			setSourceOrigin(
+				{ role: options.systemRole as "system" | "developer", content: systemPrompt },
+				{ kind: "synthetic", reason: "system-prefix" },
+			),
+		);
 	}
 
 	// Compat is resolved by the catalog (e.g. Copilot / xai-oauth reject
@@ -2038,15 +2271,17 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 				options.developerStringContent && msg.role === "developer" && typeof msg.content === "string"
 					? msg.content.toWellFormed()
 					: undefined;
-			messages.push(responsesContentOrigin(content, {
-				role: "user",
-				content:
-					developerText !== undefined
-						? escapeControlTokens
-							? escapeHarmonyControlTokens(developerText)
-							: developerText
-						: content,
-			}));
+			messages.push(
+				responsesContentOrigin(content, {
+					role: "user",
+					content:
+						developerText !== undefined
+							? escapeControlTokens
+								? escapeHarmonyControlTokens(developerText)
+								: developerText
+							: content,
+				}),
+			);
 		} else if (msg.role === "assistant") {
 			const assistantMsg = msg as AssistantMessage;
 			// Providers replay stale native items even when the current request has
@@ -2138,10 +2373,16 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 		msgIndex++;
 	}
 
-	const hoisted = hoistInterleavedResponsesToolBatchMessages(messages);
-	const withRepairedOutputs = options.repairOrphanOutputs ? repairOrphanResponsesToolOutputs(hoisted) : hoisted;
+	// Repair orphan outputs/calls first: both can inject an assistant `message`
+	// (an `[Orphan … result]` note, a `[Computer call interrupted …]` note) in
+	// place of, or beside, a tool item — wedging it between another call's
+	// `function_call` and `function_call_output`. Hoist runs last so it relocates
+	// any wedged message — model-streamed or repair-injected — out of the batch,
+	// preserving the Responses call→output pairing (#11473, extends #8789).
+	const withRepairedOutputs = options.repairOrphanOutputs ? repairOrphanResponsesToolOutputs(messages) : messages;
 	const withRepairedCalls = repairOrphanResponsesToolCalls(withRepairedOutputs);
-	return stripUnpairedOpenAIResponsesComputerReasoningIdsForReplay(withRepairedCalls);
+	const hoisted = hoistInterleavedResponsesToolBatchMessages(withRepairedCalls);
+	return stripUnpairedOpenAIResponsesComputerReasoningIdsForReplay(hoisted);
 }
 
 type ResponsesReplayAssistantMessage = Omit<ResponseOutputMessage, "id"> & { id?: string };
@@ -2268,24 +2509,32 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 		if (block.providerMetadata?.type === "computer") {
 			if (model.supportsComputerUse !== true) {
 				const callId = normalizeResponsesToolCallId(block.id, "ctc").callId;
-				outputItems.push(transferTransformedSourceOrigin(block, {
-					type: "message",
-					role: "assistant",
-					content: `[Previous computer call; call_id=${callId}]: ${stringifyJson(block.providerMetadata.actions) ?? ""}`,
-				} as ResponseInput[number], "derived"));
+				outputItems.push(
+					transferTransformedSourceOrigin(
+						block,
+						{
+							type: "message",
+							role: "assistant",
+							content: `[Previous computer call; call_id=${callId}]: ${stringifyJson(block.providerMetadata.actions) ?? ""}`,
+						} as ResponseInput[number],
+						"derived",
+					),
+				);
 				continue;
 			}
 			const normalized = normalizeResponsesToolCallId(block.id, "ctc");
 			knownCallIds.add(normalized.callId);
 			computerCallIds?.add(normalized.callId);
-			outputItems.push(transferSourceOrigin(block, {
-				type: "computer_call",
-				id: block.providerMetadata.providerItemId,
-				call_id: normalized.callId,
-				actions: structuredCloneJSON(block.providerMetadata.actions),
-				pending_safety_checks: structuredCloneJSON(block.providerMetadata.pendingSafetyChecks),
-				status: "completed",
-			} as ResponseInput[number]));
+			outputItems.push(
+				transferSourceOrigin(block, {
+					type: "computer_call",
+					id: block.providerMetadata.providerItemId,
+					call_id: normalized.callId,
+					actions: structuredCloneJSON(block.providerMetadata.actions),
+					pending_safety_checks: structuredCloneJSON(block.providerMetadata.pendingSafetyChecks),
+					status: "completed",
+				} as ResponseInput[number]),
+			);
 			continue;
 		}
 		const normalized = normalizeResponsesToolCallId(block.id, block.customWireName ? "ctc" : "fc");
@@ -2305,26 +2554,30 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 		if (block.customWireName && supportsCustomToolCalls) {
 			const rawInput = typeof block.arguments?.input === "string" ? block.arguments.input : "";
 			customCallIds?.add(normalized.callId);
-			outputItems.push(transferSourceOrigin(block, {
-				type: "custom_tool_call",
-				...(itemId ? { id: itemId } : {}),
-				call_id: normalized.callId,
-				name: block.customWireName,
-				input: rawInput,
-			} as ResponseInput[number]));
+			outputItems.push(
+				transferSourceOrigin(block, {
+					type: "custom_tool_call",
+					...(itemId ? { id: itemId } : {}),
+					call_id: normalized.callId,
+					name: block.customWireName,
+					input: rawInput,
+				} as ResponseInput[number]),
+			);
 			continue;
 		}
 		const functionName =
 			block.customWireName && !supportsCustomToolCalls
 				? resolveReplayCustomToolName(block.customWireName, customToolWireNameMap)
 				: block.name;
-		outputItems.push(transferSourceOrigin(block, {
-			type: "function_call",
-			...(itemId ? { id: itemId } : {}),
-			call_id: normalized.callId,
-			name: functionName,
-			arguments: stringifyJson(block.arguments) ?? "null",
-		}));
+		outputItems.push(
+			transferSourceOrigin(block, {
+				type: "function_call",
+				...(itemId ? { id: itemId } : {}),
+				call_id: normalized.callId,
+				name: functionName,
+				arguments: stringifyJson(block.arguments) ?? "null",
+			}),
+		);
 	}
 
 	if (requiresReasoningItem && !reasoningItemEmitted && outputItems.length > 0) {
@@ -2335,25 +2588,33 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 		// reasoning dropped by compaction/archive budget) the carried text is
 		// empty — and DeepSeek-family targets reject an empty `reasoning_text`
 		// exactly like a missing item (#10690), so substitute a non-empty
-		// placeholder. The `id` still prefers a surviving upstream item id.
+		// placeholder. The `id` is only set when an upstream item id survived:
+		// providers that validate reasoning ids against their own store (Meta via
+		// OpenRouter) reject a fabricated `rs_…` with "Referenced reasoning item
+		// … was not found or has expired", and the targets that need the item
+		// (DeepSeek, Kimi, Meta) all accept it without an id.
 		const carriedReasoningText = carriedReasoningTexts.join("\n");
 		const reasoningText =
 			carriedReasoningText.length > 0 ? carriedReasoningText : SYNTHETIC_REASONING_REPLAY_PLACEHOLDER;
-		const reasoningId =
-			synthesizedReasoningItemId ?? `rs_${Bun.hash(`${model.id}:${msgIndex}:${reasoningText}`).toString(36)}`;
-		const reasoningItem: ResponseReasoningItem = {
+		const reasoningItem = {
 			type: "reasoning",
-			id: reasoningId,
+			...(synthesizedReasoningItemId ? { id: synthesizedReasoningItemId } : {}),
 			summary: [],
 			content: [{ type: "reasoning_text", text: reasoningText }],
-		};
+		} satisfies Omit<ResponseReasoningItem, "id"> & Partial<Pick<ResponseReasoningItem, "id">>;
 		if (carriedReasoningText.length > 0) {
-			setSourceOrigin(reasoningItem, combineSourceOrigins(assistantMsg.content.filter(block => block.type === "thinking" && block.thinking.trim().length > 0)));
+			setSourceOrigin(
+				reasoningItem,
+				combineSourceOrigins(
+					assistantMsg.content.filter(block => block.type === "thinking" && block.thinking.trim().length > 0),
+				),
+			);
 			transferTransformedSourceOrigin(reasoningItem, reasoningItem);
 		} else {
 			setSourceOrigin(reasoningItem, { kind: "synthetic", reason: "reasoning-replay-placeholder" });
 		}
-		outputItems.unshift(reasoningItem);
+		// The vendored SDK type requires an id; the wire accepts its absence.
+		outputItems.unshift(reasoningItem as ResponseReasoningItem);
 	}
 
 	return outputItems;
@@ -2409,10 +2670,15 @@ export function encodeResponsesToolResultOutput<TApi extends Api>(
 					if (block.type === "image") return convertResponsesInputImage(block, supportsImageDetailOriginal);
 					const text = block.text.toWellFormed();
 					const emitted = escapeControlTokens ? escapeHarmonyControlTokens(text) : text;
-					return responsesTextOrigin(block, {
-						type: "input_text",
-						text: emitted,
-					}, block.text, emitted);
+					return responsesTextOrigin(
+						block,
+						{
+							type: "input_text",
+							text: emitted,
+						},
+						block.text,
+						emitted,
+					);
 				})
 			: outputText;
 	return { output, outputText };
@@ -2433,13 +2699,20 @@ function responsesToolTextOrigin(toolResult: ToolResultMessage, model: Model<Api
 		for (const part of origin.parts) {
 			const { transportBlockIndex: _index, ...sourcePart } = part;
 			if (block.text === emitted) {
-				parts.push({ ...sourcePart, transportSpan: {
-					start: offset + (part.transportSpan?.start ?? 0),
-					end: offset + (part.transportSpan?.end ?? emitted.length),
-				} });
+				parts.push({
+					...sourcePart,
+					transportSpan: {
+						start: offset + (part.transportSpan?.start ?? 0),
+						end: offset + (part.transportSpan?.end ?? emitted.length),
+					},
+				});
 			} else {
 				const { sourceSpan: _span, ...transformedPart } = sourcePart;
-				parts.push({ ...transformedPart, representation: "transformed-text", transportSpan: { start: offset, end: offset + emitted.length } });
+				parts.push({
+					...transformedPart,
+					representation: "transformed-text",
+					transportSpan: { start: offset, end: offset + emitted.length },
+				});
 			}
 		}
 		offset += emitted.length;
@@ -2471,41 +2744,58 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 	};
 	const normalized = normalizeResponsesToolCallId(toolResult.toolCallId);
 	if (toolResult.providerMetadata?.type === "computer" && model.supportsComputerUse !== true) {
-		messages.push(transferTransformedSourceOrigin(toolResult.providerMetadata.screenshot, {
-			type: "message",
-			role: "assistant",
-			content: `[Previous computer result; call_id=${normalized.callId}]: ${stringifyJson(toolResult.providerMetadata.screenshot) ?? ""}`,
-		} as ResponseInput[number], "derived"));
+		messages.push(
+			transferTransformedSourceOrigin(
+				toolResult.providerMetadata.screenshot,
+				{
+					type: "message",
+					role: "assistant",
+					content: `[Previous computer result; call_id=${normalized.callId}]: ${stringifyJson(toolResult.providerMetadata.screenshot) ?? ""}`,
+				} as ResponseInput[number],
+				"derived",
+			),
+		);
 		return;
 	}
 	if (computerCallIds?.has(normalized.callId)) {
 		if (toolResult.providerMetadata?.type !== "computer") {
 			const limit = 16_000;
 			const noteText = outputText.length > limit ? `${outputText.slice(0, limit)}\n...[truncated]` : outputText;
-			emitOutput({
-				type: "message",
-				role: "assistant",
-				content: `[Computer tool failed before a screenshot was produced; call_id=${normalized.callId}]: ${noteText}`,
-			} as ResponseInput[number], true);
+			emitOutput(
+				{
+					type: "message",
+					role: "assistant",
+					content: `[Computer tool failed before a screenshot was produced; call_id=${normalized.callId}]: ${noteText}`,
+				} as ResponseInput[number],
+				true,
+			);
 			return;
 		}
 		if (strictResponsesPairing && !knownCallIds.has(normalized.callId)) {
-			messages.push(setSourceOrigin({
-				type: "message",
-				role: "assistant",
-				content: `[Orphan computer result; call_id=${normalized.callId}]`,
-			} as ResponseInput[number], { kind: "synthetic", reason: "orphan-computer-result" }));
+			messages.push(
+				setSourceOrigin(
+					{
+						type: "message",
+						role: "assistant",
+						content: `[Orphan computer result; call_id=${normalized.callId}]`,
+					} as ResponseInput[number],
+					{ kind: "synthetic", reason: "orphan-computer-result" },
+				),
+			);
 			return;
 		}
 		const screenshot = cloneWithSourceOrigins(toolResult.providerMetadata.screenshot);
 		setSourceOrigin(screenshot, combineContentSourceOrigins([screenshot]));
 		const safetyChecks = cloneWithSourceOrigins(toolResult.providerMetadata.acknowledgedSafetyChecks);
-		const item = setSourceOrigin({
-			type: "computer_call_output",
-			call_id: normalized.callId,
-			output: screenshot,
-			acknowledged_safety_checks: safetyChecks,
-		} as ResponseInput[number], combineSourceOrigins([screenshot, ...(safetyChecks ?? [])]));
+		const item = setSourceOrigin(
+			{
+				type: "computer_call_output",
+				call_id: normalized.callId,
+				output: screenshot,
+				acknowledged_safety_checks: safetyChecks,
+			} as ResponseInput[number],
+			combineSourceOrigins([screenshot, ...(safetyChecks ?? [])]),
+		);
 		messages.push(isHarmonyDialectModel(model) ? escapeReplayedControlTokens([item])[0] : item);
 		return;
 	}
@@ -2515,11 +2805,14 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 		// into an assistant note instead (same shape as repairOrphanResponsesToolOutputs).
 		const limit = 16_000;
 		const noteText = outputText.length > limit ? `${outputText.slice(0, limit)}\n...[truncated]` : outputText;
-		emitOutput({
-			type: "message",
-			role: "assistant",
-			content: `[Orphan ${toolResult.toolName || "tool"} result; call_id=${normalized.callId}]: ${noteText}`,
-		} as ResponseInput[number], true);
+		emitOutput(
+			{
+				type: "message",
+				role: "assistant",
+				content: `[Orphan ${toolResult.toolName || "tool"} result; call_id=${normalized.callId}]: ${noteText}`,
+			} as ResponseInput[number],
+			true,
+		);
 		return;
 	}
 	if (supportsCustomToolCalls && customCallIds?.has(normalized.callId)) {
@@ -2550,21 +2843,38 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
  */
 type ResponsesToolCallBlock = ToolCall & { [kStreamingPartialJson]: string; [kStreamingLastParseLen]?: number };
 
+// Proxies sometimes send payloadless progress frames. They carry no text; a
+// supplied non-string payload is malformed output, not an empty delta.
+function optionalResponsesText(value: unknown, field: string): string | undefined {
+	if (value === undefined) return undefined;
+	if (typeof value !== "string") throw new TypeError(`Invalid Responses ${field}: expected a string`);
+	return value;
+}
+
 function ensureReasoningSummaryPart(
 	item: ResponseReasoningItem,
-	summaryIndex: number,
+	summaryIndex: number | undefined,
 ): ResponseReasoningItem["summary"][number] {
 	item.summary = item.summary || [];
+	if (summaryIndex === undefined) summaryIndex = Math.max(0, item.summary.length - 1);
+	if (!Number.isSafeInteger(summaryIndex) || summaryIndex < 0) {
+		throw new TypeError("Invalid Responses summary_index: expected a non-negative integer");
+	}
 	while (item.summary.length <= summaryIndex) {
 		item.summary.push({ type: "summary_text", text: "" });
 	}
-	return item.summary[summaryIndex]!;
+	const part = item.summary[summaryIndex]!;
+	part.text = optionalResponsesText(part.text, "summary text") ?? "";
+	return part;
 }
 
 export function appendReasoningSummaryPart(
 	item: ResponseReasoningItem,
-	part: ResponseReasoningItem["summary"][number],
+	part: ResponseReasoningItem["summary"][number] | undefined,
 ): void {
+	if (part === undefined) return;
+	if (part?.type !== "summary_text") throw new TypeError("Invalid Responses reasoning summary part");
+	part.text = optionalResponsesText(part.text, "summary text") ?? "";
 	item.summary = item.summary || [];
 	item.summary.push(part);
 }
@@ -2699,8 +3009,10 @@ export function appendReasoningSummaryTextDelta(
 	stream: AssistantMessageEventStream,
 	output: AssistantMessage,
 	contentIndex: number,
-	summaryIndex = 0,
+	summaryIndex?: number,
 ): void {
+	delta = optionalResponsesText(delta, "reasoning summary delta") ?? "";
+	if (!delta) return;
 	const part = ensureReasoningSummaryPart(item, summaryIndex);
 	if (!part.text && delta && (!delta.trimStart() || delta.trimStart().startsWith("{"))) {
 		pendingReasoningEnvelopes.set(block, { part, prefix: block.thinking });
@@ -2724,12 +3036,21 @@ export function applyReasoningSummaryTextDone(
 	output: AssistantMessage,
 	contentIndex: number,
 ): void {
+	const snapshot = optionalResponsesText(text, "reasoning summary text");
+	if (snapshot === undefined) return;
+	text = snapshot;
 	const part = ensureReasoningSummaryPart(item, summaryIndex);
 	const previous = part.text;
 	part.text = text;
 	const pending = pendingReasoningEnvelopes.get(block);
 	if (!pending && (!text || text === previous)) return;
-	const display = (pending?.prefix ?? "") + decodeReasoningEnvelope(text);
+	const previousDisplay = decodeReasoningEnvelope(previous);
+	const prefix =
+		pending?.prefix ??
+		(block.thinking.endsWith(previousDisplay)
+			? block.thinking.slice(0, block.thinking.length - previousDisplay.length)
+			: "");
+	const display = prefix + decodeReasoningEnvelope(text);
 	pendingReasoningEnvelopes.delete(block);
 	if (display.startsWith(block.thinking)) {
 		const delta = display.slice(block.thinking.length);
@@ -2812,6 +3133,8 @@ export function appendMessageTextDelta(
 	contentIndex: number,
 	partType: "output_text" | "refusal",
 ): void {
+	delta = optionalResponsesText(delta, "message delta") ?? "";
+	if (!delta) return;
 	item.content = item.content || [];
 	let lastPart = item.content[item.content.length - 1];
 	if (lastPart?.type !== partType) {
@@ -2825,11 +3148,40 @@ export function appendMessageTextDelta(
 	}
 	block.text += delta;
 	if (lastPart.type === "output_text") {
-		lastPart.text += delta;
+		lastPart.text = (optionalResponsesText(lastPart.text, "output text") ?? "") + delta;
 	} else {
-		lastPart.refusal += delta;
+		lastPart.refusal = (optionalResponsesText(lastPart.refusal, "refusal") ?? "") + delta;
 	}
 	stream.push({ type: "text_delta", contentIndex, delta, partial: output });
+}
+
+/** Recover text omitted from delta frames without replaying an already streamed prefix. */
+function applyMessageTextDone(
+	item: ResponseOutputMessage,
+	block: TextContent,
+	text: string,
+	stream: AssistantMessageEventStream,
+	output: AssistantMessage,
+	contentIndex: number,
+	partType: "output_text" | "refusal",
+): void {
+	const snapshot = optionalResponsesText(text, "message text");
+	if (snapshot === undefined) return;
+	const lastPart = item.content?.[item.content.length - 1];
+	const previous =
+		lastPart?.type === partType
+			? (optionalResponsesText(lastPart.type === "output_text" ? lastPart.text : lastPart.refusal, "message text") ??
+				"")
+			: "";
+	if (snapshot.startsWith(previous)) {
+		appendMessageTextDelta(item, block, snapshot.slice(previous.length), stream, output, contentIndex, partType);
+	} else if (lastPart?.type === partType) {
+		// A correction cannot be represented as an append-only delta. Keep it for
+		// the completed block rather than appending contradictory text.
+		if (lastPart.type === "output_text") lastPart.text = snapshot;
+		else lastPart.refusal = snapshot;
+		block.text = finalizeMessageText(item, block.text);
+	}
 }
 /** Chooses final message text while treating non-empty terminal content as authoritative. */
 export function finalizeMessageText(item: ResponseOutputMessage, streamedText: string): string {
@@ -2858,6 +3210,8 @@ export function accumulateToolCallArgumentsDelta(
 	output: AssistantMessage,
 	contentIndex: number,
 ): void {
+	delta = optionalResponsesText(delta, "function call arguments delta") ?? "";
+	if (!delta) return;
 	block[kStreamingPartialJson] += delta;
 	const throttled = parseStreamingJsonThrottled(block[kStreamingPartialJson], block[kStreamingLastParseLen] ?? 0);
 	if (throttled) {
@@ -2886,6 +3240,8 @@ export function accumulateCustomToolCallInputDelta(
 	output: AssistantMessage,
 	contentIndex: number,
 ): void {
+	delta = optionalResponsesText(delta, "custom tool input delta") ?? "";
+	if (!delta) return;
 	block[kStreamingPartialJson] += delta;
 	block.arguments = { input: block[kStreamingPartialJson] };
 	stream.push({ type: "toolcall_delta", contentIndex, delta, partial: output });
@@ -3174,8 +3530,23 @@ export async function processResponsesStream<TApi extends Api>(
 		if (entry && identifierlessFunctionDeltaTarget === entry) identifierlessFunctionDeltaTarget = undefined;
 		if (entry && lastOpenItem === entry) lastOpenItem = null;
 	};
-	const contentIndexOf = (block: ThinkingContent | TextContent | StreamingToolCallBlock): number =>
-		output.content.indexOf(block);
+	// Content blocks are append-only for the lifetime of the stream, so each
+	// block's index is stable once pushed. Map block → index to keep the
+	// per-delta contentIndex lookup O(1); the legacy linear scan would turn a
+	// long turn (many blocks × many deltas) quadratic and is what pegs the
+	// shared JS main thread on streaming-heavy sessions (issue #10605).
+	const contentIndexByBlock = new Map<object, number>();
+	const pushContentBlock = (block: ThinkingContent | TextContent | StreamingToolCallBlock | ToolCall): void => {
+		contentIndexByBlock.set(block, output.content.length);
+		output.content.push(block);
+	};
+	const contentIndexOf = (block: ThinkingContent | TextContent | StreamingToolCallBlock): number => {
+		const index = contentIndexByBlock.get(block);
+		// Blocks appended outside this closure (e.g. images via
+		// appendResponsesImageResult) never route through contentIndexOf, but
+		// keep the fallback so an unexpected lookup stays correct.
+		return index ?? output.content.indexOf(block);
+	};
 
 	let sawFirstToken = false;
 	// Whether the current stream produced a completed native `web_search_call`
@@ -3195,7 +3566,7 @@ export async function processResponsesStream<TApi extends Api>(
 			const item = event.item;
 			if (item.type === "reasoning") {
 				const block: ThinkingContent = { type: "thinking", thinking: "", itemId: item.id };
-				output.content.push(block);
+				pushContentBlock(block);
 				registerOpenItem(event.output_index, item.id, { item, block });
 				stream.push({ type: "thinking_start", contentIndex: contentIndexOf(block), partial: output });
 			} else if (item.type === "message") {
@@ -3204,7 +3575,7 @@ export async function processResponsesStream<TApi extends Api>(
 					text: "",
 					textSignature: encodeTextSignatureV1(item.id, item.phase ?? undefined),
 				};
-				output.content.push(block);
+				pushContentBlock(block);
 				registerOpenItem(event.output_index, item.id, { item, block });
 				stream.push({ type: "text_start", contentIndex: contentIndexOf(block), partial: output });
 			} else if (item.type === "function_call") {
@@ -3215,7 +3586,7 @@ export async function processResponsesStream<TApi extends Api>(
 					arguments: {},
 					[kStreamingPartialJson]: item.arguments || "",
 				};
-				output.content.push(block);
+				pushContentBlock(block);
 				registerOpenItem(
 					event.output_index,
 					item.id,
@@ -3233,7 +3604,7 @@ export async function processResponsesStream<TApi extends Api>(
 					providerMetadata: computerCallMetadata(item),
 					[kStreamingPartialJson]: "",
 				};
-				output.content.push(block);
+				pushContentBlock(block);
 				registerOpenItem(event.output_index, item.id, { item, block }, item.call_id);
 				stream.push({ type: "toolcall_start", contentIndex: contentIndexOf(block), partial: output });
 			} else if (item.type === "custom_tool_call") {
@@ -3251,7 +3622,7 @@ export async function processResponsesStream<TApi extends Api>(
 					// accumulation buffer so later code that inspects the field still works.
 					[kStreamingPartialJson]: item.input ?? "",
 				};
-				output.content.push(block);
+				pushContentBlock(block);
 				registerOpenItem(
 					event.output_index,
 					item.id,
@@ -3298,8 +3669,9 @@ export async function processResponsesStream<TApi extends Api>(
 		} else if (event.type === "response.reasoning_text.delta") {
 			// Buffer raw text until completion: a later readable summary takes precedence.
 			const entry = lookupOpenItem(event);
-			if (entry?.item.type === "reasoning" && entry.block.type === "thinking") {
-				entry.rawThinking = (entry.rawThinking ?? "") + event.delta;
+			const delta = optionalResponsesText(event.delta, "reasoning delta");
+			if (entry?.item.type === "reasoning" && entry.block.type === "thinking" && delta) {
+				entry.rawThinking = (entry.rawThinking ?? "") + delta;
 			}
 		} else if (event.type === "response.content_part.added") {
 			const entry = lookupOpenItem(event);
@@ -3330,6 +3702,19 @@ export async function processResponsesStream<TApi extends Api>(
 					"refusal",
 				);
 			}
+		} else if (event.type === "response.output_text.done" || event.type === "response.refusal.done") {
+			const entry = lookupOpenItem(event);
+			if (entry?.item.type === "message" && entry.block.type === "text") {
+				applyMessageTextDone(
+					entry.item,
+					entry.block,
+					event.type === "response.output_text.done" ? event.text : event.refusal,
+					stream,
+					output,
+					contentIndexOf(entry.block),
+					event.type === "response.output_text.done" ? "output_text" : "refusal",
+				);
+			}
 		} else if (event.type === "response.function_call_arguments.delta") {
 			const entry = lookupOpenFunctionCallItem(event);
 			if (entry?.item.type === "function_call" && entry.block.type === "toolCall") {
@@ -3337,8 +3722,9 @@ export async function processResponsesStream<TApi extends Api>(
 			}
 		} else if (event.type === "response.function_call_arguments.done") {
 			const entry = lookupOpenFunctionCallItem(event);
-			if (entry?.item.type === "function_call" && entry.block.type === "toolCall") {
-				finalizeToolCallArgumentsDone(entry.block, event.arguments);
+			const args = optionalResponsesText(event.arguments, "function call arguments");
+			if (entry?.item.type === "function_call" && entry.block.type === "toolCall" && args !== undefined) {
+				finalizeToolCallArgumentsDone(entry.block, args);
 				entry.block[kStreamingArgumentsDone] = true;
 			}
 		} else if (event.type === "response.custom_tool_call_input.delta") {
@@ -3348,8 +3734,9 @@ export async function processResponsesStream<TApi extends Api>(
 			}
 		} else if (event.type === "response.custom_tool_call_input.done") {
 			const entry = lookupOpenToolCallAlias(event, "custom_tool_call");
-			if (entry?.item.type === "custom_tool_call" && entry.block.type === "toolCall") {
-				finalizeCustomToolCallInputDone(entry.block, event.input);
+			const input = optionalResponsesText(event.input, "custom tool input");
+			if (entry?.item.type === "custom_tool_call" && entry.block.type === "toolCall" && input !== undefined) {
+				finalizeCustomToolCallInputDone(entry.block, input);
 				entry.block[kStreamingArgumentsDone] = true;
 			}
 		} else if (event.type === "response.output_item.done") {
@@ -3370,16 +3757,17 @@ export async function processResponsesStream<TApi extends Api>(
 								| ThinkingContent
 								| undefined);
 				if (reasoningBlock) {
+					normalizedContentIndex = contentIndexOf(reasoningBlock);
 					finalizeReasoningThinking(
 						item,
 						reasoningBlock,
 						stream,
 						output,
-						contentIndexOf(reasoningBlock),
+						normalizedContentIndex,
 						undefined,
 						entry?.rawThinking,
 					);
-					normalizedContentIndex = contentIndexOf(reasoningBlock);
+					if (!output.upstreamModel) output.upstreamModel = servedModelFromOpenRouterReasoning(item);
 				}
 				closeOpenItem(event.output_index, item.id, entry);
 			} else if (item.type === "message") {
@@ -3395,7 +3783,7 @@ export async function processResponsesStream<TApi extends Api>(
 					// `output_item.added` never arrived (lossy proxy) — synthesize the
 					// block so the final message still carries the authoritative text.
 					const synthesized: TextContent = { type: "text", text, textSignature };
-					output.content.push(synthesized);
+					pushContentBlock(synthesized);
 					contentIndex = output.content.length - 1;
 				}
 				normalizedContentIndex = contentIndex;
@@ -3429,7 +3817,7 @@ export async function processResponsesStream<TApi extends Api>(
 					// `output_item.added` never arrived (lossy proxy) — synthesize the
 					// block so the final message carries the call the consumer was told
 					// completed (the agent loop executes tools from message.content).
-					output.content.push(toolCall);
+					pushContentBlock(toolCall);
 					contentIndex = output.content.length - 1;
 				}
 				normalizedContentIndex = contentIndex;
@@ -3451,7 +3839,7 @@ export async function processResponsesStream<TApi extends Api>(
 					clearStreamingPartialJson(block);
 					contentIndex = contentIndexOf(block);
 				} else {
-					output.content.push(toolCall);
+					pushContentBlock(toolCall);
 					contentIndex = output.content.length - 1;
 				}
 				normalizedContentIndex = contentIndex;
@@ -3459,7 +3847,12 @@ export async function processResponsesStream<TApi extends Api>(
 				stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
 			} else if (item.type === "custom_tool_call") {
 				const block = entry?.block.type === "toolCall" ? entry.block : undefined;
-				const rawInput = block?.[kStreamingPartialJson] ? block[kStreamingPartialJson] : (item.input ?? "");
+				const rawInput =
+					optionalResponsesText(item.input, "custom tool input") ??
+					(block?.[kStreamingArgumentsDone]
+						? optionalResponsesText(block.arguments.input, "custom tool input")
+						: block?.[kStreamingPartialJson]) ??
+					"";
 				const toolCall: ToolCall = {
 					type: "toolCall",
 					id: encodeResponsesToolCallId(item.call_id, item.id),
@@ -3475,7 +3868,7 @@ export async function processResponsesStream<TApi extends Api>(
 					clearStreamingPartialJson(block);
 					contentIndex = contentIndexOf(block);
 				} else {
-					output.content.push(toolCall);
+					pushContentBlock(toolCall);
 					contentIndex = output.content.length - 1;
 				}
 				normalizedContentIndex = contentIndex;
@@ -3519,7 +3912,7 @@ export async function processResponsesStream<TApi extends Api>(
 				output.responseId = response.id;
 			}
 			populateResponsesUsageFromResponse(output, response?.usage);
-			calculateCost(model, output.usage);
+			calculateCost(model, output.usage, output.timestamp);
 			applyProviderReportedCost(model, output.usage, response?.usage);
 			applyOpenAIResponsesServiceTierCost(
 				model,
@@ -3532,6 +3925,13 @@ export async function processResponsesStream<TApi extends Api>(
 				const error = response?.error ?? (response as any)?.status_details?.error;
 				const details = response?.incomplete_details;
 				const statusDetailsReason = (response as any)?.status_details?.reason;
+				// A rate-limit/overload body inside a terminal response envelope must
+				// advance the fallback chain exactly like an HTTP-status 429 would
+				// (body-error.ts). The whole envelope goes to the probe so a status or
+				// code carried beside `error` is visible, not only the inner object.
+				// Non-retryable failures keep their existing message.
+				const inBand = details ? undefined : AIError.createInBandProviderError({ ...response, error });
+				if (inBand) throw inBand;
 				const message = error
 					? `${error.code || "unknown"}: ${error.message || "no message"}`
 					: details?.reason
@@ -3574,6 +3974,12 @@ export async function processResponsesStream<TApi extends Api>(
 			break;
 		} else if (event.type === "error") {
 			const err = (event as any).error ?? event;
+			// An in-band rate-limit/overload `error` event advances the fallback chain
+			// like an HTTP-status 429 (body-error.ts); the whole event is passed so
+			// event-level status/code fields count too. Other codes keep the existing
+			// `Error Code <code>: <message>` message that error tests pin on.
+			const inBand = AIError.createInBandProviderError(event);
+			if (inBand) throw inBand;
 			const code = err.code ?? "unknown";
 			const message = err.message ?? "no message";
 			throw new AIError.ProviderResponseError(`Error Code ${code}: ${message}`, {
@@ -3584,6 +3990,8 @@ export async function processResponsesStream<TApi extends Api>(
 			populateResponsesUsageFromResponse(output, event.response?.usage);
 			const error = event.response?.error ?? (event.response as any)?.status_details?.error;
 			const details = event.response?.incomplete_details;
+			const inBand = details ? undefined : AIError.createInBandProviderError({ ...event.response, error });
+			if (inBand) throw inBand;
 			const message = error
 				? `${error.code || "unknown"}: ${error.message || "no message"}`
 				: details?.reason

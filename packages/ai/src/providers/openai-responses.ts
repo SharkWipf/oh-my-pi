@@ -65,6 +65,7 @@ import {
 	rememberOpenAIReasoningEffortFallback,
 	resolveOpenAIReasoningEffortFallback,
 } from "./openai-reasoning-fallback";
+import { resolveCopilotRequestIdentity, wrapFetchForCopilotFallback } from "./github-copilot-headers";
 import type {
 	Tool as OpenAITool,
 	ReasoningEffort,
@@ -422,6 +423,7 @@ const streamOpenAIResponsesOnce = (
 		let rawRequestDump: RawHttpRequestDump | undefined;
 		let chainState: OpenAIResponsesChainState | undefined;
 		let sentPreviousResponseId: string | undefined;
+		let lastSubmittedRequestWasFullReplay: boolean | undefined;
 		const abortTracker = createAbortSourceTracker(options?.signal);
 		const firstEventTimeoutAbortError = new AIError.StreamTimeoutError(OPENAI_RESPONSES_FIRST_EVENT_TIMEOUT_MESSAGE);
 		const { requestAbortController, requestSignal } = abortTracker;
@@ -454,14 +456,15 @@ const streamOpenAIResponsesOnce = (
 			const routingSessionId = getOpenAIResponsesRoutingSessionId(options);
 			const promptCacheSessionId = getOpenAIPromptCacheKey(options);
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
-			const { headers, copilotPremiumRequests, baseUrl } = resolveOpenAIRequestSetup(model, {
-				apiKey,
-				extraHeaders: options?.headers,
-				initiatorOverride: options?.initiatorOverride,
-				messages: context.messages,
-				sessionId: options?.sessionId ?? routingSessionId,
-				promptCacheSessionId,
-			});
+			const { headers, copilotPremiumRequests, baseUrl, copilotCacheKey, copilotCacheSnapshot } =
+				resolveOpenAIRequestSetup(model, {
+					apiKey,
+					extraHeaders: options?.headers,
+					initiatorOverride: options?.initiatorOverride,
+					messages: context.messages,
+					sessionId: options?.sessionId ?? routingSessionId,
+					promptCacheSessionId,
+				});
 			const premiumRequestsTotal = copilotPremiumRequests;
 			const providerSessionState = getOpenAIResponsesProviderSessionState(model, options?.providerSessionState);
 			const strictToolsScope = getOpenAIStrictToolsScope(model, baseUrl);
@@ -531,7 +534,10 @@ const streamOpenAIResponsesOnce = (
 					replacementPayload !== undefined ? (replacementPayload as OpenAIResponsesSamplingParams) : requestParams;
 				if (options?.onPayload) {
 					invalidateSourceOrigins(requestParams);
-					invalidateSourceOrigins(payload, replacementPayload !== undefined ? "externally-replaced" : "externally-mutated");
+					invalidateSourceOrigins(
+						payload,
+						replacementPayload !== undefined ? "externally-replaced" : "externally-mutated",
+					);
 				}
 				applyReasoningEffortFallbackForRequest(payload);
 				return payload;
@@ -555,6 +561,7 @@ const streamOpenAIResponsesOnce = (
 					typeof requestParams.model === "string" ? requestParams.model : model.id,
 				);
 				activeRequestParams = requestParams;
+				lastSubmittedRequestWasFullReplay = requestParams.previous_response_id === undefined;
 				let requestTimeout: NodeJS.Timeout | undefined;
 				if (requestTimeoutMs !== undefined) {
 					requestTimeout = setTimeout(
@@ -572,7 +579,16 @@ const streamOpenAIResponsesOnce = (
 						headers: headersWithTimeout,
 						body: requestParams,
 						signal: requestSignal,
-						fetch: options?.fetch,
+						fetch: wrapFetchForCopilotFallback(
+							options?.fetch,
+							model.provider === "github-copilot",
+							resolveCopilotRequestIdentity(options?.headers),
+							copilotCacheKey,
+							copilotCacheSnapshot,
+						),
+						shouldRetryResponse: (response, bodyText) =>
+							!AIError.isRequestBodyReadTimeout(response.status, bodyText) ||
+							lastSubmittedRequestWasFullReplay !== true,
 						// Transient 408/429/5xx get Retry-After-aware transport
 						// retries; the first-event watchdog aborts `requestSignal`,
 						// so retries cannot extend the caller's deadline.
@@ -782,7 +798,8 @@ const streamOpenAIResponsesOnce = (
 						onOutputItemDone: (item, contentIndex) => {
 							// `processResponsesStream` hands over a private clone already; no
 							// second deep copy needed (reasoning items carry multi-KB blobs).
-							if (contentIndex !== undefined) contentBlocks.push({ itemIndex: nativeOutputItems.length, contentIndex });
+							if (contentIndex !== undefined)
+								contentBlocks.push({ itemIndex: nativeOutputItems.length, contentIndex });
 							nativeOutputItems.push(item as unknown as Record<string, unknown>);
 						},
 						onCompleted: () => {
@@ -859,7 +876,12 @@ const streamOpenAIResponsesOnce = (
 				}
 			}
 
-			output.providerPayload = createOpenAIResponsesHistoryPayload(model.provider, nativeOutputItems, true, contentBlocks);
+			output.providerPayload = createOpenAIResponsesHistoryPayload(
+				model.provider,
+				nativeOutputItems,
+				true,
+				contentBlocks,
+			);
 			const replayableResponseItems = sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(
 				cloneWithSourceOrigins(nativeOutputItems),
 			);
@@ -878,7 +900,7 @@ const streamOpenAIResponsesOnce = (
 							: activeParams,
 					);
 					chainState.lastPromptCacheBreakpointPolicy = promptCacheBreakpointPolicy;
-					if (output.responseId) {
+					if (output.responseId && replayableResponseItems.length === nativeOutputItems.length) {
 						chainState.lastResponseId = output.responseId;
 						chainState.lastResponseItems = replayableResponseItems;
 						chainState.canAppend = true;
@@ -886,8 +908,12 @@ const streamOpenAIResponsesOnce = (
 						// full-context success must not mask categorical rejection.
 						if (sentPreviousResponseId) chainState.staleFailures = 0;
 					} else {
-						// Without a response id the append baseline cannot be trusted.
+						// No response id, or replay sanitization dropped an item the server
+						// still holds. Sanitization is 1:1-or-fewer, so either case makes the
+						// append baseline untrustworthy; next turn must replay in full.
 						chainState.canAppend = false;
+						chainState.lastResponseId = undefined;
+						chainState.lastResponseItems = undefined;
 					}
 				}
 			} else if (chainState) {
@@ -926,6 +952,9 @@ const streamOpenAIResponsesOnce = (
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = result.message;
+			if (AIError.isRequestBodyReadTimeout(result.status, result.message) && lastSubmittedRequestWasFullReplay) {
+				output.requestBodyReadTimeoutFullReplay = true;
+			}
 			// Some providers via OpenRouter include extra details here.
 			const rawMetadata = (error as { error?: { metadata?: { raw?: string } } })?.error?.metadata?.raw;
 			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;
@@ -1153,6 +1182,11 @@ export function buildParams(
 	});
 	const strictResponsesPairing = policy.tools.strictResponsesPairing;
 	const shouldReplayNativeHistory = providerSessionState?.nativeHistoryReplayWarmed ?? true;
+	// Filtering native reasoning must not be undone by reconstruction when the
+	// target also rejects synthetic items (Muse on OpenRouter). Unfiltered targets
+	// retain required text/placeholder replay, including DeepSeek's #10690 fallback.
+	const canReconstructReasoningReplay =
+		!policy.reasoning.filterReasoningHistory || policy.reasoning.allowsSyntheticReasoningContentForToolCalls;
 	const messages = buildResponsesInput({
 		model,
 		context,
@@ -1164,9 +1198,13 @@ export function buildParams(
 		},
 		includeThinkingSignatures: shouldReplayNativeHistory && !policy.reasoning.filterReasoningHistory,
 		requiresReasoningReplayForAllTurns:
-			policy.reasoning.enabled && policy.reasoning.requiresReasoningContentForAllAssistantTurns,
+			policy.reasoning.enabled &&
+			policy.reasoning.requiresReasoningContentForAllAssistantTurns &&
+			canReconstructReasoningReplay,
 		requiresReasoningReplayForToolCalls:
-			policy.reasoning.enabled && policy.reasoning.requiresReasoningContentForToolCalls,
+			policy.reasoning.enabled &&
+			policy.reasoning.requiresReasoningContentForToolCalls &&
+			canReconstructReasoningReplay,
 		repairOrphanOutputs: true,
 	});
 

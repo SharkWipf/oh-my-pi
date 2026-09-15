@@ -77,6 +77,8 @@ const blocks = archive && historyBlocks(archive, {
 
 `historyBlocks` emits mapped text, raster frames, and original images in descriptor order; `source` parts are emitted by the host as original messages. A missing referenced original image is reported rather than silently discarded. Original images are not raster-frame slots and still pass through normal provider image/capacity checks. Reload reuses the committed descriptor and PNGs; a later real compaction re-renders actual committed source, not a protection-stripped shadow archive. Unmapped legacy archives require host-owned original-source rematerialization before entering the source-aware path.
 
+For externalized PNGs, `resolveFrameData(data)` returns `{ bytes, read() }`: reconstruction prices the payload before calling `read()`. Mapped archives keep the oldest contiguous raster prefix; the first missing or over-budget frame and all later frames become chronological source text. Original images remain separate and do not consume this raster-byte budget. Without a source descriptor, legacy archives instead keep the newest fitting frames and emit in-place notices for missing or over-budget frames.
+
 
 ## API surface
 

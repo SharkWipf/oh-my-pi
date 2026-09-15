@@ -132,7 +132,12 @@ async function fixture() {
 			extractionVersion: "test",
 			reviewRevision: randomUUID(),
 			manifest: source.units,
-			readHeads: storage.getRequirementsConsumptionSnapshot({ projectId: "project", sessionId: "owner", epoch: 0, branchId: "leaf" }).readHeads,
+			readHeads: storage.getRequirementsConsumptionSnapshot({
+				projectId: "project",
+				sessionId: "owner",
+				epoch: 0,
+				branchId: "leaf",
+			}).readHeads,
 			readSourceIntegrities: verified(),
 			authority: auth,
 			operations: [operation],
@@ -168,7 +173,11 @@ async function fixture() {
 				...(operation.relations ?? []).flatMap(relation => relation.evidence),
 			]);
 			return {
-				id: randomUUID(), actor: "operator", revisionIds, operationIds: revisionIds, generation,
+				id: randomUUID(),
+				actor: "operator",
+				revisionIds,
+				operationIds: revisionIds,
+				generation,
 				publicationRevision: store.getRequirementsState().publicationRevision,
 				readHeads: store.getRequirementsConsumptionSnapshot(this.context).readHeads,
 				sourceIntegrities: Object.fromEntries(evidence.map(item => [item.sourceKey, item.integrity])),
@@ -214,7 +223,9 @@ test("reverse corrections survive restart; stale relationships cannot CAS-rebase
 	const independent = f.proposal(latest, "pytest");
 	expect(f.publish(independent).status).toBe("accepted");
 	f.storage.recordRequirementsGap(hole.key, hole.integrity, "operator", "Continue with unresolved coverage");
-	expect(f.storage.publishRequirementsBatch(independent.id, f.authority, f.verified()).status).toBe("already-accepted");
+	expect(f.storage.publishRequirementsBatch(independent.id, f.authority, f.verified()).status).toBe(
+		"already-accepted",
+	);
 	expect(f.applicable().coverageGaps.map(source => source.key)).toEqual([hole.key]);
 	expect(f.publish(f.proposal(hole, "tooling")).status).toBe("accepted");
 	expect(f.applicable().coverageGaps).toEqual([]);
@@ -340,14 +351,18 @@ test("separate processes publish unrelated scoped heads without a global complet
 		}),
 	);
 	expect(outputs).toEqual(["accepted", "accepted"]);
-	expect(f.applicable().active.map(item => item.statement).sort()).toEqual(["first", "second"]);
+	expect(
+		f
+			.applicable()
+			.active.map(item => item.statement)
+			.sort(),
+	).toEqual(["first", "second"]);
 	const afterPublication = f.storage.getRequirementsConsumptionSnapshot(f.context);
 	expect(beforePublication.state.publicationRevision).toBe(0);
 	expect(beforePublication.revisions).toEqual([]);
 	expect(afterPublication.state.publicationRevision).toBe(2);
 	expect(afterPublication.revisions.map(item => item.statement).sort()).toEqual(["first", "second"]);
 	expect(afterPublication.sources.map(source => source.key)).toContain(afterPublication.revisions[0].sourceKey);
-
 });
 
 test("reviewed historical source edges preserve newer heads and reject cycles atomically", async () => {
@@ -375,7 +390,6 @@ test("reviewed historical source edges preserve newer heads and reject cycles at
 	expect(f.storage.getRequirementsSnapshot().sources.find(source => source.key === cycle.key)?.state).toBe("pending");
 	expect(f.applicable().active.map(revision => revision.statement)).toEqual(["spaces"]);
 });
-
 
 test("retries replace unfinished work while accepted lineage and failed restore reviews remain durable", async () => {
 	const f = await fixture();
@@ -531,19 +545,25 @@ test("adopted non-human evidence has no coverage authority and reopens its human
 	const referent = f.capture("option", "Option two uses UTF-8.", null, "owner", true);
 	expect(f.applicable().coverageGaps).toEqual([]);
 	expect(() => f.publish(f.proposal(referent, "Use UTF-8."))).toThrow();
-	expect(() => f.storage.recordRequirementsGap(referent.key, referent.integrity, "operator", "Not a source")).toThrow();
+	expect(() =>
+		f.storage.recordRequirementsGap(referent.key, referent.integrity, "operator", "Not a source"),
+	).toThrow();
 	const acceptance = f.capture("acceptance", "Use option two.");
 	const proposal = f.proposal(acceptance, "Use UTF-8.");
-	proposal.operations[0].referents = [{
-		sourceKey: referent.key,
-		integrity: referent.integrity,
-		unitId: "text",
-	}];
-	proposal.operations[0].relations = [{
-		predecessorSourceKey: referent.key,
-		successorSourceKey: acceptance.key,
-		evidence: proposal.operations[0].evidence,
-	}];
+	proposal.operations[0].referents = [
+		{
+			sourceKey: referent.key,
+			integrity: referent.integrity,
+			unitId: "text",
+		},
+	];
+	proposal.operations[0].relations = [
+		{
+			predecessorSourceKey: referent.key,
+			successorSourceKey: acceptance.key,
+			evidence: proposal.operations[0].evidence,
+		},
+	];
 	expect(f.publish(proposal).status).toBe("rejected");
 	delete proposal.operations[0].relations;
 	expect(f.publish(proposal).status).toBe("accepted");
@@ -564,11 +584,13 @@ test("bulk intake preserves accepted coverage and atomically reconciles changed 
 	const referent = f.capture("bulk-referent", "Use UTF-8.", null, "owner", true);
 	const acceptance = f.capture("bulk-acceptance", "Use that encoding.");
 	const proposal = f.proposal(acceptance, "Use UTF-8.");
-	proposal.operations[0].referents = [{
-		sourceKey: referent.key,
-		integrity: referent.integrity,
-		unitId: "text",
-	}];
+	proposal.operations[0].referents = [
+		{
+			sourceKey: referent.key,
+			integrity: referent.integrity,
+			unitId: "text",
+		},
+	];
 	expect(f.publish(proposal).status).toBe("accepted");
 	const moved = { ...acceptance, locators: [...acceptance.locators, { sessionId: "fork", entryId: "copy" }] };
 	f.storage.intakeRequirementsSources([referent, moved, moved]);
@@ -600,7 +622,9 @@ test("bulk intake preserves accepted coverage and atomically reconciles changed 
 	const revision = f.storage.getRequirementsSnapshot().state.publicationRevision;
 	f.storage.intakeRequirementsSources([duplicate, { ...duplicate, integrity: "new-integrity" }]);
 	const after = f.storage.getRequirementsSnapshot();
-	expect(after.sources.filter(source => source.key === duplicate.key).map(source => source.integrity)).toEqual(["new-integrity"]);
+	expect(after.sources.filter(source => source.key === duplicate.key).map(source => source.integrity)).toEqual([
+		"new-integrity",
+	]);
 	expect(after.state.publicationRevision).toBe(revision + 1);
 });
 
@@ -619,7 +643,8 @@ test("owner changes preserve restore history and fence late publication across S
 	f.storage.saveRequirementsBatch(pending);
 	const other = { ...authority, ownerSessionId: "other" };
 	const script =
-		"import {AgentStorage} from " + JSON.stringify(join(import.meta.dir, "../src/session/agent-storage.ts")) +
+		"import {AgentStorage} from " +
+		JSON.stringify(join(import.meta.dir, "../src/session/agent-storage.ts")) +
 		"; const [path,other]=process.argv.slice(1); const storage=await AgentStorage.open(path); " +
 		"storage.authorizeRequirementsOwner(JSON.parse(other)); storage.invalidateRequirementsOwner('owner'); AgentStorage.close();";
 	const child = Bun.spawn(["bun", "-e", script, f.dbPath, JSON.stringify(other)], { stdout: "pipe", stderr: "pipe" });
@@ -641,11 +666,13 @@ test("unchanged observations preserve frozen reviews; locator moves and same-byt
 	const referent = f.capture("observed-reference", "Use UTF-8.", null, "owner", true);
 	const source = f.capture("observed-acceptance", "Use that encoding.");
 	const batch = f.proposal(source, "Use UTF-8.");
-	batch.operations[0].referents = [{
-		sourceKey: referent.key,
-		integrity: referent.integrity,
-		unitId: "text",
-	}];
+	batch.operations[0].referents = [
+		{
+			sourceKey: referent.key,
+			integrity: referent.integrity,
+			unitId: "text",
+		},
+	];
 	f.storage.saveRequirementsBatch(batch);
 	const unchanged = [referent, source].map(item => ({
 		key: item.key,
@@ -678,10 +705,6 @@ test("unchanged observations preserve frozen reviews; locator moves and same-byt
 	expect(f.storage.publishRequirementsBatch(pending.id, f.authority, f.verified()).status).toBe("accepted");
 	expect(f.storage.getRequirementsSource(source.key)?.state).toBe("complete");
 });
-
-
-
-
 
 test("settled applicable IDs include fulfilled withdrawal heads but exclude conflict, quarantine and predecessors", async () => {
 	const f = await fixture();
@@ -735,9 +758,16 @@ test("temporary original loss preserves quarantine through exact recovery withou
 		storage.reconcileRequirementsSources([{ key: source.key, integrity, units: source.units }]);
 		expect(storage.getRequirementsSnapshot().revisions[0].lifecycle).toBe("quarantined");
 		expect(storage.restoreRequirements({ ...receipt(), sourceIntegrities: {} })).toBe(false);
-		expect(storage.restoreRequirements({ ...receipt(), review: { ...batch.review, sanity: { model: "sanity", format: "json", outcome: "failed" } } })).toBe(false);
+		expect(
+			storage.restoreRequirements({
+				...receipt(),
+				review: { ...batch.review, sanity: { model: "sanity", format: "json", outcome: "failed" } },
+			}),
+		).toBe(false);
 		expect(storage.restoreRequirements(receipt())).toBe(true);
-		expect(storage.getRequirementsConsumptionSnapshot(f.context).applicable.active.map(item => item.id)).toEqual([revision.id]);
+		expect(storage.getRequirementsConsumptionSnapshot(f.context).applicable.active.map(item => item.id)).toEqual([
+			revision.id,
+		]);
 		storage.quarantineRequirements([revision.id], "operator", "Recheck changed source");
 		storage.reconcileRequirementsSources([{ key: source.key, integrity: null }]);
 		storage.reconcileRequirementsSources([{ key: source.key, integrity: "changed-bytes", units: source.units }]);
@@ -746,7 +776,6 @@ test("temporary original loss preserves quarantine through exact recovery withou
 	}
 });
 
-
 test("metadata-only historical intake cannot replace a rich accepted manifest", async () => {
 	const f = await fixture();
 	const source = f.capture("rich-original", ["Keep this policy.", "Original image identity"]);
@@ -754,11 +783,19 @@ test("metadata-only historical intake cannot replace a rich accepted manifest", 
 	source.units[1].locator = "blob:original-image";
 	f.storage.intakeRequirementsSource(source);
 	expect(f.publish(f.proposal(source, "Keep this policy.")).status).toBe("accepted");
-	const metadata = { ...source, units: [], integrityAvailable: false, origin: { kind: "unknown" as const }, state: "orphaned" as const };
+	const metadata = {
+		...source,
+		units: [],
+		integrityAvailable: false,
+		origin: { kind: "unknown" as const },
+		state: "orphaned" as const,
+	};
 	for (const store of [f.storage, new RequirementsStore(f.storage.getRequirementsSnapshot())]) {
 		store.intakeRequirementsSource(metadata);
 		expect(store.getRequirementsSource(source.key)?.units).toEqual(source.units);
-		expect(store.getRequirementsConsumptionSnapshot(f.context).applicable.active.map(item => item.statement)).toEqual(["Keep this policy."]);
+		expect(store.getRequirementsConsumptionSnapshot(f.context).applicable.active.map(item => item.statement)).toEqual(
+			["Keep this policy."],
+		);
 	}
 	await f.restart();
 	expect(f.storage.getRequirementsSource(source.key)?.units).toEqual(source.units);
@@ -773,7 +810,9 @@ test("cold unavailable ancestry does not block an unrelated live addition", asyn
 	const batch = f.proposal(source, "Use pytest.");
 	batch.readSourceIntegrities = { [source.key]: source.integrity };
 	expect(f.publish(batch).status).toBe("accepted");
-	expect(f.storage.getRequirementsConsumptionSnapshot(f.context).applicable.active.map(item => item.statement)).toEqual(["Use pytest."]);
+	expect(
+		f.storage.getRequirementsConsumptionSnapshot(f.context).applicable.active.map(item => item.statement),
+	).toEqual(["Use pytest."]);
 	expect(f.storage.getRequirementsSource(ancestor.key)?.state).toBe("orphaned");
 	expect(f.storage.getRequirementsCoverageSummary().byState.orphaned).toBe(1);
 });
@@ -788,12 +827,20 @@ test("scoped clear survives reopen, blocks historical backfill and admits new li
 	const outsideBatch = f.proposal(outside, "Use pytest.");
 	outsideBatch.operations[0].scope = { kind: "project", projectId: "other" };
 	expect(f.publish(outsideBatch).status).toBe("accepted");
-	const generation = f.storage.clearRequirements({ kind: "project", projectId: "project" }, "operator", "Remove poisoned policies");
+	const generation = f.storage.clearRequirements(
+		{ kind: "project", projectId: "project" },
+		"operator",
+		"Remove poisoned policies",
+	);
 	const authority = { ...f.authority, generation };
 	f.storage.authorizeRequirementsOwner(authority);
 	await f.restart();
 	expect(f.applicable().active).toEqual([]);
-	expect(f.storage.getRequirementsConsumptionSnapshot({ ...f.context, projectId: "other" }).applicable.active.map(item => item.statement)).toEqual(["Use pytest."]);
+	expect(
+		f.storage
+			.getRequirementsConsumptionSnapshot({ ...f.context, projectId: "other" })
+			.applicable.active.map(item => item.statement),
+	).toEqual(["Use pytest."]);
 	expect(f.publish(f.proposal(historical, "Use spaces.", undefined, [], authority)).status).toBe("rejected");
 	expect(f.storage.restoreRequirements(f.receipt([old.id], generation))).toBe(false);
 	const live = f.capture("clear-new-delivery", "Use four spaces.");
@@ -813,7 +860,11 @@ test("exact operator withdrawal remains historical through evidence return and q
 	f.storage.reconcileRequirementsSources([{ key: source.key, integrity: source.integrity }]);
 	await f.restart();
 	expect(f.storage.getRequirementsRevision(revision.id)?.lifecycle).toBe("historical");
-	expect(f.storage.getRequirementsRevision(revision.id)?.withdrawal).toEqual({ actor: "operator", reason: "No longer wanted", generation });
+	expect(f.storage.getRequirementsRevision(revision.id)?.withdrawal).toEqual({
+		actor: "operator",
+		reason: "No longer wanted",
+		generation,
+	});
 	expect(f.applicable().active).toEqual([]);
 	expect(f.storage.restoreRequirements(f.receipt([revision.id], generation))).toBe(false);
 });
@@ -821,12 +872,42 @@ test("exact operator withdrawal remains historical through evidence return and q
 test("persisted global pass cannot admit incomplete or misidentified independent review mappings", async () => {
 	const f = await fixture();
 	const cases: [string, (batch: RequirementsBatch) => void][] = [
-		["missing candidate decision", batch => { batch.review.sanity!.candidates = []; }],
-		["uncertain candidate despite global pass", batch => { batch.review.evidence!.candidates![0].decision = "uncertain"; }],
-		["candidate has no independent obligation", batch => { batch.review.evidence!.obligations = []; }],
-		["operation ID does not join the reviewed candidate", batch => { batch.operationIds[0] = "different-candidate"; }],
-		["obligation maps to unknown candidate", batch => { batch.review.evidence!.obligations![0].operationIds = ["unknown-candidate"]; }],
-		["obligation cites unknown applicable head", batch => { batch.review.evidence!.obligations![0].applicableRevisionIds = ["unknown-head"]; }],
+		[
+			"missing candidate decision",
+			batch => {
+				batch.review.sanity!.candidates = [];
+			},
+		],
+		[
+			"uncertain candidate despite global pass",
+			batch => {
+				batch.review.evidence!.candidates![0].decision = "uncertain";
+			},
+		],
+		[
+			"candidate has no independent obligation",
+			batch => {
+				batch.review.evidence!.obligations = [];
+			},
+		],
+		[
+			"operation ID does not join the reviewed candidate",
+			batch => {
+				batch.operationIds[0] = "different-candidate";
+			},
+		],
+		[
+			"obligation maps to unknown candidate",
+			batch => {
+				batch.review.evidence!.obligations![0].operationIds = ["unknown-candidate"];
+			},
+		],
+		[
+			"obligation cites unknown applicable head",
+			batch => {
+				batch.review.evidence!.obligations![0].applicableRevisionIds = ["unknown-head"];
+			},
+		],
 	];
 	for (const [name, corrupt] of cases) {
 		const source = f.capture(name, "Use pytest.");
@@ -842,4 +923,3 @@ test("persisted global pass cannot admit incomplete or misidentified independent
 	expect(f.publish(f.proposal(source, "Use pytest.")).status).toBe("accepted");
 	expect(f.applicable().active.map(item => item.statement)).toEqual(["Use pytest."]);
 });
-

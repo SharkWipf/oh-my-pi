@@ -40,37 +40,61 @@ test("indexed originals bind the current journal namespace and revoke a reset du
 	const session = SessionManager.create(temp.path(), temp.path(), storage);
 	try {
 		const id = append(session, "Authoritative original A");
-		await session.ensureOnDisk(); await session.flush();
+		await session.ensureOnDisk();
+		await session.flush();
 		const source = session.getRequirementsSource(id)!;
 		storage.pause = true;
 		const interrupted = session.resolveRequirementsEvidence(source.key, source);
 		await storage.entered.promise;
-		session.appendResetBoundary(); await session.flush();
+		session.appendResetBoundary();
+		await session.flush();
 		storage.release.resolve();
 		expect(await interrupted).toBeUndefined();
-		expect((await session.resolveRequirementsEvidence(source.key, source, { context: false }))?.units[0].text).toBe("Authoritative original A");
+		expect((await session.resolveRequirementsEvidence(source.key, source, { context: false }))?.units[0].text).toBe(
+			"Authoritative original A",
+		);
 		const file = session.getSessionFile()!;
 		const journal = await storage.readText(file);
 		const currentId = session.getSessionId();
 		const otherId = (currentId[0] === "0" ? "1" : "0") + currentId.slice(1);
 		await storage.writeText(file, journal.replace(JSON.stringify(session.getSessionId()), JSON.stringify(otherId)));
 		expect(await session.resolveRequirementsEvidence(source.key, source, { context: false })).toBeUndefined();
-	} finally { await session.close(); }
+	} finally {
+		await session.close();
+	}
 });
-
 
 describe("accepted original source authority", () => {
 	test("independent accepted entries retain identity and pre-expansion image ordering", async () => {
 		const session = manager();
-		const originalSubmission = { text: "literal /command", images: [{ type: "image" as const, data: "aW1n", mimeType: "image/png" }], imageLinks: ["file:///original.png"] };
-		const first = session.appendMessage({ role: "user", producer: { type: "human" }, content: "expanded", originalSubmission, timestamp: 1 });
-		const second = session.appendMessage({ role: "user", producer: { type: "human" }, content: "expanded", originalSubmission, timestamp: 1 });
+		const originalSubmission = {
+			text: "literal /command",
+			images: [{ type: "image" as const, data: "aW1n", mimeType: "image/png" }],
+			imageLinks: ["file:///original.png"],
+		};
+		const first = session.appendMessage({
+			role: "user",
+			producer: { type: "human" },
+			content: "expanded",
+			originalSubmission,
+			timestamp: 1,
+		});
+		const second = session.appendMessage({
+			role: "user",
+			producer: { type: "human" },
+			content: "expanded",
+			originalSubmission,
+			timestamp: 1,
+		});
 		const catalog = await session.getRequirementsSources();
 		expect(catalog.sources.map(source => source.original.entryId)).toEqual([first, second]);
 		expect(catalog.context).toEqual([]);
 		expect(catalog.sources.every(source => !source.integrityAvailable && source.units.length === 0)).toBe(true);
 		const resolved = (await resolveRequirementsSource(session, catalog.sources[0].key))!;
-		expect(resolved.units).toEqual([{ id: "0", text: "literal /command" }, { id: "1", image: originalSubmission.images[0] }]);
+		expect(resolved.units).toEqual([
+			{ id: "0", text: "literal /command" },
+			{ id: "1", image: originalSubmission.images[0] },
+		]);
 		expect(resolved.source.origin.kind).toBe("human");
 		expect(resolved.source.units.map(unit => unit.kind)).toEqual(["text", "image"]);
 	});
@@ -78,18 +102,34 @@ describe("accepted original source authority", () => {
 	test("role and attribution cannot attest legacy or tool-generated input", async () => {
 		const session = manager();
 		session.appendMessage({ role: "user", attribution: "user", content: "legacy", timestamp: 1 });
-		session.appendMessage({ role: "user", attribution: "user", producer: { type: "tool", name: "goal", toolCallId: "call" }, content: "generated", timestamp: 2 });
+		session.appendMessage({
+			role: "user",
+			attribution: "user",
+			producer: { type: "tool", name: "goal", toolCallId: "call" },
+			content: "generated",
+			timestamp: 2,
+		});
 		const sources = (await session.getRequirementsSources()).sources;
-		expect(sources.map(source => [source.origin.kind, source.state])).toEqual([["unknown", "unsupported"], ["tool", "unsupported"]]);
+		expect(sources.map(source => [source.origin.kind, source.state])).toEqual([
+			["unknown", "unsupported"],
+			["tool", "unsupported"],
+		]);
 		expect((await resolveRequirementsSource(session, sources[0].key))?.source.origin.kind).toBe("unknown");
 		expect(sources[1].origin.producerId).toBe("call");
 	});
 
 	test("catalog records missing originals without eagerly loading their depot", async () => {
 		const session = manager();
-		const id = session.appendMessage({ role: "user", producer: { type: "human" }, content: "expanded", originalSubmission: {
-			text: "inspect image", images: [{ type: "image", data: `blob:sha256:${"0".repeat(64)}`, mimeType: "image/png" }],
-		}, timestamp: 1 });
+		const id = session.appendMessage({
+			role: "user",
+			producer: { type: "human" },
+			content: "expanded",
+			originalSubmission: {
+				text: "inspect image",
+				images: [{ type: "image", data: `blob:sha256:${"0".repeat(64)}`, mimeType: "image/png" }],
+			},
+			timestamp: 1,
+		});
 		const source = session.getRequirementsSource(id)!;
 		expect(source.state).toBe("pending");
 		expect((await session.getRequirementsSources()).sources[0].key).toBe(source.key);
@@ -102,9 +142,12 @@ describe("accepted original source authority", () => {
 		const first = append(session, "standing instruction");
 		const firstSource = (await resolveRequirementsSource(session, session.getRequirementsSource(first)!.key))!.source;
 		const sibling = append(session, "abandoned correction");
-		const siblingSource = (await resolveRequirementsSource(session, session.getRequirementsSource(sibling)!.key))!.source;
+		const siblingSource = (await resolveRequirementsSource(session, session.getRequirementsSource(sibling)!.key))!
+			.source;
 		session.branch(first);
-		expect((await session.observeRequirementsEvidence([firstSource, siblingSource])).map(item => item.integrity)).toEqual([firstSource.integrity, null]);
+		expect(
+			(await session.observeRequirementsEvidence([firstSource, siblingSource])).map(item => item.integrity),
+		).toEqual([firstSource.integrity, null]);
 		session.appendResetBoundary();
 		expect(session.getRequirementsEpoch()).toBe(1);
 		expect((await session.getRequirementsSources()).sources).toEqual([]);
@@ -129,7 +172,14 @@ describe("accepted original source authority", () => {
 
 	test("nonhuman whole-unit context explains a decision without joining its authority chain", async () => {
 		const session = manager();
-		const tool = session.appendMessage({ role: "toolResult", toolCallId: "call", toolName: "read", content: [{ type: "text", text: "Option 2 is 42" }], isError: false, timestamp: 1 });
+		const tool = session.appendMessage({
+			role: "toolResult",
+			toolCallId: "call",
+			toolName: "read",
+			content: [{ type: "text", text: "Option 2 is 42" }],
+			isError: false,
+			timestamp: 1,
+		});
 		const id = append(session, "Use option 2");
 		const resolved = (await resolveRequirementsSource(session, session.getRequirementsSource(id)!.key))!;
 		expect((await session.getRequirementsSources()).sources.map(source => source.original.entryId)).toEqual([id]);
@@ -150,15 +200,20 @@ describe("accepted original source authority", () => {
 			const original = (await resolveRequirementsSource(session, key))!.source;
 			const filename = session.getSessionFile()!;
 			const fork = await SessionManager.forkFrom(filename, temp.path(), temp.path());
-			try { expect((await resolveRequirementsSource(fork, key))!.source.original).toEqual(original.original); }
-			finally { await fork.close(); }
+			try {
+				expect((await resolveRequirementsSource(fork, key))!.source.original).toEqual(original.original);
+			} finally {
+				await fork.close();
+			}
 			const foreign = manager();
 			expect((await foreign.observeRequirementsEvidence([original]))[0].integrity).toBe(original.integrity);
 			const version = foreign.getRequirementsSourceVersion();
 			await unlink(filename);
 			expect(foreign.getRequirementsSourceVersion()).not.toBe(version);
 			expect((await foreign.observeRequirementsEvidence([original]))[0].integrity).toBeNull();
-		} finally { await session.close(); }
+		} finally {
+			await session.close();
+		}
 	});
 	test("explicit retention survives deletion but never overrides an existing rewrite or authored invalidation", async () => {
 		using temp = TempDir.createSync("requirements-selected-retention-");
@@ -166,7 +221,8 @@ describe("accepted original source authority", () => {
 		const id = append(session, "selected original");
 		const source = (await resolveRequirementsSource(session, session.getRequirementsSource(id)!.key))!.source;
 		const journalPath = temp.join("original.jsonl");
-		const journal = () => [session.getHeader(), ...session.getEntries()].map(entry => JSON.stringify(entry)).join("\n") + "\n";
+		const journal = () =>
+			[session.getHeader(), ...session.getEntries()].map(entry => JSON.stringify(entry)).join("\n") + "\n";
 		await writeFile(journalPath, journal());
 		source.locators[0].journalPath = journalPath;
 		const retained = await session.retainRequirementsEvidence(source);
@@ -186,23 +242,45 @@ describe("accepted original source authority", () => {
 		const session = manager();
 		const distant = append(session, "Complete distant authored instruction, never truncate this original.");
 		for (let index = 0; index < 4096; index++) append(session, `omitted history ${index}`);
-		const kept = session.appendMessage({ role: "user", producer: { type: "human" }, content: "expanded retained delivery", originalSubmission: { text: "Whole retained pre-expansion instruction" }, timestamp: 1 });
+		const kept = session.appendMessage({
+			role: "user",
+			producer: { type: "human" },
+			content: "expanded retained delivery",
+			originalSubmission: { text: "Whole retained pre-expansion instruction" },
+			timestamp: 1,
+		});
 		session.appendCompaction("Context summary, not authored source evidence", undefined, kept, 100000);
-		const current = session.appendMessage({ role: "user", producer: { type: "human" }, content: "expanded current delivery", originalSubmission: { text: "Whole current pre-expansion instruction" }, timestamp: 2 });
+		const current = session.appendMessage({
+			role: "user",
+			producer: { type: "human" },
+			content: "expanded current delivery",
+			originalSubmission: { text: "Whole current pre-expansion instruction" },
+			timestamp: 2,
+		});
 		const later = append(session, "Future source must not enter the earlier processing context");
 		const source = (await session.resolveRequirementsEvidence(session.getRequirementsSource(current)!.key))!;
 		expect(session.getLeafId()).toBe(later);
 		expect(source.context.map(message => message.role)).toEqual(["compactionSummary", "user", "user"]);
 		expect(source.units[0].text).toBe("Whole current pre-expansion instruction");
 		expect(source.contextIndex).toBeUndefined();
-		expect(source.referents.map(reference => [reference.source.original.entryId, reference.units[0].text, reference.contextIndex])).toEqual([[kept, "Whole retained pre-expansion instruction", undefined]]);
+		expect(
+			source.referents.map(reference => [
+				reference.source.original.entryId,
+				reference.units[0].text,
+				reference.contextIndex,
+			]),
+		).toEqual([[kept, "Whole retained pre-expansion instruction", undefined]]);
 		expect(source.unavailableContext).toEqual([]);
 		session.branch(kept);
 		const sibling = append(session, "Another branch must not enter the addressed source context");
 		const historical = await session.resolveRequirementsEvidence(source.source.key, source.source);
 		expect(historical?.context).toEqual(source.context);
 		expect(session.getLeafId()).toBe(sibling);
-		const addressed = await session.resolveRequirementsEvidence(session.getRequirementsSource(distant)!.key, undefined, { context: false });
+		const addressed = await session.resolveRequirementsEvidence(
+			session.getRequirementsSource(distant)!.key,
+			undefined,
+			{ context: false },
+		);
 		expect(addressed?.units[0].text).toBe("Complete distant authored instruction, never truncate this original.");
 	});
 	test("later assistant and human entries preserve original A while reset still revokes it", async () => {
@@ -237,7 +315,10 @@ describe("accepted original source authority", () => {
 				const text = await super.readText(path);
 				const pause = this.pause;
 				this.pause = undefined;
-				if (pause) { pause.entered(); await pause.release; }
+				if (pause) {
+					pause.entered();
+					await pause.release;
+				}
 				return text;
 			}
 		}
@@ -268,6 +349,8 @@ describe("accepted original source authority", () => {
 			await session.rewriteEntries();
 			changedRelease.resolve();
 			expect(await changed).toBeUndefined();
-		} finally { await session.close(); }
+		} finally {
+			await session.close();
+		}
 	});
 });

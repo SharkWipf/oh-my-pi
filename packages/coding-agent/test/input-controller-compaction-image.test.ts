@@ -105,7 +105,11 @@ function makeCtx(initialQueue: CompactionQueuedMessage[] = []) {
 	} as unknown as InteractiveModeContext;
 
 	return {
-		ctx, session, promptCalls, steerCalls, followUpCalls,
+		ctx,
+		session,
+		promptCalls,
+		steerCalls,
+		followUpCalls,
 		changeOwnership: () => {
 			ownership = {};
 		},
@@ -119,7 +123,12 @@ describe("compaction queue image forwarding", () => {
 		const image = img("aGVsbG8=");
 		const { ctx } = makeCtx();
 
-		const originalSubmission = { text: "/once /skill:inspect [Image #1]", images: [image], imageLinks: ["clipboard"], compactionOverride: "exclude" as const };
+		const originalSubmission = {
+			text: "/once /skill:inspect [Image #1]",
+			images: [image],
+			imageLinks: ["clipboard"],
+			compactionOverride: "exclude" as const,
+		};
 		ctx.editor.pendingImages = [image];
 		ctx.editor.pendingImageLinks = ["clipboard"];
 		await new UiHelpers(ctx).queueCompactionMessage("expanded skill", "steer", [], [], "exclude", originalSubmission);
@@ -137,7 +146,12 @@ describe("compaction queue image forwarding", () => {
 		ctx.editor.pendingImages = [image];
 		ctx.editor.pendingImageLinks = ["clipboard"];
 		ctx.editor.imageLinks = ["clipboard"];
-		await new UiHelpers(ctx).queueCompactionMessage("/once /keep screenshot [Image #1]", "followUp", [image], ["clipboard"]);
+		await new UiHelpers(ctx).queueCompactionMessage(
+			"/once /keep screenshot [Image #1]",
+			"followUp",
+			[image],
+			["clipboard"],
+		);
 		expect(ctx.compactionQueuedMessages).toEqual([]);
 		expect(ctx.editor.getText()).toBe("/once /keep screenshot [Image #1]");
 		expect(ctx.editor.pendingImages).toEqual([image]);

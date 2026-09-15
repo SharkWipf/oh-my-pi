@@ -314,6 +314,24 @@ for (const api of ["openai-responses", "azure-openai-responses", "openai-codex-r
 			expect(deltas).toEqual(["Late done summary"]);
 			expect(thinking?.thinking).toBe("Late done summary");
 		});
+		test("completes a later summary part without losing its done-only suffix", async () => {
+			const { deltas, thinking } = await run([
+				added(),
+				delta("First"),
+				{ type: "response.reasoning_summary_part.done", item_id: "rs_display", summary_index: 0 },
+				{ ...delta("Next"), summary_index: 1 },
+				{
+					type: "response.reasoning_summary_text.done",
+					item_id: "rs_display",
+					output_index: 0,
+					summary_index: 1,
+					text: "Next step",
+				},
+				terminal(),
+			]);
+			expect(deltas.join("")).toBe("First\n\nNext step");
+			expect(thinking?.thinking).toBe("First\n\nNext step");
+		});
 		test("truncated transport does not publish unfinalized raw reasoning", async () => {
 			const { deltas, emitted, result } = await run([added(), delta("unfinished raw", true)]);
 			expect(result.stopReason).toBe("error");

@@ -26,14 +26,25 @@ export async function confirmRequirementsJournalDeletion(
 		throw new Error("Requirements dependencies changed while confirming deletion; inspect and confirm again.");
 	}
 	if (choice === withdraw) {
-		storage.withdrawRequirements(dependents.revisions.map(revision => revision.id), "operator:session-delete", "Explicit withdrawal before deleting original session evidence");
+		storage.withdrawRequirements(
+			dependents.revisions.map(revision => revision.id),
+			"operator:session-delete",
+			"Explicit withdrawal before deleting original session evidence",
+		);
 		return true;
 	}
 	const manager = await SessionManager.open(journalPath, undefined, undefined, { suppressBreadcrumb: true });
 	try {
 		const retained = [];
 		for (const source of dependents.sources) retained.push(await manager.retainRequirementsEvidence(source));
-		storage.reconcileRequirementsSources(retained.map(source => ({ key: source.key, integrity: source.integrity, locators: source.locators, units: source.units })));
+		storage.reconcileRequirementsSources(
+			retained.map(source => ({
+				key: source.key,
+				integrity: source.integrity,
+				locators: source.locators,
+				units: source.units,
+			})),
+		);
 	} finally {
 		await manager.close();
 	}
@@ -42,8 +53,14 @@ export async function confirmRequirementsJournalDeletion(
 
 export const REQUIREMENTS_COMMANDS = [
 	{ name: "requirements", description: "Living requirements, coverage holes, models and actual injection receipt" },
-	{ name: "requirements list", description: "List active, pending, inactive or quarantined records: [state] [search text]" },
-	{ name: "requirements coverage", description: "Inspect durable source and requirement coverage across sessions and branches" },
+	{
+		name: "requirements list",
+		description: "List active, pending, inactive or quarantined records: [state] [search text]",
+	},
+	{
+		name: "requirements coverage",
+		description: "Inspect durable source and requirement coverage across sessions and branches",
+	},
 	{ name: "requirements inspect", description: "Inspect a revision: <revision-id>" },
 	{ name: "requirements source", description: "Jump to / retrieve original evidence: <source-key>" },
 	{ name: "requirements retry", description: "Retry or backfill owner work: [source-key]" },
@@ -74,7 +91,8 @@ export const REQUIREMENTS_COMMANDS = [
 	},
 	{
 		name: "requirements retry-clean",
-		description: "Open a fresh session without learned memory; retain ONLY selected originals: [source-key...] --confirm",
+		description:
+			"Open a fresh session without learned memory; retain ONLY selected originals: [source-key...] --confirm",
 	},
 	{ name: "requirements help", description: "All actions, confirmation syntax and safety limits" },
 ];
@@ -151,16 +169,28 @@ export async function executeRequirementsCommand(session: AgentSession, argument
 			return `${requirementsContextText(session)}\n\n${renderRequirementsData(owner.status())}\n\n${help()}`;
 		case "list": {
 			const state = id ?? "active";
-			need(["active", "pending", "inactive", "quarantined"].includes(state), "list [active|pending|inactive|quarantined] [search text]");
+			need(
+				["active", "pending", "inactive", "quarantined"].includes(state),
+				"list [active|pending|inactive|quarantined] [search text]",
+			);
 			const status = owner.status();
 			const activeIds = new Set(status.applicable.active.map(revision => revision.id));
-			const records = state === "active" ? status.applicable.active
-				: state === "pending" ? status.applicable.pendingSources
-				: owner.status({ includeLedger: true }).snapshot.revisions.filter(revision => state === "quarantined"
-					? revision.lifecycle === "quarantined"
-					: revision.lifecycle !== "quarantined" && !activeIds.has(revision.id));
+			const records =
+				state === "active"
+					? status.applicable.active
+					: state === "pending"
+						? status.applicable.pendingSources
+						: owner
+								.status({ includeLedger: true })
+								.snapshot.revisions.filter(revision =>
+									state === "quarantined"
+										? revision.lifecycle === "quarantined"
+										: revision.lifecycle !== "quarantined" && !activeIds.has(revision.id),
+								);
 			const search = tail.toLocaleLowerCase();
-			const matching = search ? records.filter(record => JSON.stringify(record).toLocaleLowerCase().includes(search)) : records;
+			const matching = search
+				? records.filter(record => JSON.stringify(record).toLocaleLowerCase().includes(search))
+				: records;
 			return `${state}: ${matching.length} matching of ${records.length} records\n${renderRequirementsData(matching)}`;
 		}
 		case "coverage":

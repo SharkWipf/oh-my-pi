@@ -17,8 +17,12 @@ export async function ensurePreservedMessageStateOnDisk(manager: SessionManager)
 		if (entry.customType === "com.omp.compaction-preserved") {
 			const data = migrateLegacyCompactionPin(entry.data);
 			if (data) migrations.push({ entry, data });
-		} else if (entry.customType === MESSAGE_OVERRIDE_CUSTOM_TYPE && entry.data &&
-			typeof entry.data === "object" && !Array.isArray((entry.data as { messageIds?: unknown }).messageIds)) {
+		} else if (
+			entry.customType === MESSAGE_OVERRIDE_CUSTOM_TYPE &&
+			entry.data &&
+			typeof entry.data === "object" &&
+			!Array.isArray((entry.data as { messageIds?: unknown }).messageIds)
+		) {
 			const data = decodeCompactionMessageOverride(entry.data);
 			if (data) migrations.push({ entry, data });
 		}
@@ -82,12 +86,15 @@ export class SessionPreservation {
 	readonly #actions = new WeakMap<PreservedMessageOverrideResetSnapshot, ResetAction>();
 	readonly #sets = new Map<string, { state: PreservationAction; snapshot: PreservedMessageOverrideResetSnapshot }>();
 	#tail: Promise<unknown> = Promise.resolve();
+	#failedPreflight?: { sessionId: string; ownership: object };
 
 	constructor(host: SessionPreservationHost) {
 		this.#host = host;
 	}
 
-	async capturePreservedMessageOverrideReset(sourceIds?: readonly string[]): Promise<PreservedMessageOverrideResetSnapshot> {
+	async capturePreservedMessageOverrideReset(
+		sourceIds?: readonly string[],
+	): Promise<PreservedMessageOverrideResetSnapshot> {
 		const query = this.#host.getQuery();
 		const groups: PreservedMessageOverrideResetGroup[] = [];
 		const snapshot = {
@@ -99,24 +106,29 @@ export class SessionPreservation {
 			groups,
 		};
 		const action: ResetAction = { ownership: this.#host.ownership(), complete: false };
-		const candidates = sourceIds === undefined ? query.getManualGroups({ nonAutoOnly: true }) : (function* () {
-			const count = sourceIds.length;
-			for (let index = 0; index < count; index++) {
-				const group = query.getManualGroup(sourceIds[index]!);
-				if (!group) throw new Error("This source is not a complete manageable message group.");
-				yield group;
-			}
-		})();
+		const candidates =
+			sourceIds === undefined
+				? query.getManualGroups({ nonAutoOnly: true })
+				: (function* () {
+						const count = sourceIds.length;
+						for (let index = 0; index < count; index++) {
+							const group = query.getManualGroup(sourceIds[index]!);
+							if (!group) throw new Error("This source is not a complete manageable message group.");
+							yield group;
+						}
+					})();
 		const seen = sourceIds === undefined ? undefined : new Set<string>();
 		let deadline = performance.now() + 4;
 		for (const group of candidates) {
 			if (!seen?.has(group.id) && group.members.some(member => member.state !== "auto")) {
 				seen?.add(group.id);
-				groups.push(Object.freeze({
-					id: group.id,
-					memberIds: Object.freeze([...group.memberIds]),
-					members: Object.freeze(group.members.map(member => Object.freeze({ ...member }))),
-				}));
+				groups.push(
+					Object.freeze({
+						id: group.id,
+						memberIds: Object.freeze([...group.memberIds]),
+						members: Object.freeze(group.members.map(member => Object.freeze({ ...member }))),
+					}),
+				);
 				snapshot.sourceCount += group.memberIds.length;
 			}
 			if (performance.now() >= deadline) {
@@ -125,9 +137,7 @@ export class SessionPreservation {
 				deadline = performance.now() + 4;
 			}
 		}
-		await this.#host.sessionManager.ensureOnDisk();
-		await this.#host.sessionManager.flush();
-		this.#validate(snapshot, action);
+		await this.#preflight(snapshot, action, false);
 		snapshot.groupCount = groups.length;
 		Object.freeze(groups);
 		Object.freeze(snapshot);
@@ -160,7 +170,9 @@ export class SessionPreservation {
 		});
 	}
 
-	resetPreservedMessageOverrides(snapshot: PreservedMessageOverrideResetSnapshot): Promise<{ reset: number; skipped: number }> {
+	resetPreservedMessageOverrides(
+		snapshot: PreservedMessageOverrideResetSnapshot,
+	): Promise<{ reset: number; skipped: number }> {
 		return this.#enqueue(() => this.#apply(snapshot, "auto", true));
 	}
 
@@ -171,11 +183,15 @@ export class SessionPreservation {
 	}
 
 	#capture(groups: readonly PreservedMessageOverrideResetGroup[]): PreservedMessageOverrideResetSnapshot {
-		const frozenGroups = Object.freeze(groups.map(group => Object.freeze({
-			id: group.id,
-			memberIds: Object.freeze([...group.memberIds]),
-			members: Object.freeze(group.members.map(member => Object.freeze({ ...member }))),
-		})));
+		const frozenGroups = Object.freeze(
+			groups.map(group =>
+				Object.freeze({
+					id: group.id,
+					memberIds: Object.freeze([...group.memberIds]),
+					members: Object.freeze(group.members.map(member => Object.freeze({ ...member }))),
+				}),
+			),
+		);
 		const snapshot = Object.freeze({
 			sessionId: this.#host.sessionManager.getSessionId(),
 			resetId: this.#host.getQuery().resetId,
@@ -188,10 +204,36 @@ export class SessionPreservation {
 		return snapshot;
 	}
 
+	async #preflight(
+		snapshot: PreservedMessageOverrideResetSnapshot,
+		action: ResetAction,
+		prepare: boolean,
+	): Promise<void> {
+		this.#validate(snapshot, action);
+		const failed = this.#failedPreflight;
+		this.#failedPreflight = undefined;
+		try {
+			// A new user action may recover its own scope's failed preflight, never an unrelated scope.
+			if (failed?.sessionId === snapshot.sessionId && failed.ownership === action.ownership) {
+				await this.#host.sessionManager.recoverPersistenceFromCurrentState();
+			}
+			if (prepare) await this.#host.preparePreservedMessages();
+			await this.#host.sessionManager.ensureOnDisk();
+			await this.#host.sessionManager.flush();
+		} catch (error) {
+			this.#failedPreflight = { sessionId: snapshot.sessionId, ownership: action.ownership };
+			throw error;
+		}
+		this.#validate(snapshot, action);
+	}
+
 	#validate(snapshot: PreservedMessageOverrideResetSnapshot, action: ResetAction): void {
 		const manager = this.#host.sessionManager;
-		if (manager.getSessionId() !== snapshot.sessionId || this.#host.ownership() !== action.ownership ||
-			this.#host.getQuery().resetId !== snapshot.resetId) {
+		if (
+			manager.getSessionId() !== snapshot.sessionId ||
+			this.#host.ownership() !== action.ownership ||
+			this.#host.getQuery().resetId !== snapshot.resetId
+		) {
 			throw new Error("The session, branch, or clear boundary changed; reopen the manual action.");
 		}
 		let cursor = manager.getLeafId();
@@ -203,19 +245,30 @@ export class SessionPreservation {
 		}
 	}
 
-	#targets(snapshot: PreservedMessageOverrideResetSnapshot, state: PreservationAction, skipNewer: boolean): {
-		messageIds: string[]; skipped: number;
+	#targets(
+		snapshot: PreservedMessageOverrideResetSnapshot,
+		state: PreservationAction,
+		skipNewer: boolean,
+	): {
+		messageIds: string[];
+		skipped: number;
 	} {
 		const query = this.#host.getQuery();
 		const messageIds: string[] = [];
 		let skipped = 0;
 		for (const captured of snapshot.groups) {
 			const current = query.getManualGroup(captured.id);
-			if (!current || current.memberIds.length !== captured.memberIds.length ||
-				current.memberIds.some((id, index) => id !== captured.memberIds[index])) {
+			if (
+				!current ||
+				current.memberIds.length !== captured.memberIds.length ||
+				current.memberIds.some((id, index) => id !== captured.memberIds[index])
+			) {
 				throw new Error("The captured source group changed; reopen the manual action.");
 			}
-			if (skipNewer && current.members.some((member, index) => member.revisionId !== captured.members[index]?.revisionId)) {
+			if (
+				skipNewer &&
+				current.members.some((member, index) => member.revisionId !== captured.members[index]?.revisionId)
+			) {
 				skipped += captured.memberIds.length;
 				continue;
 			}
@@ -224,7 +277,11 @@ export class SessionPreservation {
 		return { messageIds, skipped };
 	}
 
-	async #apply(snapshot: PreservedMessageOverrideResetSnapshot, state: PreservationAction, skipNewer: boolean): Promise<{ reset: number; skipped: number }> {
+	async #apply(
+		snapshot: PreservedMessageOverrideResetSnapshot,
+		state: PreservationAction,
+		skipNewer: boolean,
+	): Promise<{ reset: number; skipped: number }> {
 		const action = this.#actions.get(snapshot);
 		if (!action) throw new Error("Unknown manual reset snapshot; capture the action again.");
 		this.#validate(snapshot, action);
@@ -236,10 +293,7 @@ export class SessionPreservation {
 			await manager.flush();
 			this.#validate(snapshot, action);
 		} else {
-			await this.#host.preparePreservedMessages();
-			await manager.ensureOnDisk();
-			await manager.flush();
-			this.#validate(snapshot, action);
+			await this.#preflight(snapshot, action, true);
 			const targets = this.#targets(snapshot, state, skipNewer);
 			if (targets.messageIds.length === 0) {
 				action.complete = true;
@@ -250,7 +304,10 @@ export class SessionPreservation {
 					this.#validate(snapshot, action);
 					const current = this.#targets(snapshot, state, skipNewer);
 					if (current.messageIds.length === 0) return;
-					const entryId = manager.appendCustomEntry(MESSAGE_OVERRIDE_CUSTOM_TYPE, { messageIds: current.messageIds, state });
+					const entryId = manager.appendCustomEntry(MESSAGE_OVERRIDE_CUSTOM_TYPE, {
+						messageIds: current.messageIds,
+						state,
+					});
 					action.committed = { entryId, ...current };
 				});
 				await manager.flush();
