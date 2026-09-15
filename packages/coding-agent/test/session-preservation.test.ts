@@ -316,6 +316,19 @@ describe("durable manual preservation actions", () => {
 		expect(overrides(f.manager)).toHaveLength(2);
 	});
 
+	it("retries a manual state change after preflight fails without publishing a duplicate override", async () => {
+		let source = "";
+		const f = await fixture(manager => { source = user(manager, "manual state retry"); });
+		f.storage.failDrain = true;
+		await expect(f.preservation.setPreservedMessageOverride(source, "keep")).rejects.toThrow("flush failed");
+		expect(overrides(f.manager)).toEqual([]);
+		expect(f.changed).toEqual([]);
+		await f.preservation.setPreservedMessageOverride(source, "keep");
+		expect(overrides(f.manager)).toHaveLength(1);
+		expect(f.changed).toEqual([[source]]);
+		expect((await reopenedQuery(f.manager)).getManualGroup(source)?.members[0]?.state).toBe("keep");
+	});
+
 	it("retries the same logically committed transition after a flush failure", async () => {
 		let source = "";
 		const f = await fixture(manager => {

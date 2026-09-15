@@ -82,7 +82,7 @@ export class SessionPreservation {
 	readonly #actions = new WeakMap<PreservedMessageOverrideResetSnapshot, ResetAction>();
 	readonly #sets = new Map<string, { state: PreservationAction; snapshot: PreservedMessageOverrideResetSnapshot }>();
 	#tail: Promise<unknown> = Promise.resolve();
-	#failedCapture?: { sessionId: string; ownership: object };
+	#failedPreflight?: { sessionId: string; ownership: object };
 
 	constructor(host: SessionPreservationHost) {
 		this.#host = host;
@@ -126,21 +126,7 @@ export class SessionPreservation {
 				deadline = performance.now() + 4;
 			}
 		}
-		this.#validate(snapshot, action);
-		const failedCapture = this.#failedCapture;
-		this.#failedCapture = undefined;
-		try {
-			// A new user request may recover its own failed preflight, never an unrelated scope.
-			if (failedCapture?.sessionId === snapshot.sessionId && failedCapture.ownership === action.ownership) {
-				await this.#host.sessionManager.recoverPersistenceFromCurrentState();
-			}
-			await this.#host.sessionManager.ensureOnDisk();
-			await this.#host.sessionManager.flush();
-		} catch (error) {
-			this.#failedCapture = { sessionId: snapshot.sessionId, ownership: action.ownership };
-			throw error;
-		}
-		this.#validate(snapshot, action);
+		await this.#preflight(snapshot, action, false);
 		snapshot.groupCount = groups.length;
 		Object.freeze(groups);
 		Object.freeze(snapshot);
@@ -201,6 +187,25 @@ export class SessionPreservation {
 		return snapshot;
 	}
 
+	async #preflight(snapshot: PreservedMessageOverrideResetSnapshot, action: ResetAction, prepare: boolean): Promise<void> {
+		this.#validate(snapshot, action);
+		const failed = this.#failedPreflight;
+		this.#failedPreflight = undefined;
+		try {
+			// A new user action may recover its own scope's failed preflight, never an unrelated scope.
+			if (failed?.sessionId === snapshot.sessionId && failed.ownership === action.ownership) {
+				await this.#host.sessionManager.recoverPersistenceFromCurrentState();
+			}
+			if (prepare) await this.#host.preparePreservedMessages();
+			await this.#host.sessionManager.ensureOnDisk();
+			await this.#host.sessionManager.flush();
+		} catch (error) {
+			this.#failedPreflight = { sessionId: snapshot.sessionId, ownership: action.ownership };
+			throw error;
+		}
+		this.#validate(snapshot, action);
+	}
+
 	#validate(snapshot: PreservedMessageOverrideResetSnapshot, action: ResetAction): void {
 		const manager = this.#host.sessionManager;
 		if (manager.getSessionId() !== snapshot.sessionId || this.#host.ownership() !== action.ownership ||
@@ -249,10 +254,7 @@ export class SessionPreservation {
 			await manager.flush();
 			this.#validate(snapshot, action);
 		} else {
-			await this.#host.preparePreservedMessages();
-			await manager.ensureOnDisk();
-			await manager.flush();
-			this.#validate(snapshot, action);
+			await this.#preflight(snapshot, action, true);
 			const targets = this.#targets(snapshot, state, skipNewer);
 			if (targets.messageIds.length === 0) {
 				action.complete = true;

@@ -22,7 +22,7 @@
 ### Fixed
 
 - Atomic journal suffixes retain concurrent-writer protection across file, memory, SQLite and Redis storage, including failed or superseded queued writes and identical competing payloads; persistence recovery cannot overwrite a peer's durable turn.
-- Retrying a failed manual-reset capture now uses scoped persistence recovery on the next explicit request; the initial error remains visible and a concurrent writer's durable turn is never overwritten.
+- Retrying failed manual-preservation preflight now uses scoped persistence recovery on the next explicit capture or state-change request; the initial error remains visible and a concurrent writer's durable turn is never overwritten.
 - Fixed cold manual compaction cancelling when native replay provenance was lazily attached during its context projection. Read-only binding now leaves source JSON unchanged; controlled source rewrites explicitly persist native correspondence before remapping it.
 - Notes-backed local rollovers preserve selected originals without overriding extension-owned cuts, keep latest requests once in chronological replay, restore branch-local notebook state across resume and clear boundaries, and expose original input and provenance alongside delivered raw history.
 - Automatic snapcompact frame rescue no longer commits a smaller frame window when its text spill increases local context size; genuine reductions remain eligible even when they do not clear the headroom band.
