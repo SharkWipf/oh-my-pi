@@ -10,7 +10,7 @@ import {
 	truncateToWidth,
 } from "@oh-my-pi/pi-tui";
 import type { MessageRenderer } from "../../extensibility/extensions/types";
-import type { SessionMessageEntry } from "../../session/session-entries";
+import type { TranscriptEntry } from "../../session/session-context";
 import { theme } from "../theme/theme";
 import { matchesAppToolsExpand, matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../utils/keybinding-matchers";
 import { ChatTranscriptBuilder } from "./chat-transcript-builder";
@@ -21,14 +21,13 @@ import {
 	type OutlineTarget,
 	OutlineViewport,
 	positionRail,
-	userMessageHasText,
-	userMessageText,
+	userTurnLabel,
 } from "./transcript-outline";
 
 /** One alternate branch at a divergence: its root and message path root → most-recent leaf. */
 export interface BranchVariantPath {
 	rootId: string;
-	entries: SessionMessageEntry[];
+	entries: TranscriptEntry[];
 }
 
 export interface RewindSelectorDeps {
@@ -90,7 +89,7 @@ export class RewindSelectorComponent implements Component {
 	#branchError: string | undefined;
 
 	constructor(
-		entries: SessionMessageEntry[] | ((signal: AbortSignal) => Promise<SessionMessageEntry[]>),
+		entries: TranscriptEntry[] | ((signal: AbortSignal) => Promise<TranscriptEntry[]>),
 		private readonly deps: RewindSelectorDeps,
 	) {
 		this.#builder = this.#newBuilder();
@@ -99,7 +98,7 @@ export class RewindSelectorComponent implements Component {
 
 	get isLoading(): boolean { return this.#loading; }
 
-	async #loadSource(load: (signal: AbortSignal) => Promise<SessionMessageEntry[]>): Promise<void> {
+	async #loadSource(load: (signal: AbortSignal) => Promise<TranscriptEntry[]>): Promise<void> {
 		// The owner paints the cancellable overlay before acquisition starts.
 		await new Promise<void>(resolve => setImmediate(resolve));
 		if (this.#cancelled) return;
@@ -107,7 +106,7 @@ export class RewindSelectorComponent implements Component {
 		if (!this.#cancelled) await this.#buildIndex(entries);
 	}
 
-	async #buildIndex(entries: SessionMessageEntry[]): Promise<void> {
+	async #buildIndex(entries: TranscriptEntry[]): Promise<void> {
 		this.#sourceCount = entries.length;
 		let deadline = performance.now() + 8;
 		for (const entry of entries) {
@@ -206,7 +205,7 @@ export class RewindSelectorComponent implements Component {
 				if (sibling.entries.length === 0) continue;
 				// A branch caption need not scan an entire cold assistant run.
 				const first = sibling.entries[0]!;
-				const label = first.message.role === "user" && userMessageHasText(first.message) ? userMessageText(first.message) : sibling.rootId;
+				const label = userTurnLabel(first) || sibling.rootId;
 				this.#columns.push({ ...sibling, label, viewport: new OutlineViewport() });
 			}
 			this.#scrollToSelection = true;

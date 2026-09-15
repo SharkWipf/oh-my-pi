@@ -282,4 +282,48 @@ describe("RewindSelectorComponent", () => {
 		expect(selected).toEqual(["u2", "fresh"]);
 		selector.dispose();
 	});
+	it("treats persisted skill requests as user turns in lazy navigation", async () => {
+		const selected: string[] = [];
+		const selector = new RewindSelectorComponent([
+			entry("u1", null, userMessage("first prompt")),
+			{
+				type: "custom_message", id: "skill", parentId: "u1", timestamp: "2024-01-01T00:00:00Z",
+				customType: "skill-prompt", content: "expanded skill body", display: true, attribution: "user",
+				details: { name: "review", args: "focus", prompt: "/skill:review focus" },
+			},
+			entry("a1", "skill", assistantWithBashCall("call-1")),
+			entry("u2", "a1", userMessage("second prompt")),
+		], {
+			ui: { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI,
+			cwd: process.cwd(), requestRender: () => {}, onCancel: () => {}, onSelect: id => selected.push(id),
+		});
+		await selector.ready;
+		selector.render(80);
+		selector.handleInput(LEFT);
+		selector.handleInput(ENTER);
+		selector.handleInput(LEFT);
+		selector.handleInput(ENTER);
+		expect(selected).toEqual(["skill", "u1"]);
+		selector.dispose();
+	});
+	it("keeps an image-only request selectable without adding draft text", async () => {
+		const image = { type: "image" as const, mimeType: "image/png", data: "aW1hZ2U=" };
+		const message: AgentMessage = { role: "user", content: [image], timestamp: 1 };
+		const selected: string[] = [];
+		const selector = new RewindSelectorComponent([
+			entry("image", null, message),
+			entry("answer", "image", assistantWithBashCall("call-1")),
+			entry("latest", "answer", userMessage("next prompt")),
+		], {
+			ui: { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI,
+			cwd: process.cwd(), requestRender: () => {}, onCancel: () => {}, onSelect: id => selected.push(id),
+		});
+		await selector.ready;
+		selector.render(80);
+		selector.handleInput(LEFT);
+		selector.handleInput(ENTER);
+		expect(selected).toEqual(["image"]);
+		expect(message.content).toEqual([image]);
+		selector.dispose();
+	});
 });

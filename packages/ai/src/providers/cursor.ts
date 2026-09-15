@@ -957,7 +957,7 @@ function streamCursorWithWireMode(
 			endCurrentThinkingBlock(output, stream, state);
 			flushOpenToolCalls(output, stream, state);
 
-			calculateCost(model, output.usage);
+			calculateCost(model, output.usage, output.timestamp);
 
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
@@ -4504,7 +4504,13 @@ export function processInteractionUpdate(
 				let persisted: ToolResultMessage | undefined;
 				let hostError: string | null = null;
 				try {
-					persisted = state.onTodoSnapshot?.(snapshot, settled.id, error) ?? undefined;
+					persisted =
+						state.onTodoSnapshot?.(
+							snapshot,
+							settled.id,
+							error,
+							toolCall && selectTodoCalls(toolCall).read ? "read" : "update",
+						) ?? undefined;
 				} catch (callbackError) {
 					// A throwing host callback (e.g. session persistence failing on
 					// disk error) must not leave the resolved block unpaired: the

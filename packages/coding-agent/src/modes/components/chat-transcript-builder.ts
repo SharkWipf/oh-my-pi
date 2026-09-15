@@ -27,7 +27,8 @@ import {
 	SKILL_PROMPT_MESSAGE_TYPE,
 	type SkillPromptDetails,
 } from "../../session/messages";
-import type { SessionMessageEntry } from "../../session/session-entries";
+import { type TranscriptEntry, transcriptEntryMessage } from "../../session/session-context";
+import { chipLabel } from "../composer-attachments";
 import { theme } from "../theme/theme";
 import {
 	assistantHasVisibleContent,
@@ -45,6 +46,7 @@ import { AssistantMessageComponent } from "./assistant-message";
 import { createBackgroundTanDispatchBlock } from "./background-tan-message";
 import { BashExecutionComponent } from "./bash-execution";
 import { detectCacheInvalidation } from "./cache-invalidation-marker";
+import { ServedModelTracker } from "./served-model-marker";
 import { CollabPromptMessageComponent } from "./collab-prompt-message";
 import {
 	BranchSummaryMessageComponent,
@@ -82,10 +84,19 @@ export interface ChatTranscriptBuilderDeps {
 /** Extracts the plain-text content of a user message (string or text blocks). */
 function userMessageText(message: Extract<AgentMessage, { role: "user" }>): string {
 	if (typeof message.content === "string") return message.content;
-	return message.content
-		.filter((block): block is { type: "text"; text: string } => block.type === "text")
-		.map(block => block.text)
-		.join("");
+	let text = "";
+	let imageCount = 0;
+	for (const block of message.content) {
+		if (block.type === "text") text += block.text;
+		else if (block.type === "image") imageCount++;
+	}
+	if (text.trim() || imageCount === 0) return text;
+	// Image-only requests still need a selectable bubble; these chips are
+	// presentation only, never added to the stored request or returned draft.
+	for (let index = 1; index <= imageCount; index++) {
+		text += (index === 1 ? "" : " ") + chipLabel("image", index);
+	}
+	return text;
 }
 
 type ExpandableComponent = Component & { setExpanded?(expanded: boolean): void };
@@ -192,6 +203,7 @@ class DeferredReadGroup extends DeferredToolActivity<ReadToolGroupComponent> {
 	#entries = new Map<string, { args: ReplayReadArgs; result?: ReplayReadResult }>();
 	#usage: ReadUsage[] = [];
 	#sealed = false;
+	#finalized = false;
 	protected override configure(component: ReadToolGroupComponent): void {
 		super.configure(component);
 		for (const [id, entry] of this.#entries) {
@@ -199,6 +211,7 @@ class DeferredReadGroup extends DeferredToolActivity<ReadToolGroupComponent> {
 			if (entry.result) component.updateResult(entry.result, false, id);
 		}
 		for (const usage of this.#usage) component.attachUsage(...usage);
+		if (this.#finalized) component.finalize();
 		if (this.#sealed) component.seal();
 	}
 	updateArgs(args: ReplayReadArgs, id: string): void {
@@ -221,6 +234,7 @@ class DeferredReadGroup extends DeferredToolActivity<ReadToolGroupComponent> {
 		this.value?.attachUsage(...snapshot);
 		return true;
 	}
+	finalize(): void { this.#finalized = true; this.value?.finalize(); }
 	seal(): void { this.#sealed = true; this.value?.seal(); }
 }
 
@@ -240,6 +254,7 @@ export class ChatTranscriptBuilder {
 	#pendingUsageElapsedMs: number | undefined;
 	#turnStartedAt: number | undefined;
 	#lastAssistantUsage: Usage | undefined;
+	#servedModelTracker = new ServedModelTracker();
 	#waitingPoll: ReplayTool | null = null;
 	#todoSnapshot: ReplayTool | null = null;
 	#expandables: Array<{ setExpanded?(expanded: boolean): void }> = [];
@@ -258,7 +273,7 @@ export class ChatTranscriptBuilder {
 	}
 
 	/** Discard all components and rebuild the whole transcript from `entries`. */
-	rebuild(entries: SessionMessageEntry[]): void {
+	rebuild(entries: TranscriptEntry[]): void {
 		this.reset();
 		for (const entry of entries) this.#appendEntry(entry);
 		// Flush the trailing turn's usage row only once its tools are materialized
@@ -268,7 +283,7 @@ export class ChatTranscriptBuilder {
 	}
 
 	/** Append newly persisted entries without rebuilding already rendered rows. */
-	append(entries: SessionMessageEntry[]): void {
+	append(entries: TranscriptEntry[]): void {
 		for (const entry of entries) this.#appendEntry(entry);
 		if (this.#readArgs.size === 0 && this.#pendingTools.size === 0) this.#flushPendingUsage();
 	}
@@ -324,6 +339,7 @@ export class ChatTranscriptBuilder {
 		this.#pendingUsageElapsedMs = undefined;
 		this.#turnStartedAt = undefined;
 		this.#lastAssistantUsage = undefined;
+		this.#servedModelTracker = new ServedModelTracker();
 		this.#waitingPoll = null;
 		this.#todoSnapshot = null;
 		this.#expandables = [];
@@ -337,9 +353,11 @@ export class ChatTranscriptBuilder {
 		this.reset();
 	}
 
-	#appendEntry(entry: SessionMessageEntry): void {
+	#appendEntry(entry: TranscriptEntry): void {
+		const message = transcriptEntryMessage(entry);
+		if (!message) return;
 		const before = this.container.children.length;
-		this.#appendChatMessage(entry.message);
+		this.#appendChatMessage(message);
 		const components = this.container.children.slice(before);
 		if (components.length > 0) this.#entryComponents.set(entry.id, components);
 	}
@@ -474,7 +492,7 @@ export class ChatTranscriptBuilder {
 					if (isSynthetic) {
 						this.#addComponent(() => new CollapsedSyntheticMessageComponent(textContent), true);
 					} else {
-						const factory = () => new UserMessageComponent(textContent, false);
+						const factory = () => new UserMessageComponent(textContent);
 						const component = this.deps.deferComponents ? new DeferredUserMessage(factory, this.#materialized) : factory();
 						this.#reactionTarget = component;
 						this.container.addChild(component);
@@ -488,6 +506,7 @@ export class ChatTranscriptBuilder {
 					if (message.output) component.appendOutput(message.output);
 					component.setComplete(message.exitCode, message.cancelled, {
 						truncation: message.meta?.truncation,
+						artifactError: message.meta?.artifactError,
 						images: message.images,
 						showImages: settings.get("terminal.showImages"),
 					});
@@ -499,7 +518,10 @@ export class ChatTranscriptBuilder {
 				this.#addComponent(() => {
 					const component = new EvalExecutionComponent(message.code, this.deps.ui, message.excludeFromContext);
 					if (message.output) component.appendOutput(message.output);
-					component.setComplete(message.exitCode, message.cancelled, { truncation: message.meta?.truncation });
+					component.setComplete(message.exitCode, message.cancelled, {
+						truncation: message.meta?.truncation,
+						artifactError: message.meta?.artifactError,
+					});
 					return component;
 				});
 				break;
@@ -554,6 +576,7 @@ export class ChatTranscriptBuilder {
 				if (reaction !== undefined) reactionTarget.setReaction(reaction);
 			}
 		}
+		const servedModelMismatch = this.#servedModelTracker.check(message);
 		const assistantComponent = this.#component(() => {
 			const component = new AssistantMessageComponent(
 				timeline.beforeTools, hideThinkingBlock, () => this.deps.requestRender(),
@@ -564,11 +587,12 @@ export class ChatTranscriptBuilder {
 			component.setToolResultImagesVisible(!settings.get("display.hideToolActivity"));
 			component.pickReactionTarget(this.deps.deferComponents ? (reactionTarget ? [reactionTarget] : []) : this.container.children);
 			if (invalidation) component.setCacheInvalidation(invalidation);
+			component.setServedModelMismatch(servedModelMismatch);
 			return component;
 		});
 		// Tool-only prefixes cannot paint; keep their exact source slots without
 		// instantiating an empty assistant renderer while seeking through a read run.
-		if (assistantComponent instanceof DeferredTranscriptComponent && !invalidation &&
+		if (assistantComponent instanceof DeferredTranscriptComponent && !invalidation && !servedModelMismatch &&
 			timeline.beforeTools.content.every(content => content.type === "toolCall") && errorPresentation.kind === "none") {
 			assistantComponent.retire();
 		}
@@ -589,6 +613,8 @@ export class ChatTranscriptBuilder {
 		const errorMessage = hasErrorStop ? errorPresentation.text : null;
 		const appendAssistantSegment = (segment: Extract<AgentMessage, { role: "assistant" }> | undefined) => {
 			if (!segment || !assistantHasVisibleContent(segment)) return;
+			this.#readGroup?.finalize();
+			this.#readGroup = null;
 			this.#addComponent(() => {
 				const component = new AssistantMessageComponent(
 					segment, hideThinkingBlock, () => this.deps.requestRender(),
@@ -615,7 +641,7 @@ export class ChatTranscriptBuilder {
 						false,
 						content.id,
 					);
-				} else if (afterToolSegment) {
+				} else if (timeline.afterToolCalls.size > 0) {
 					const group = this.#ensureReadGroup();
 					group.updateArgs(content.arguments, content.id);
 					this.#pendingTools.set(content.id, group);
