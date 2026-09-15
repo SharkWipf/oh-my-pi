@@ -78,6 +78,7 @@ import {
 	type ReasoningConfig,
 	type RequestBody,
 	resolveCodexResponsesLite,
+	sanitizeCodexCallId,
 	transformRequestBody,
 } from "./openai-codex/request-transformer";
 import { CodexApiError } from "./openai-codex/response-handler";
@@ -811,6 +812,7 @@ interface CodexOpenItem {
 	contentIndex: number;
 	itemId?: string;
 	outputIndex?: number;
+	nativeOutputItem?: Record<string, unknown>;
 }
 
 class CodexStreamRuntime {
@@ -840,7 +842,8 @@ class CodexStreamRuntime {
 	currentItem: CodexEventItem | null = null;
 	currentBlock: CodexOutputBlock | null = null;
 	nativeOutputItems: Array<Record<string, unknown>> = [];
-	contentBlocks: Array<{ itemIndex: number; contentIndex: number }> = [];
+	nativeOutputContentIndices = new Map<Record<string, unknown>, number>();
+	nativeOutputEntries: CodexOpenItem[] = [];
 	/** Sequential-cutoff summary sections/emitted text, global to the response (indices span reasoning items). */
 	cutoffSummaries: SequentialCutoffSummaryState = createSequentialCutoffSummaryState();
 	/** Summary deltas buffered while waiting to see whether atomic `.done` events arrive. */
@@ -877,9 +880,32 @@ class CodexStreamRuntime {
 		this.currentItem = null;
 		this.currentBlock = null;
 		this.nativeOutputItems.length = 0;
-		this.contentBlocks.length = 0;
+		this.nativeOutputContentIndices.clear();
+		this.nativeOutputEntries.length = 0;
 		this.pendingSummaryDeltas.clear();
 		this.cutoffSummaries = createSequentialCutoffSummaryState();
+	}
+
+	/** Resolve correspondence only after native entries have their final added-order positions. */
+	finalizeNativeContentBlocks(): Array<{ itemIndex: number; contentIndex: number }> {
+		const contentBlocks: Array<{ itemIndex: number; contentIndex: number }> = [];
+		for (let itemIndex = 0; itemIndex < this.nativeOutputItems.length; itemIndex++) {
+			const contentIndex = this.nativeOutputContentIndices.get(this.nativeOutputItems[itemIndex]!);
+			if (contentIndex !== undefined) contentBlocks.push({ itemIndex, contentIndex });
+		}
+		return contentBlocks;
+	}
+
+	finalizeNativeOutputItems(): Array<Record<string, unknown>> {
+		if (this.nativeOutputEntries.length === 0) return this.nativeOutputItems;
+		const ordered: Array<Record<string, unknown>> = [];
+		for (const entry of this.nativeOutputEntries) {
+			if (entry.nativeOutputItem) ordered.push(entry.nativeOutputItem);
+		}
+		ordered.push(...this.nativeOutputItems);
+		this.nativeOutputEntries.length = 0;
+		this.nativeOutputItems = ordered;
+		return ordered;
 	}
 
 	/**
@@ -2197,6 +2223,7 @@ class CodexStreamProcessor {
 					? Math.trunc(rawEvent.output_index)
 					: undefined;
 			const entry: CodexOpenItem = { item, block: this.runtime.currentBlock, contentIndex, itemId, outputIndex };
+			this.runtime.nativeOutputEntries.push(entry);
 			this.runtime.currentEntry = entry;
 			if (itemId) this.runtime.openItems.set(itemId, entry);
 			if (outputIndex !== undefined) this.runtime.openItemsByOutputIndex.set(outputIndex, entry);
@@ -2403,7 +2430,6 @@ class CodexStreamProcessor {
 		if (!rawItem || typeof rawItem !== "object") return;
 		const item = structuredCloneJSON(rawItem) as CodexEventItem;
 		if (item.type === "image_generation_call" && item.result) item.status = "completed";
-		runtime.nativeOutputItems.push(item as unknown as Record<string, unknown>);
 
 		// Match the finalization to the OPEN ITEM that started this block, not the
 		// singleton current — interleaved items can finish out of order, so the
@@ -2412,11 +2438,14 @@ class CodexStreamProcessor {
 		// routes `output_item.done` to the block that received `output_item.added`.
 		const itemId = "id" in item && typeof item.id === "string" ? item.id : "";
 		const entry = (itemId ? runtime.openItems.get(itemId) : null) ?? runtime.openItemForEvent(rawEvent);
+		const nativeOutputItem = item as unknown as Record<string, unknown>;
+		if (entry) entry.nativeOutputItem = nativeOutputItem;
+		else runtime.nativeOutputItems.push(nativeOutputItem);
 		const block = entry?.block ?? null;
 		const contentIndex = entry?.contentIndex ?? output.content.length - 1;
 
 		if (item.type === "image_generation_call" && item.result) {
-			runtime.contentBlocks.push({ itemIndex: runtime.nativeOutputItems.length - 1, contentIndex: appendResponsesImageResult(output, stream, item.result) });
+			runtime.nativeOutputContentIndices.set(nativeOutputItem, appendResponsesImageResult(output, stream, item.result));
 			runtime.closeOpenItem(entry);
 			return;
 		}
@@ -2435,7 +2464,7 @@ class CodexStreamProcessor {
 				content: block.thinking,
 				partial: output,
 			});
-			runtime.contentBlocks.push({ itemIndex: runtime.nativeOutputItems.length - 1, contentIndex });
+			runtime.nativeOutputContentIndices.set(nativeOutputItem, contentIndex);
 			runtime.closeOpenItem(entry);
 			return;
 		}
@@ -2450,7 +2479,7 @@ class CodexStreamProcessor {
 				content: block.text,
 				partial: output,
 			});
-			runtime.contentBlocks.push({ itemIndex: runtime.nativeOutputItems.length - 1, contentIndex });
+			runtime.nativeOutputContentIndices.set(nativeOutputItem, contentIndex);
 			runtime.closeOpenItem(entry);
 			return;
 		}
@@ -2470,7 +2499,7 @@ class CodexStreamProcessor {
 			}
 			// Detach so a late/duplicate arguments.delta cannot append to the
 			// finished block or trip the whitespace-loop guard against it.
-			if (block?.type === "toolCall") runtime.contentBlocks.push({ itemIndex: runtime.nativeOutputItems.length - 1, contentIndex });
+			if (block?.type === "toolCall") runtime.nativeOutputContentIndices.set(nativeOutputItem, contentIndex);
 			runtime.closeOpenItem(entry);
 			runtime.canSafelyReplayWebsocketOverSse = false;
 			stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
@@ -2494,7 +2523,7 @@ class CodexStreamProcessor {
 				output.content.push(toolCall);
 				resolvedContentIndex = output.content.length - 1;
 			}
-			runtime.contentBlocks.push({ itemIndex: runtime.nativeOutputItems.length - 1, contentIndex: resolvedContentIndex });
+			runtime.nativeOutputContentIndices.set(nativeOutputItem, resolvedContentIndex);
 			runtime.closeOpenItem(entry);
 			runtime.canSafelyReplayWebsocketOverSse = false;
 			stream.push({ type: "toolcall_end", contentIndex: resolvedContentIndex, toolCall, partial: output });
@@ -2515,7 +2544,7 @@ class CodexStreamProcessor {
 				block.arguments = { input: rawInput };
 				clearStreamingPartialJson(block);
 			}
-			if (block?.type === "toolCall") runtime.contentBlocks.push({ itemIndex: runtime.nativeOutputItems.length - 1, contentIndex });
+			if (block?.type === "toolCall") runtime.nativeOutputContentIndices.set(nativeOutputItem, contentIndex);
 			runtime.closeOpenItem(entry);
 			runtime.canSafelyReplayWebsocketOverSse = false;
 			stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
@@ -2550,16 +2579,19 @@ class CodexStreamProcessor {
 				resetCodexWebSocketAppendState(state);
 			} else {
 				state.lastRequest = structuredCloneJSON(runtime.requestBodyForState);
+				const nativeOutputItems = runtime.finalizeNativeOutputItems();
 				const replayableResponseItems = sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(
-					structuredCloneJSON(runtime.nativeOutputItems),
+					structuredCloneJSON(nativeOutputItems),
 				);
-				if (responseId && replayableResponseItems) {
+				if (responseId && replayableResponseItems && replayableResponseItems.length === nativeOutputItems.length) {
 					state.lastResponseId = responseId;
 					state.lastResponseItems = replayableResponseItems;
 					state.canAppend = rawEvent.type === "response.done" || rawEvent.type === "response.completed";
 				} else {
-					// Without both a response id and replayable output, the append baseline cannot be trusted.
-					state.canAppend = false;
+					// No response id, or replay sanitization dropped an item the server
+					// still holds. Sanitization is 1:1-or-fewer, so either case makes the
+					// append baseline untrustworthy; next turn must replay in full.
+					resetCodexWebSocketAppendState(state);
 				}
 			}
 		}
@@ -2579,7 +2611,7 @@ class CodexStreamProcessor {
 			hasExecutableIncompleteResponsesToolCalls(output);
 		finalizePendingResponsesToolCalls(output);
 
-		calculateCost(model, output.usage);
+		calculateCost(model, output.usage, output.timestamp);
 		applyCodexServiceTierPricing(model, output.usage, serviceTier, runtime.requestBodyForState.service_tier);
 		output.stopReason = mapOpenAIResponsesStopReason(status);
 		promoteResponsesToolUseStopReason(
@@ -2974,7 +3006,12 @@ class CodexStreamProcessor {
 			throw new CodexProviderStreamError("Codex response failed", false);
 		}
 
-		output.providerPayload = createOpenAIResponsesHistoryPayload(this.model.provider, this.runtime.nativeOutputItems, true, this.runtime.contentBlocks);
+		output.providerPayload = createOpenAIResponsesHistoryPayload(
+			this.model.provider,
+			this.runtime.finalizeNativeOutputItems(),
+			true,
+			this.runtime.finalizeNativeContentBlocks(),
+		);
 		output.duration = performance.now() - this.startTime;
 		if (completion.firstTokenTime) {
 			output.ttft = completion.firstTokenTime - this.startTime;
@@ -4535,16 +4572,14 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 	const messages: ResponseInput = [];
 
 	const normalizeToolCallId = (id: string): string => {
-		if (!id.includes("|")) return id;
-		const [callId, itemId] = id.split("|");
-		const sanitizedCallId = callId.replace(/[^a-zA-Z0-9_-]/g, "_");
-		let sanitizedItemId = itemId.replace(/[^a-zA-Z0-9_-]/g, "_");
+		const sep = id.search(/[\n|]/);
+		const [callId, itemId] = sep > 0 ? [id.slice(0, sep), id.slice(sep + 1)] : [id, undefined];
+		const normalizedCallId = sanitizeCodexCallId(callId);
+		let sanitizedItemId = (itemId ?? Bun.hash(id).toString(36)).replace(/[^a-zA-Z0-9_-]/g, "_");
 		if (!sanitizedItemId.startsWith("fc")) {
 			sanitizedItemId = `fc_${sanitizedItemId}`;
 		}
-		let normalizedCallId = sanitizedCallId.length > 64 ? sanitizedCallId.slice(0, 64) : sanitizedCallId;
 		let normalizedItemId = sanitizedItemId.length > 64 ? sanitizedItemId.slice(0, 64) : sanitizedItemId;
-		normalizedCallId = normalizedCallId.replace(/_+$/, "");
 		normalizedItemId = normalizedItemId.replace(/_+$/, "");
 		return `${normalizedCallId}|${normalizedItemId}`;
 	};
@@ -4844,7 +4879,12 @@ export function isRetryableCodexFailureEvent(rawEvent: Record<string, unknown>):
 		return true;
 	}
 	const message = error?.message ?? event.message ?? event.response?.message;
-	return !!message && CODEX_RETRYABLE_EVENT_MESSAGE.test(message);
+	return (
+		!!message &&
+		(CODEX_RETRYABLE_EVENT_MESSAGE.test(message) ||
+			AIError.PYTHON_HTTP2_STREAM_RESET_PATTERN.test(message) ||
+			AIError.PYTHON_HTTP_INCOMPLETE_CHUNK_PATTERN.test(message))
+	);
 }
 
 export function createCodexProviderStreamError(rawEvent: Record<string, unknown>): CodexProviderStreamError {

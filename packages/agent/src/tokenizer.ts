@@ -1,6 +1,4 @@
 import type { Model } from "@oh-my-pi/pi-ai";
-import { getSourceOrigin } from "@oh-my-pi/pi-ai/utils/source-origin";
-import { visitOpenAIResponsesLogicalContent, visitOpenAIResponsesSourceContent } from "@oh-my-pi/pi-ai/utils";
 import type { ModelTokenizer } from "@oh-my-pi/pi-catalog/types";
 import * as natives from "@oh-my-pi/pi-natives";
 import { stringifyJson } from "@oh-my-pi/pi-utils";
@@ -103,7 +101,7 @@ export interface TokenBudgetCheck {
 }
 
 /**
- * Baseline per original image in user, developer, custom, assistant, tool and hook messages.
+ * Baseline per original image in user, developer, tool and hook messages.
  * This local estimate is independent of provider/model/detail, not a bill.
  * A representation-specific projection must replace this charge (add only
  * its effective image estimate minus this baseline), never add a second image.
@@ -223,10 +221,10 @@ export class Tokenizer {
 		}
 
 		switch (message.role) {
-			case "custom":
-			case "developer":
-			case "user": {
-				const content: string | Array<{ type: string; text?: string }> = message.content;
+			case "user":
+			case "developer": {
+				// Both roles carry text and images sent to the provider.
+				const content = message.content;
 				if (typeof content === "string") {
 					fragments.push(content);
 				} else if (Array.isArray(content)) {
@@ -241,12 +239,6 @@ export class Tokenizer {
 				break;
 			}
 			case "assistant": {
-				visitOpenAIResponsesSourceContent(message, {
-					sourceText: text => fragments.push(text),
-					image: () => {
-						extra += IMAGE_TOKEN_ESTIMATE;
-					},
-				});
 				for (const block of message.content) {
 					if (block.type === "text") {
 						fragments.push(block.text);
@@ -263,13 +255,12 @@ export class Tokenizer {
 							fragments.push(block.thinkingSignature);
 						}
 					} else if (block.type === "toolCall") {
-						visitOpenAIResponsesLogicalContent(block, { sourceText: text => fragments.push(text) });
+						fragments.push(block.name);
+						fragments.push(stringifyJson(block.arguments) ?? "null");
 					} else if (block.type === "redactedThinking") {
 						// Encrypted reasoning blob the provider still bills for on replay;
 						// excluded from the compaction floor for the same reason as above.
 						if (!excludeEncryptedReasoning) fragments.push(block.data);
-					} else if (block.type === "image") {
-						extra += IMAGE_TOKEN_ESTIMATE;
 					} else if (block.type === "anthropicServerTool") {
 						// Native Anthropic server-tool call/result replayed verbatim on the
 						// wire (server_tool_use input and opaque result content). The provider
@@ -281,19 +272,16 @@ export class Tokenizer {
 				}
 				break;
 			}
+			case "custom":
 			case "hookMessage":
 			case "toolResult": {
-				// Computer serializers consume the typed screenshot, not content image mirrors.
-				const hasComputerScreenshot =
-					message.role === "toolResult" && message.providerMetadata?.type === "computer";
-				if (hasComputerScreenshot) extra += IMAGE_TOKEN_ESTIMATE;
 				if (typeof message.content === "string") {
 					fragments.push(message.content);
 				} else {
 					for (const block of message.content) {
 						if (block.type === "text" && block.text) {
 							fragments.push(block.text);
-						} else if (block.type === "image" && !hasComputerScreenshot) {
+						} else if (block.type === "image") {
 							extra += IMAGE_TOKEN_ESTIMATE;
 						}
 					}
@@ -307,14 +295,7 @@ export class Tokenizer {
 					if (message.blocks) {
 						for (const block of message.blocks) {
 							if (block.type === "text") fragments.push(block.text);
-							else {
-								const origin = getSourceOrigin(block);
-								const originalImage =
-									origin?.kind === "source" &&
-									origin.parts.length > 0 &&
-									origin.parts.every(part => part.representation === "original-image");
-								extra += originalImage ? IMAGE_TOKEN_ESTIMATE : snapcompact.FRAME_TOKEN_ESTIMATE;
-							}
+							else extra += snapcompact.FRAME_TOKEN_ESTIMATE;
 						}
 					} else if (message.images) {
 						// Snapcompact frames render at ≥1568px; providers bill the downscaled cap.
