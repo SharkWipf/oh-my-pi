@@ -10,7 +10,6 @@
  * - Events: AgentSessionEvent objects streamed as they occur
  * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
  */
-import { once } from "node:events";
 import type { OriginalSubmission } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
@@ -199,8 +198,7 @@ export async function dispatchRpcSkillPrompt(input: {
 	// keep that error contract by awaiting it before answering. The expensive
 	// promptCustomMessage pipeline (usage preflight, compaction, provider
 	// calls) is what moves behind the acknowledgement.
-	const originalSubmission =
-		input.originalSubmission ?? { text: input.message };
+	const originalSubmission = input.originalSubmission ?? { text: input.message };
 	const built = await buildSkillPromptMessage(invocation.skill, invocation, "user");
 	watchAndReportLocalOnlyPromptResult({
 		id: input.id,

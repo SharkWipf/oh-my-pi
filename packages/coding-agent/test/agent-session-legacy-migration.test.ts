@@ -22,7 +22,6 @@ test("next-real legacy migration preserves installed history and reports unavail
 	const auth = createInMemoryAuthStorage();
 	auth.setRuntimeApiKey("openai", "isolated-no-provider");
 	const settings = Settings.isolated({
-		"requirements.enabled": false,
 		"snapcompact.shape": "8x13-bw",
 		"compaction.methodOrder": ["snapcompact"],
 		"compaction.keepUserMessages": false,

@@ -1,4 +1,4 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import { defaultConvertToLlm } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { buildSessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
@@ -129,7 +129,6 @@ describe("buildSessionContext", () => {
 			expect(ctx.messages).toHaveLength(4);
 			expect(ctx.messages.map(m => m.role)).toEqual(["user", "assistant", "user", "assistant"]);
 		});
-
 
 		it("tracks thinking level changes", () => {
 			const entries: SessionEntry[] = [

@@ -604,14 +604,23 @@ describe("queued user delivery policy", () => {
 	});
 
 	it("discards policy and returned context on abort while preserving the undelivered steer", async () => {
-		const { agent, requests, delivered, pausePreparation } = setup();
+		const { requests, delivered, pausePreparation } = setup();
 		const started = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
 		pausePreparation(async () => {
 			started.resolve();
 			await release.promise;
 		});
-		await session.steer("abort before delivery");
+		const originalSubmission = {
+			text: "/skill:review original request",
+			imageLinks: ["file:///original.png"],
+			compactionOverride: "keep" as const,
+		};
+		await session.steer("abort before delivery", undefined, {
+			producer: { type: "human" },
+			originalSubmission,
+			compactionOverride: "keep",
+		});
 		await started.promise;
 		const abort = session.abort();
 		release.resolve();
@@ -619,7 +628,10 @@ describe("queued user delivery policy", () => {
 		expect(requests).toEqual([]);
 		expect(delivered.filter(message => message.role === "user" || message.role === "custom")).toEqual([]);
 		expect(session.systemPrompt).toEqual(BASE);
-		expect(agent.peekSteeringQueue()).toMatchObject([{ content: [{ type: "text", text: "abort before delivery" }] }]);
+		expect(session.clearQueue()).toEqual({
+			steering: [{ ...originalSubmission, originalSubmission, images: undefined }],
+			followUp: [],
+		});
 	});
 
 	it("uses a handler's refreshed base in the same request without an extension override", async () => {

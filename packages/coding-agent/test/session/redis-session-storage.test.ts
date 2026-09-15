@@ -80,22 +80,26 @@ function createFakeRedis(): FakeRedis {
 				checkFailure("set");
 				checkFailure("hset");
 				const [fileKey, metaKey, titleKey] = keys;
-				const [content, filePath, mtimeMs, hasTitle, title] = argv;
+				const [content, filePath, mtimeMs, hasTitle, title, expected] = argv;
+				const actual = strings.has(fileKey) ? Buffer.byteLength(strings.get(fileKey)!) : -1;
+				if (expected !== "" && expected !== undefined && actual !== Number(expected)) return [0, actual];
 				strings.set(fileKey, content);
 				getHash(metaKey).set(filePath, mtimeMs);
 				if (hasTitle === "1") getHash(titleKey).set(filePath, title);
 				else getHash(titleKey).delete(filePath);
-				return 1;
+				return [1, Buffer.byteLength(content)];
 			}
 			if (script.includes("OMP_APPEND")) {
 				checkFailure("append");
 				checkFailure("hset");
 				const [fileKey, metaKey] = keys;
-				const [line, filePath, mtimeMs] = argv;
+				const [line, filePath, mtimeMs, expected] = argv;
+				const actual = strings.has(fileKey) ? Buffer.byteLength(strings.get(fileKey)!) : -1;
+				if (expected !== "" && expected !== undefined && actual !== Number(expected)) return [0, actual];
 				const next = (strings.get(fileKey) ?? "") + line;
 				strings.set(fileKey, next);
 				getHash(metaKey).set(filePath, mtimeMs);
-				return Buffer.byteLength(next, "utf-8");
+				return [1, Buffer.byteLength(next, "utf-8")];
 			}
 			if (script.includes("OMP_UPDATE_TITLE")) {
 				checkFailure("hset");

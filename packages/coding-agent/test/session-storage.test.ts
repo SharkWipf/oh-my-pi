@@ -8,7 +8,12 @@ import {
 	type SessionStorageBackend,
 	type SessionStorageIndexEntry,
 } from "@oh-my-pi/pi-coding-agent/session/indexed-session-storage";
-import { FileSessionStorage, MemorySessionStorage, SessionLockError } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import {
+	FileSessionStorage,
+	MemorySessionStorage,
+	SessionLockError,
+	SessionWriteConflictError,
+} from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { type SessionTitleUpdate, serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 
 class ControlledTitleUpdateBackend implements SessionStorageBackend {
@@ -634,6 +639,26 @@ describe("SessionStorage.appendTextAtomic", () => {
 			const target = path.join(tempDir, "missing.jsonl");
 			await expect(storage.appendTextAtomic(target, "batch\n")).rejects.toThrow();
 			expect(storage.existsSync(target)).toBe(false);
+		});
+		it(Storage.name + " rejects one of two simultaneous suffixes without erasing the winner", async () => {
+			const storage = new Storage();
+			const target = path.join(tempDir, "concurrent.jsonl");
+			storage.writeTextSync(target, "seed\n");
+			const outcomes = await Promise.allSettled([
+				storage.appendTextAtomic(target, "first-é\n", { expectedSize: 5 }),
+				storage.appendTextAtomic(target, "second-猫\n", { expectedSize: 5 }),
+			]);
+			expect(outcomes.filter(result => result.status === "fulfilled")).toHaveLength(1);
+			const rejected = outcomes.find(result => result.status === "rejected");
+			expect(rejected?.status === "rejected" && rejected.reason).toBeInstanceOf(SessionWriteConflictError);
+			const content = await storage.readText(target);
+			expect(content).toBe(outcomes[0].status === "fulfilled" ? "seed\nfirst-é\n" : "seed\nsecond-猫\n");
+			await expect(
+				Promise.resolve().then(() => storage.writeTextAtomic(target, "stale", { expectedSize: 5 })),
+			).rejects.toBeInstanceOf(SessionWriteConflictError);
+			expect(await storage.readText(target)).toBe(content);
+			await storage.writeTextAtomic(target, "fresh", { expectedSize: Buffer.byteLength(content) });
+			expect(await storage.readText(target)).toBe("fresh");
 		});
 	}
 
