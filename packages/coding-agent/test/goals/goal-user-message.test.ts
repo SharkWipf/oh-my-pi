@@ -94,6 +94,9 @@ describe("goal objective ordinary delivery", () => {
 		expect(users[1]!.message).toMatchObject({ role: "user", attribution: "user", producer: { type: "tool", name: "goal", toolCallId: "goal-create" } });
 		const reopened = await SessionManager.open(h.manager.getSessionFile()!);
 		expect(userEntries(reopened)).toEqual(JSON.parse(JSON.stringify(users)));
+		expect(reopened.buildSessionContext().messages.filter(message => message.role === "user")).toEqual(
+			JSON.parse(JSON.stringify(users.map(entry => entry.message))),
+		);
 		h.settings.override("goal.injectAsUserMessage", false);
 		expect(await h.session.switchSession(h.manager.getSessionFile()!)).toBe(true);
 		await operation(h.tool, "get");
@@ -101,7 +104,7 @@ describe("goal objective ordinary delivery", () => {
 		await operation(h.tool, "complete");
 		await operation(h.tool, "drop");
 		expect(h.session.queuedMessageCount).toBe(0);
-		expect(userEntries(h.manager).map(entry => entry.id)).toEqual(users.map(entry => entry.id));
+		expect(userEntries(h.manager)).toEqual(users);
 	});
 
 	it("drains a successful model goal create after the tool atom, not as an interrupt or duplicate", async () => {
@@ -139,10 +142,19 @@ describe("goal objective ordinary delivery", () => {
 		initTheme();
 		const mode = new InteractiveMode(h.session, "test");
 		try {
-			await mode.handleGoalModeCommand("Direct objective");
+			let delivery: Promise<void> | undefined;
+			mode.onInputCallback = input => {
+				mode.onInputCallback = undefined;
+				delivery = h.session.prompt(input.text);
+			};
+			expect(await mode.handleGoalModeCommand("Direct objective")).toBe(true);
+			await delivery;
+			await settle(h.session);
 			expect(h.session.getGoalModeState()?.goal.objective).toBe("Direct objective");
 			expect(h.session.getQueuedMessages()).toEqual({ steering: [], followUp: [] });
-			expect(userEntries(h.manager)).toEqual([]);
+			expect(userEntries(h.manager).map(entry => entry.message.content)).toEqual([
+				[{ type: "text", text: "Direct objective" }],
+			]);
 		} finally {
 			mode.stop();
 		}
