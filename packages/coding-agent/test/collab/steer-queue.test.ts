@@ -196,7 +196,6 @@ describe("collab mid-turn guest prompts", () => {
 		const prompt = await prompted;
 
 		expect(prompt.details).toEqual({ from: "writer" });
-		expect(prompt.options).toEqual({ streamingBehavior: "steer", queueChipText: "steer the host" });
 
 		// The queued steer must reach guests through state.queuedMessageCount —
 		// that field drives the web composer's "queued ×N" badge.

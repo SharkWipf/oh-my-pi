@@ -212,7 +212,7 @@ export class SettingsList implements Component {
 
 	/** Resize the visible viewport (fullscreen hosts call this every render). */
 	setMaxVisible(rows: number): void {
-		const next = Math.max(3, Math.floor(rows));
+		const next = Math.max(1, Math.floor(rows));
 		if (next === this.#maxVisible) return;
 		this.#maxVisible = next;
 		this.#clampSelectedIndex();
@@ -529,7 +529,8 @@ export class SettingsList implements Component {
 		const prefix = isSelected ? this.#theme.cursor : "  ";
 		const prefixWidth = visibleWidth(prefix);
 		const mark = this.#warningMark(item);
-		const labelPlain = item.label + mark;
+		const label = truncateToWidth(item.label, Math.max(0, maxLabelWidth - visibleWidth(mark)));
+		const labelPlain = label + mark;
 		const labelPad = padding(Math.max(0, maxLabelWidth - visibleWidth(labelPlain)));
 		const separator = "  ";
 		const valueMaxWidth = rowWidth - prefixWidth - maxLabelWidth - visibleWidth(separator) - 2;
@@ -545,7 +546,7 @@ export class SettingsList implements Component {
 		}
 		const warningStyle = this.#theme.warning ?? this.#theme.description;
 		const labelText =
-			this.#theme.label(item.label, isSelected, item.changed === true) + (mark ? warningStyle(mark) : "") + labelPad;
+			this.#theme.label(label, isSelected, item.changed === true) + (mark ? warningStyle(mark) : "") + labelPad;
 		const valueText = this.#theme.value(valuePlain, isSelected, item.changed === true);
 		const text = truncateToWidth(prefix + labelText + separator + valueText, Math.max(0, rowWidth));
 		// Pointer hover paints a band behind the whole row, distinct from the
@@ -590,7 +591,11 @@ export class SettingsList implements Component {
 			const labelWidths = this.#filteredItems
 				.filter(item => !item.heading)
 				.map(item => visibleWidth(item.label + this.#warningMark(item)));
-			const maxLabelWidth = Math.min(30, labelWidths.length > 0 ? Math.max(...labelWidths) : 0);
+			const maxLabelWidth = Math.min(
+				30,
+				Math.max(1, Math.floor((width - 6) * 0.65)),
+				labelWidths.length > 0 ? Math.max(...labelWidths) : 0,
+			);
 			const itemRowsOverflow = this.#filteredItems.length > viewportHeight;
 			const itemRowWidth = Math.max(0, width - (itemRowsOverflow ? 1 : 0));
 			const visibleItems = this.#filteredItems.slice(startIndex, startIndex + viewportHeight);

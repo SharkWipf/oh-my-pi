@@ -6977,6 +6977,7 @@ export class AgentSession {
 						this.#tools.setTurnSystemPromptOverride(result.systemPrompt);
 					} else {
 						this.#tools.clearTurnSystemPromptOverride();
+
 					}
 					return messages;
 				},
@@ -10409,7 +10410,7 @@ export class AgentSession {
 		} = {},
 	): Promise<{
 		editorText?: string;
-		/** Image attachments of the target user message, parallel to the positional `[Image #N]` markers in {@link editorText}. */
+		/** Original image attachments, parallel to the positional markers in {@link editorText}. */
 		editorImages?: ImageContent[];
 		sourceInput?: RestoredQueuedMessage;
 		cancelled: boolean;

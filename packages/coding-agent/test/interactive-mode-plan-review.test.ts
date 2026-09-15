@@ -1105,7 +1105,7 @@ describe("InteractiveMode plan review rendering", () => {
 		session.sessionManager.appendMessage({ role: "user", content: "seed two", timestamp: Date.now() - 1 });
 		vi.spyOn(session, "compact").mockImplementation(async () => {
 			// Operator types a follow-up while compaction is running.
-			mode.queueCompactionMessage("queued message", "followUp");
+			await mode.queueCompactionMessage("queued message", "followUp");
 			return undefined as never;
 		});
 		vi.spyOn(mode, "showPlanReview").mockImplementation(async (_plan, _title, options) => options[1]);

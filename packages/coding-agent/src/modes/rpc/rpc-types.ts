@@ -30,11 +30,40 @@ export type RpcCommand =
 	| { id?: string; type: "negotiate_protocol"; protocolVersion: number }
 
 	// Prompting
-	| { id?: string; type: "prompt"; message: string; images?: ImageContent[]; streamingBehavior?: "steer" | "followUp" }
-	| { id?: string; type: "steer"; message: string; images?: ImageContent[] }
-	| { id?: string; type: "follow_up"; message: string; images?: ImageContent[] }
+	| {
+			id?: string;
+			type: "prompt";
+			message: string;
+			images?: ImageContent[];
+			imageLinks?: (string | undefined)[];
+			compactionOverride?: "keep" | "exclude";
+			streamingBehavior?: "steer" | "followUp";
+	  }
+	| {
+			id?: string;
+			type: "steer";
+			message: string;
+			images?: ImageContent[];
+			imageLinks?: (string | undefined)[];
+			compactionOverride?: "keep" | "exclude";
+	  }
+	| {
+			id?: string;
+			type: "follow_up";
+			message: string;
+			images?: ImageContent[];
+			imageLinks?: (string | undefined)[];
+			compactionOverride?: "keep" | "exclude";
+	  }
 	| { id?: string; type: "abort" }
-	| { id?: string; type: "abort_and_prompt"; message: string; images?: ImageContent[] }
+	| {
+			id?: string;
+			type: "abort_and_prompt";
+			message: string;
+			images?: ImageContent[];
+			imageLinks?: (string | undefined)[];
+			compactionOverride?: "keep" | "exclude";
+	  }
 	| { id?: string; type: "new_session"; parentSession?: string }
 
 	// State

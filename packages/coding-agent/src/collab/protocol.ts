@@ -64,7 +64,7 @@ export type CollabSessionState = SessionState & {
 export type CollabFrame =
 	// guest -> host (hello/abort/agent-cmd/fetch-transcript/ui-response are taken verbatim from the wire grammar)
 	| Exclude<GuestFrame, { t: "prompt" }>
-	| { t: "prompt"; text: string; images?: ImageContent[] }
+	| (Omit<Extract<GuestFrame, { t: "prompt" }>, "images"> & { images?: ImageContent[] })
 	// host -> guest
 	| {
 			t: "welcome";

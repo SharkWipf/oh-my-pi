@@ -97,6 +97,7 @@ import {
 	persistForeignSession,
 } from "./session/foreign-session-import";
 import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } from "./session/foreign-session-store";
+import { restoreCompactionOverridePrompt } from "./session/preserved-message-settings";
 import { resolveResumableSession, type SessionInfo } from "./session/session-listing";
 import { ForkSourceNotFoundError, SessionManager } from "./session/session-manager";
 import { shouldShowStartupSplash } from "./startup-splash";
@@ -408,10 +409,10 @@ export async function submitInteractiveInput(
 			try {
 				forwarded = await session.prompt(input.text, {
 					images: input.images,
-					streamingBehavior,
-					originalSubmission: input.originalSubmission,
 					imageLinks: input.imageLinks,
 					compactionOverride: input.compactionOverride,
+					originalSubmission: input.originalSubmission,
+					streamingBehavior,
 				});
 			} catch (error: unknown) {
 				mode.showError(error instanceof Error ? error.message : "Unknown error occurred");
@@ -421,7 +422,9 @@ export async function submitInteractiveInput(
 			// loop rather than resubmitting a failed or local-only body after
 			// every yield. A failed body degrades to idle like any other
 			// submission failure instead of error-looping.
-			if (!forwarded && mode.loopPrompt === input.text) mode.pauseLoop?.();
+			if (!forwarded && mode.loopPrompt === restoreCompactionOverridePrompt(input.text, input.compactionOverride)) {
+				mode.pauseLoop?.();
+			}
 		}
 	} catch (error: unknown) {
 		const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";

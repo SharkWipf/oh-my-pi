@@ -1501,7 +1501,6 @@ export function prepareCompaction(
 		return atomicGroup === source.atomicGroup ? source : { ...source, atomicGroup };
 	};
 
-
 	// Keep original IDs beside the converted messages so estimation, cutting,
 	// and all three output regions share one sequence without journal metadata.
 	const compactionEntries: SessionEntry[] = [];
