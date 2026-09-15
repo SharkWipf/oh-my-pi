@@ -128,7 +128,14 @@ import { servedModelFromAnthropicSignature } from "./anthropic-signature";
 import { getOpenAIPromptCacheKey } from "./openai-shared";
 import { applyInferenceHeaders } from "./inference-headers";
 import { redactSensitiveCredentials, transformMessages } from "./transform-messages";
-import { combineContentSourceOrigins, getSourceOrigin, invalidateSourceOrigins, setSourceOrigin, transferSourceOrigin, transferTransformedSourceOrigin } from "../utils/source-origin";
+import {
+	combineContentSourceOrigins,
+	getSourceOrigin,
+	invalidateSourceOrigins,
+	setSourceOrigin,
+	transferSourceOrigin,
+	transferTransformedSourceOrigin,
+} from "../utils/source-origin";
 import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
 
 export type AnthropicHeaderOptions = {
@@ -1130,7 +1137,11 @@ function convertContentBlocks(
 			const text = block.text.toWellFormed();
 			if (text.trim().length === 0) continue;
 			sawText = true;
-			blocks.push(text === block.text ? transferSourceOrigin(block, { type: "text", text }) : transferTransformedSourceOrigin(block, { type: "text", text }));
+			blocks.push(
+				text === block.text
+					? transferSourceOrigin(block, { type: "text", text })
+					: transferTransformedSourceOrigin(block, { type: "text", text }),
+			);
 			continue;
 		}
 
@@ -1890,8 +1901,10 @@ function isReplayableAnthropicCompaction(
 function compactionBlockParam(payload: AnthropicCompactionPayload, message: Message): CompactionBlockParam {
 	const { content, encryptedContent } = payload;
 	const origin = getSourceOrigin(message);
-	return setSourceOrigin({ type: "compaction", content, ...(encryptedContent ? { encrypted_content: encryptedContent } : {}) },
-		origin?.kind === "aggregate" ? origin : { kind: "unknown", reason: "native-compaction-aggregate-unmapped" });
+	return setSourceOrigin(
+		{ type: "compaction", content, ...(encryptedContent ? { encrypted_content: encryptedContent } : {}) },
+		origin?.kind === "aggregate" ? origin : { kind: "unknown", reason: "native-compaction-aggregate-unmapped" },
+	);
 }
 
 /**
@@ -2498,7 +2511,11 @@ const streamAnthropicOnce = (
 				if (replacementPayload !== undefined) {
 					nextParams = replacementPayload as typeof nextParams;
 				}
-				if (options?.onPayload) invalidateSourceOrigins(nextParams, replacementPayload === undefined ? "externally-mutated" : "externally-replaced");
+				if (options?.onPayload)
+					invalidateSourceOrigins(
+						nextParams,
+						replacementPayload === undefined ? "externally-mutated" : "externally-replaced",
+					);
 				nextParams = toWellFormedDeep(nextParams) as typeof nextParams;
 				rawRequestDump = {
 					provider: model.provider,
@@ -3900,7 +3917,10 @@ function applyCacheControlToLastBlock(blocks: ContentBlockParam[], cacheControl:
 			continue;
 		}
 		if ("cache_control" in block && block.cache_control != null) return false;
-		blocks[index] = transferSourceOrigin(block, { ...block, cache_control: cloneAnthropicCacheControl(cacheControl) });
+		blocks[index] = transferSourceOrigin(block, {
+			...block,
+			cache_control: cloneAnthropicCacheControl(cacheControl),
+		});
 		return true;
 	}
 	return false;
@@ -3927,7 +3947,11 @@ function countHeadBreakpoints(params: MessageCreateParamsStreaming): number {
 function applyCacheControlToMessage(message: MessageParam, cacheControl: AnthropicCacheControl): boolean {
 	if (typeof message.content === "string") {
 		message.content = [
-			transferSourceOrigin(message, { type: "text", text: message.content, cache_control: cloneAnthropicCacheControl(cacheControl) }),
+			transferSourceOrigin(message, {
+				type: "text" as const,
+				text: message.content,
+				cache_control: cloneAnthropicCacheControl(cacheControl),
+			}),
 		];
 		return true;
 	} else if (Array.isArray(message.content)) {
@@ -4959,7 +4983,8 @@ export function convertAnthropicMessages(
 					} else if (block.type === "thinking") {
 						if (
 							opts?.dropAllThinking ||
-							(block.thinkingSignature && opts?.droppedThinkingBlocks?.has(`thinking:${block.thinkingSignature}`))
+							(block.thinkingSignature &&
+								opts?.droppedThinkingBlocks?.has(`thinking:${block.thinkingSignature}`))
 						) {
 							continue;
 						}
@@ -5038,9 +5063,13 @@ export function convertAnthropicMessages(
 				} finally {
 					for (let index = firstEmittedBlock; index < blocks.length; index++) {
 						const emitted = blocks[index]!;
-						if ((block.type === "thinking" && (emitted.type !== "thinking" || emitted.thinking !== block.thinking)) ||
+						if (
+							(block.type === "thinking" &&
+								(emitted.type !== "thinking" || emitted.thinking !== block.thinking)) ||
 							(block.type === "toolCall" && emitted.type === "tool_use" && emitted.input !== block.arguments) ||
-							(block.type === "text" && emitted.type === "text" && emitted.text !== block.text)) transferTransformedSourceOrigin(block, emitted);
+							(block.type === "text" && emitted.type === "text" && emitted.text !== block.text)
+						)
+							transferTransformedSourceOrigin(block, emitted);
 						else transferSourceOrigin(block, emitted);
 					}
 				}
