@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
-import { type AgentMessage, type AgentTelemetryConfig, Tokenizer } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentMessage, type AgentTelemetryConfig, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import {
 	buildOpenAiNativeHistory,
 	createCompactionSummaryMessage,
@@ -15,7 +15,9 @@ import type {
 } from "@oh-my-pi/pi-ai/providers/openai-responses-wire";
 import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { TUI } from "@oh-my-pi/pi-tui";
 import {
@@ -5842,6 +5844,147 @@ describe("advisor", () => {
 			]);
 		});
 
+		it.each(["resolved", "rejected"] as const)(
+			"clears invalidated appended state after a real Agent prompt %s",
+			async completion => {
+				const mock = createMockModel({ responses: [{ content: ["fresh review"] }] });
+				const started = Promise.withResolvers<void>();
+				const requests: string[] = [];
+				const onTurnError = vi.fn();
+				const agent = new Agent({
+					initialState: { model: mock.model },
+					streamFn: (model, context, options) => {
+						requests.push(JSON.stringify(context.messages));
+						if (requests.length > 1) return mock.stream(model, context, options);
+						const stream = new AssistantMessageEventStream();
+						options?.signal?.addEventListener("abort", () => stream.fail(new Error("provider aborted")), {
+							once: true,
+						});
+						started.resolve();
+						return stream;
+					},
+				});
+				const runtime = new AdvisorRuntime(
+					{
+						state: agent.state,
+						reset: () => agent.reset(),
+						abort: reason => agent.abort(reason),
+						prompt: async input => {
+							if (Array.isArray(input)) await agent.prompt(input);
+							else await agent.prompt(input);
+							if (completion === "rejected" && agent.state.error) throw new Error(agent.state.error);
+						},
+					},
+					{ snapshotMessages: () => [], onTurnError },
+					0,
+				);
+				try {
+					runtime.onTurnEnd([{ role: "user", content: "old-conversation", timestamp: 1 }]);
+					await started.promise;
+					runtime.reset();
+					await new Promise<void>(resolve => setImmediate(resolve));
+					expect(agent.state.messages).toEqual([]);
+					expect(agent.state.error).toBeUndefined();
+					expect(runtime.yielded).toBe(false);
+					expect(onTurnError).not.toHaveBeenCalled();
+					runtime.onTurnEnd([{ role: "user", content: "new-conversation", timestamp: 2 }]);
+					await settleUntil(() => requests.length === 2 && runtime.yielded);
+					expect(requests[1]).toContain("new-conversation");
+					expect(requests[1]).not.toContain("old-conversation");
+					expect(requests[1]).not.toContain("advisor reset");
+					expect(
+						agent.state.messages.some(message => message.role === "assistant" && message.stopReason === "aborted"),
+					).toBe(false);
+					expect(runtime.yielded).toBe(true);
+				} finally {
+					runtime.dispose();
+				}
+			},
+		);
+
+		it.each(["error", "abort"] as const)(
+			"keeps genuine provider %s recovery and prior advisor history without an epoch change",
+			async failure => {
+				const mock = createMockModel({ responses: [{ content: ["prior review"] }, { content: ["recovered review"] }] });
+				const failedRequestStarted = Promise.withResolvers<AssistantMessageEventStream>();
+				const requests: string[] = [];
+				const observedFailures: AgentMessage[][] = [];
+				const agent = new Agent({
+					initialState: { model: mock.model },
+					streamFn: (model, context, options) => {
+						requests.push(JSON.stringify(context.messages));
+						if (requests.length !== 2) return mock.stream(model, context, options);
+						const stream = new AssistantMessageEventStream();
+						options?.signal?.addEventListener("abort", () => stream.fail(new Error("provider aborted")), {
+							once: true,
+						});
+						failedRequestStarted.resolve(stream);
+						return stream;
+					},
+				});
+				const runtime = new AdvisorRuntime(agent, {
+					snapshotMessages: () => [],
+					onTurnError: (_error, messages) => {
+						observedFailures.push([...messages]);
+						return true;
+					},
+				});
+				const messages: AgentMessage[] = [{ role: "user", content: "prior conversation", timestamp: 1 }];
+				try {
+					runtime.onTurnEnd(messages);
+					await settleUntil(() => runtime.yielded);
+					messages.push({ role: "user", content: "retry this update", timestamp: 2 });
+					runtime.onTurnEnd(messages);
+					const stream = await failedRequestStarted.promise;
+					if (failure === "abort") agent.abort("genuine advisor interruption");
+					else stream.fail(new Error("connection reset"));
+					await settleUntil(() => requests.length === 3 && runtime.yielded);
+					expect(observedFailures).toHaveLength(1);
+					const terminal = observedFailures[0].at(-1);
+					expect(terminal?.role).toBe("assistant");
+					if (terminal?.role !== "assistant") throw new Error("Missing provider failure");
+					expect(terminal.stopReason).toBe(failure === "abort" ? "aborted" : "error");
+					expect(terminal.errorMessage).toBe(failure === "abort" ? "genuine advisor interruption" : "connection reset");
+					expect(requests[2]).toContain("prior review");
+					expect(requests[2]).toContain("prior conversation");
+					expect(requests[2].split("retry this update")).toHaveLength(2);
+					expect(requests[2]).not.toContain(terminal.errorMessage!);
+					expect(agent.state.error).toBeUndefined();
+				} finally {
+					runtime.dispose();
+				}
+			},
+		);
+
+		it("does not publish a successful review invalidated before prompt settlement", async () => {
+			const mock = createMockModel({ responses: [{ content: ["old review"] }, { content: ["current review"] }] });
+			const agent = new Agent({ initialState: { model: mock.model }, streamFn: mock.stream });
+			const onTurnSuccess = vi.fn();
+			const runtime = new AdvisorRuntime(agent, {
+				snapshotMessages: () => [],
+				onTurnSuccess,
+			});
+			const unsubscribe = agent.subscribe(event => {
+				if (event.type !== "agent_end") return;
+				unsubscribe();
+				runtime.reset();
+			});
+			try {
+				runtime.onTurnEnd([{ role: "user", content: "old conversation", timestamp: 1 }]);
+				await settleUntil(() => mock.calls.length === 1);
+				await new Promise<void>(resolve => setImmediate(resolve));
+				expect(onTurnSuccess).not.toHaveBeenCalled();
+				expect(runtime.yielded).toBe(false);
+				runtime.onTurnEnd([{ role: "user", content: "current conversation", timestamp: 2 }]);
+				await settleUntil(() => runtime.yielded);
+				expect(onTurnSuccess).toHaveBeenCalledTimes(1);
+				expect(JSON.stringify(mock.calls[1].context.messages)).not.toContain("old review");
+				expect(JSON.stringify(mock.calls[1].context.messages)).toContain("current conversation");
+			} finally {
+				unsubscribe();
+				runtime.dispose();
+			}
+		});
 		it("drops the in-flight batch when a reset aborts the advisor prompt", async () => {
 			const promptInputs: Array<string | AgentMessage[]> = [];
 			const { promise: firstPromptStarted, resolve: startFirstPrompt } = Promise.withResolvers<void>();
