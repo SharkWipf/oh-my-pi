@@ -1,13 +1,17 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ToolCall, Usage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ToolCall, ToolResultMessage, Usage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
+import { ChatTranscriptBuilder } from "@oh-my-pi/pi-coding-agent/modes/components/chat-transcript-builder";
+import { ReadToolGroupComponent } from "@oh-my-pi/pi-coding-agent/modes/components/read-tool-group";
+import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import type { Component } from "@oh-my-pi/pi-tui";
+import { type Component, TERMINAL } from "@oh-my-pi/pi-tui";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 
 const TOOL_CALL_A_ID = "toolu_mixed_text_order_a";
@@ -361,4 +365,290 @@ describe("EventController mixed assistant text/tool rendering", () => {
 		expect(rendered).not.toContain(HIDDEN_BASH_FAILURE_MARKER);
 		expect(rendered).not.toContain(HIDDEN_READ_PATH_MARKER);
 	});
+
+	it("keeps late inter-read text between separate read results instead of grouping across its empty start", async () => {
+		const { controller, chatContainer, ctx } = createFixture();
+		const firstPath = "first-delayed-read.ts";
+		const secondPath = "second-delayed-read.ts";
+		const readA: ToolCall = {
+			type: "toolCall", id: TOOL_CALL_A_ID, name: "read", arguments: { path: firstPath },
+		};
+		const readB: ToolCall = {
+			type: "toolCall", id: TOOL_CALL_B_ID, name: "read", arguments: { path: secondPath },
+		};
+		const intro = { type: "text" as const, text: INTRO_MARKER };
+		try {
+			await controller.handleEvent({ type: "message_start", message: assistantMessage([]) });
+			const firstRead = assistantMessage([intro, readA]);
+			await controller.handleEvent({
+				type: "message_update", message: firstRead,
+				assistantMessageEvent: { type: "toolcall_end", contentIndex: 1, toolCall: readA, partial: firstRead },
+			});
+			const emptyMiddle = assistantMessage([intro, readA, { type: "text", text: "" }]);
+			await controller.handleEvent({
+				type: "message_update", message: emptyMiddle,
+				assistantMessageEvent: { type: "text_start", contentIndex: 2, partial: emptyMiddle },
+			});
+			const bothReads = assistantMessage([...emptyMiddle.content, readB]);
+			await controller.handleEvent({
+				type: "message_update", message: bothReads,
+				assistantMessageEvent: { type: "toolcall_end", contentIndex: 3, toolCall: readB, partial: bothReads },
+			});
+			for (const read of [readA, readB]) {
+				await controller.handleEvent({
+					type: "tool_execution_start", toolCallId: read.id, toolName: read.name, args: read.arguments,
+				});
+				await controller.handleEvent({
+					type: "tool_execution_end", toolCallId: read.id, toolName: read.name, isError: false,
+					result: { content: [{ type: "text", text: "file contents" }] },
+				});
+			}
+			// The separator acquires visible content only after both read cards exist.
+			const middle = assistantMessage([intro, readA, { type: "text", text: MIDDLE_MARKER }, readB]);
+			await controller.handleEvent({
+				type: "message_update", message: middle,
+				assistantMessageEvent: { type: "text_end", contentIndex: 2, content: MIDDLE_MARKER, partial: middle },
+			});
+			const completed = assistantMessage([...middle.content, { type: "text", text: FINAL_MARKER }]);
+			await controller.handleEvent({
+				type: "message_update", message: completed,
+				assistantMessageEvent: { type: "text_end", contentIndex: 4, content: FINAL_MARKER, partial: completed },
+			});
+			await controller.handleEvent({ type: "message_end", message: completed });
+
+			const replay = new ChatTranscriptBuilder({ ui: ctx.ui, cwd: process.cwd(), requestRender: () => {} });
+			try {
+				replay.rebuild([
+					{ type: "message", id: "assistant", parentId: null, timestamp: "2026-09-15", message: completed },
+					...[readA, readB].map(read => ({
+						type: "message" as const, id: read.id, parentId: null, timestamp: "2026-09-15",
+						message: { role: "toolResult" as const, toolCallId: read.id, toolName: read.name,
+							content: [{ type: "text" as const, text: "file contents" }], isError: false, timestamp: 1 },
+					})),
+				]);
+				for (const container of [chatContainer, replay.container]) {
+					const lines = container.render(120).map(line => Bun.stripANSI(line));
+					const transcript = lines.join("\n");
+					const markers = [INTRO_MARKER, firstPath, MIDDLE_MARKER, secondPath, FINAL_MARKER];
+					let previous = -1;
+					for (const marker of markers) {
+						expect(transcript.split(marker).length - 1, marker).toBe(1);
+						const position = lineContaining(lines, marker);
+						expect(position).toBeGreaterThan(previous);
+						previous = position;
+					}
+				}
+			} finally {
+				replay.dispose();
+			}
+		} finally {
+			controller.dispose();
+			chatContainer.dispose();
+		}
+	});
+
+	it("does not recreate a completed grouped read when later thinking arrives", async () => {
+		const { controller, chatContainer, ctx } = createFixture();
+		const readCall: ToolCall = {
+			type: "toolCall",
+			id: "read-completed-stable",
+			name: "read",
+			arguments: { path: "stable-completed-read.ts" },
+		};
+		const withRead = assistantMessage([{ type: "thinking", thinking: "planning the read" }, readCall]);
+		const withLaterThinking = assistantMessage([
+			{ type: "thinking", thinking: "planning the read" },
+			readCall,
+			{ type: "thinking", thinking: "more reasoning after the read finished" },
+		]);
+
+		await controller.handleEvent({ type: "message_start", message: assistantMessage([]) } as Extract<
+			AgentSessionEvent,
+			{ type: "message_start" }
+		>);
+		await controller.handleEvent({
+			type: "message_update",
+			message: withRead,
+			assistantMessageEvent: { type: "toolcall_end", contentIndex: 1, toolCall: readCall, partial: withRead },
+		} as Extract<AgentSessionEvent, { type: "message_update" }>);
+		await controller.handleEvent({
+			type: "tool_execution_end",
+			toolCallId: readCall.id,
+			toolName: "read",
+			result: { content: [{ type: "text", text: "file contents" }] },
+			isError: false,
+		} as Extract<AgentSessionEvent, { type: "tool_execution_end" }>);
+		expect(ctx.pendingTools.size).toBe(0);
+		expect(chatContainer.children.filter(child => child instanceof ReadToolGroupComponent)).toHaveLength(1);
+
+		await controller.handleEvent({
+			type: "message_update",
+			message: withLaterThinking,
+			assistantMessageEvent: { type: "thinking_delta", delta: "more", contentIndex: 2, partial: withLaterThinking },
+		} as Extract<AgentSessionEvent, { type: "message_update" }>);
+
+		const groups = chatContainer.children.filter(child => child instanceof ReadToolGroupComponent);
+		expect(groups).toHaveLength(1);
+		expect(ctx.pendingTools.size).toBe(0);
+		expect(Bun.stripANSI(chatContainer.render(120).join("\n"))).toContain("stable-completed-read.ts");
+	});
+
+	it("settles a grouped read whose result arrives before the streamed card", async () => {
+		const { controller, chatContainer, ctx } = createFixture();
+		const readCall: ToolCall = {
+			type: "toolCall",
+			id: "read-result-before-card",
+			name: "read",
+			arguments: { path: "result-before-card.ts" },
+		};
+		const streaming = assistantMessage([readCall]);
+
+		await controller.handleEvent({ type: "message_start", message: assistantMessage([]) } as Extract<
+			AgentSessionEvent,
+			{ type: "message_start" }
+		>);
+		await controller.handleEvent({
+			type: "tool_execution_end",
+			toolCallId: readCall.id,
+			toolName: "read",
+			result: { content: [{ type: "text", text: "held read body" }] },
+			isError: false,
+		} as Extract<AgentSessionEvent, { type: "tool_execution_end" }>);
+		expect(chatContainer.children.filter(child => child instanceof ReadToolGroupComponent)).toHaveLength(0);
+		expect(ctx.pendingTools.size).toBe(0);
+
+		await controller.handleEvent({
+			type: "message_update",
+			message: streaming,
+			assistantMessageEvent: { type: "toolcall_end", contentIndex: 0, toolCall: readCall, partial: streaming },
+		} as Extract<AgentSessionEvent, { type: "message_update" }>);
+
+		const groups = chatContainer.children.filter(child => child instanceof ReadToolGroupComponent);
+		expect(groups).toHaveLength(1);
+		expect(ctx.pendingTools.size).toBe(0);
+		expect(Bun.stripANSI(groups[0]!.render(120).join("\n"))).toContain("result-before-card.ts");
+	});
+
+	it("finalizes closed inter-tool reasoning so multiple completed greps can retire", async () => {
+		const { controller, chatContainer, ctx } = createFixture();
+		const greps = [1, 2, 3].map(n => ({
+			call: {
+				type: "toolCall" as const,
+				id: `grep-mixed-${n}`,
+				name: "grep",
+				arguments: { pattern: `pattern-${n}` },
+			},
+			result: `GREP_RESULT_${n}_UNIQUE`,
+			thinking: `REASONING_AFTER_GREP_${n}`,
+		}));
+
+		await controller.handleEvent({ type: "message_start", message: assistantMessage([]) } as Extract<
+			AgentSessionEvent,
+			{ type: "message_start" }
+		>);
+
+		const content: AssistantMessage["content"] = [{ type: "thinking", thinking: "REASONING_BEFORE_TOOLS" }];
+		for (const grep of greps) {
+			const preceding = assistantMessage([...content]);
+			await controller.handleEvent({
+				type: "message_update", message: preceding,
+				assistantMessageEvent: { type: "thinking_end", contentIndex: content.length - 1, content: "", partial: preceding },
+			} as Extract<AgentSessionEvent, { type: "message_update" }>);
+			content.push(grep.call);
+			const withTool = assistantMessage([...content]);
+			await controller.handleEvent({
+				type: "message_update",
+				message: withTool,
+				assistantMessageEvent: {
+					type: "toolcall_end",
+					contentIndex: content.length - 1,
+					toolCall: grep.call,
+					partial: withTool,
+				},
+			} as Extract<AgentSessionEvent, { type: "message_update" }>);
+			await controller.handleEvent({
+				type: "tool_execution_end",
+				toolCallId: grep.call.id,
+				toolName: "grep",
+				result: { content: [{ type: "text", text: grep.result }] },
+				isError: false,
+			} as Extract<AgentSessionEvent, { type: "tool_execution_end" }>);
+			content.push({ type: "thinking", thinking: grep.thinking });
+			const withThinking = assistantMessage([...content]);
+			await controller.handleEvent({
+				type: "message_update",
+				message: withThinking,
+				assistantMessageEvent: {
+					type: "thinking_delta",
+					delta: grep.thinking,
+					contentIndex: content.length - 1,
+					partial: withThinking,
+				},
+			} as Extract<AgentSessionEvent, { type: "message_update" }>);
+		}
+
+		expect(ctx.pendingTools.size).toBe(0);
+
+		const flushed = Bun.stripANSI(chatContainer.peekFlushBatch(120)?.rows.join("\n") ?? "");
+		expect(flushed).toContain("GREP_RESULT_1_UNIQUE");
+		expect(flushed).toContain("GREP_RESULT_2_UNIQUE");
+	});
+
+	for (const arrival of ["early", "buffered"] as const) {
+		it(`renders inline images from ${arrival} held read results`, async () => {
+			const protocol = Object.getOwnPropertyDescriptor(TERMINAL, "imageProtocol")!;
+			Object.defineProperty(TERMINAL, "imageProtocol", { value: null });
+			try {
+				const { controller, chatContainer, ctx } = createFixture();
+				ctx.settings.set("terminal.showImages", true);
+				const readCall: ToolCall = {
+					type: "toolCall",
+					id: `read-image-${arrival}`,
+					name: "read",
+					arguments: { path: "pixel.png" },
+				};
+				const result: ToolResultMessage = {
+					role: "toolResult",
+					toolCallId: readCall.id,
+					toolName: "read",
+					content: [
+						{
+							type: "image",
+							mimeType: "image/png",
+							data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==",
+						},
+					],
+					isError: false,
+					timestamp: 1,
+				};
+				if (arrival === "buffered") {
+					ctx.session.agent.getPendingToolResults = () => [result];
+					controller.resetTranscriptAnchors();
+				}
+				await controller.handleEvent({ type: "message_start", message: assistantMessage([]) });
+				if (arrival === "early") {
+					await controller.handleEvent({
+						type: "tool_execution_end",
+						toolCallId: readCall.id,
+						toolName: "read",
+						result,
+						isError: false,
+					});
+				}
+				const message = assistantMessage([{ type: "text", text: "Inspecting the sample image." }, readCall]);
+				const update: Extract<AgentSessionEvent, { type: "message_update" }> = {
+					type: "message_update",
+					message,
+					assistantMessageEvent: { type: "toolcall_end", contentIndex: 1, toolCall: readCall, partial: message },
+				};
+				await controller.handleEvent(update);
+				await controller.handleEvent(update);
+				const rendered = Bun.stripANSI(chatContainer.render(120).join("\n"));
+				expect(rendered.match(/\[Image: image\/png\]/g)).toHaveLength(1);
+				expect(ctx.pendingTools.size).toBe(0);
+			} finally {
+				Object.defineProperty(TERMINAL, "imageProtocol", protocol);
+			}
+		});
+	}
 });
