@@ -1,0 +1,3 @@
+Derived requirements memory. Current operator input takes precedence. Coverage is processing evidence, NOT proof of semantic exhaustiveness. Conflicts are unresolved, NEVER select by arrival order.
+Ledger-wide historical coverage is factual inventory, NOT active instructions and NOT a demand to resolve all history before work. Exact current pending inputs remain distinct from that aggregate. Inspect original availability and ledger details through the listed operator actions; cold availability is last-observed, not a fresh byte attestation.
+{{jsonStringify memory}}

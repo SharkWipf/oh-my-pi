@@ -99,9 +99,10 @@ describe("AgentSession persisted message identity", () => {
 			await sessionManager.flush();
 			for (let spin = 0; spin < 5; spin++) await Promise.resolve();
 		}
-		const contents = sessionManager.getBranch()
+		const contents = sessionManager
+			.getBranch()
 			.filter(entry => entry.type === "message")
-			.map(entry => entry.message.role === "user" ? entry.message.content : undefined);
+			.map(entry => (entry.message.role === "user" ? entry.message.content : undefined));
 		expect(contents).toEqual(["first", "second"]);
 	});
 

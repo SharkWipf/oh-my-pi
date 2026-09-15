@@ -83,6 +83,28 @@
 - Compacted selected originals now retain their own text/image coordinates through reload and repeated compaction, without replacing an ordinarily retained expanded submission.
 - Fixed physical attribution joining original-input and expanded-delivery coverage solely by journal entry ID; reconstructed and prepared inventories now keep their distinct physical charges without inflating shared ownership.
 - Ordinary turns prepare preservation policy only after finding an eligible pruning victim. Full selected-user, complete non-user, and pending-live protection still applies before mutation, including source ownership checks and minimum-savings revalidation.
+- Added independent living requirements memory under `/memory requirements`, using host-recorded accepted originals, source-backed extraction, independent obligation/fidelity review and fresh candidate-only sanity, durable revisions, complete active recall, and explicit coverage-gap and quarantine controls. Ordinary memory backends remain independently selectable.
+- Added `--start-without-memory`, requirements-only future bypass, and clean retry through the normal fresh-session/provider-state transition with learned-memory startup disabled and only explicitly selected original inputs retained. Ordinary backend disposal keeps its normal semantics; recovery does not retract remote writes.
+- Requirements capacity is evaluated at the actual prepared provider-request boundary, after physical transforms and inband tool encoding, using emitted system/context frame estimates. Requests retain every applicable statement, reject known irreducible overflow or stale snapshots before provider execution, and report invalidated physical estimates as unknown rather than silently truncating requirements.
+- Quarantined requirement bodies no longer leak through unresolved conflict recall; source evidence and conflict lineage remain inspectable.
+- Disabled or bypassed requirements no longer pin original user history during ordinary compaction; enabling requirements still protects unresolved current delivery IDs until processing or explicit gap passage.
+- Revalidated consumed local and scoped foreign original evidence before provider dispatch without observing the whole historical catalog. Evidence availability and explicit quarantine are independent; identical originals returning never silently restore quarantined requirements.
+- Normalized requirements storage into indexed changed-row transactions and current scoped heads; historical catalogs and lineage are not loaded for normal recall. Publication joins persisted independent obligation/candidate decisions and compares exact current head identities.
+- Existing session-delete confirmations now expose active evidence dependencies and offer cancellation, needed-original BlobStore retention, or exact requirement withdrawal. Scoped clear prevents historical backfill from recreating old authority; newly accepted operator decisions remain usable.
+
+### Fixed
+
+- Live requirements recall now composes with staged ordinary-memory delivery and the last uncomposed request policy, including synthetic continuations and failed-switch rollback; ordinary Hindsight boundary and manual reload behavior remain independent.
+- File-backed requirements evidence uses indexed whole-record journal reads, retaining fresh body and journal-identity validation while normal appends and title updates maintain entry locations.
+- Unchanged requirements source intake no longer expands historical review dependency graphs; real original changes and availability restoration still reconcile affected dependencies.
+- Contextual original metadata is installed before freezing a requirements review job, preventing first-time source discovery from invalidating its own reviewed results without weakening mid-review change detection.
+- Requirements review uses the normal execution context at the addressed source while retaining whole original evidence and needed distant referents. Later submissions and other branches cannot leak into that frozen context; compaction summaries remain untrusted context rather than original evidence.
+- Literal adoption and restoration read addressed original evidence and current heads before candidate-only sanity instead of materializing the raw history.
+- Requirements validation reuses a per-pass source index and cooperatively cancels long unit passes, avoiding quadratic source-graph rescans.
+- Requirements extraction, literal adoption and restoration retain the initiating lifecycle signal through asynchronous evidence preparation. Disposing the owning session prevents delayed preparation from issuing fresh model calls or reacquiring publication authority, and aborts in-flight requirements requests.
+- Original requirements evidence remains readable when unrelated conversation entries append during resolution; addressed source rewrites and lifecycle changes still invalidate the read.
+- Exact-source requirements actions no longer wait for unrelated cold catalog enumeration. Current accepted requirements can be recalled while historical catalog coverage remains explicitly incomplete.
+- Cataloging accepted originals at new locators preserves their reviewed state after evidence refresh. Completing catalog observation refreshes the next coverage receipt without rewriting earlier request receipts.
 ### Fixed
 
 - Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.
@@ -732,6 +754,12 @@
 - Quarantined classification records remain visibly invalidated after reload without fabricating category labels, and backfill readers skip history before the latest clear boundary.
 - Visible human custom-message journal sources retain manual protection and ordinary raw accounting without being promoted to automatic user classifications or windows.
 - Secret redaction now covers provider-visible computer actions and safety messages, tool explanations, Anthropic server-tool text, and native web-search text while preserving opaque replay data, identifiers, and original screenshots.
+- Removed requirements capture and history scans from requirements-off input. Enabled historical metadata cataloging is cooperative and separate from new delivered live-input protection; opening a view does not launch model backfill.
+- Requirements adoption of earlier assistant and tool output resolves complete original journal/block units without granting nonhuman content operator authority or duplicating the transcript. Explicit processing receives sufficient chronological originals; candidate-only sanity remains source-free.
+- Packaged requirements extraction, evidence review, candidate-only sanity, and recall instructions as static prompt assets, preserving the provider-facing instructions and evidence payloads.
+- Replaced model-selected byte ranges and the extra quote-only review with host-issued whole-unit evidence and exactly three model stages. Independent coverage must map every inventoried obligation to supported candidate work or a genuinely matching current accepted head; legitimate empty proposals remain valid.
+- Requirements prompt composition now belongs to SessionTools and the existing early model-call hook, with a later generation/capacity check. Generic provider-transform registration and universal backend-recovery overrides were removed.
+- Original command/image/queue restoration uses ordinary accepted-submission metadata independently of optional requirements indexing.
 - Inline snap images now expose transient, identity-bound frame estimates and prompt/tool ownership through provider normalization, separately from original images. Outgoing image mutations no longer corrupt cached frames for later requests.
 - Fixed invalidated source preparation surfacing as an operational failure during automatic pruning after branch/session changes or disposal. Both pruning passes retain their initiating scope; genuine storage errors still propagate.
 - Manual source-state updates now publish complete metadata batches without serializing cold history; file-backed publication preserves the original journal bytes and stages the copy asynchronously.

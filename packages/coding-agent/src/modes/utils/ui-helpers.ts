@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ImageContent, OriginalSubmission, Message, Usage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, Message, OriginalSubmission, Usage } from "@oh-my-pi/pi-ai";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { type Component, Spacer, Text, TruncatedText } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -1152,10 +1152,19 @@ export class UiHelpers {
 			return;
 		}
 		// This is the native ephemeral queue. Original publication belongs to actual delivery.
-		this.ctx.compactionQueuedMessages.push({ text, mode, images, imageLinks, compactionOverride, originalSubmission });
+		this.ctx.compactionQueuedMessages.push({
+			text,
+			mode,
+			images,
+			imageLinks,
+			compactionOverride,
+			originalSubmission,
+		});
 		editor.clearDraft(historyText);
 		this.ctx.updatePendingMessagesDisplay();
-		this.ctx.showStatus(images?.length ? "Queued message with image for after compaction" : "Queued message for after compaction");
+		this.ctx.showStatus(
+			images?.length ? "Queued message with image for after compaction" : "Queued message for after compaction",
+		);
 	}
 
 	/**

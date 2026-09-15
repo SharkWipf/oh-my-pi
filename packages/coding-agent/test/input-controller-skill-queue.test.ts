@@ -8,7 +8,7 @@
 import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { ImageContent, OriginalSubmission, TextContent } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -100,7 +100,14 @@ function createStubInputControllerContext(opts: {
 	const reconcileOptimisticSkillMessage = vi.fn();
 	const clearOptimisticSkillMessage = vi.fn();
 	const queueCompactionMessage = vi.fn(
-		(text: string, mode: "steer" | "followUp", images?: ImageContent[], imageLinks?: (string | undefined)[], compactionOverride?: "keep" | "exclude", originalSubmission?: CompactionQueuedMessage["originalSubmission"]) => {
+		(
+			text: string,
+			mode: "steer" | "followUp",
+			images?: ImageContent[],
+			imageLinks?: (string | undefined)[],
+			compactionOverride?: "keep" | "exclude",
+			originalSubmission?: CompactionQueuedMessage["originalSubmission"],
+		) => {
 			compactionQueuedMessages.push({ text, mode, images, imageLinks, compactionOverride, originalSubmission });
 		},
 	);
@@ -212,7 +219,7 @@ describe("InputController skill queue chip metadata", () => {
 	});
 
 	it("captures the loop prompt for a /skill: submission queued during compaction", async () => {
-		const { ctx, editor, queueCompactionMessage, setLoopPrompt } = createStubInputControllerContext({
+		const { ctx, editor, setLoopPrompt } = createStubInputControllerContext({
 			skillCommands,
 			isStreaming: false,
 			isCompacting: true,
@@ -225,7 +232,7 @@ describe("InputController skill queue chip metadata", () => {
 		await editor.onSubmit?.("/skill:test-skill arg1 arg2");
 
 		expect(setLoopPrompt).toHaveBeenCalledWith("/skill:test-skill arg1 arg2");
-		expect(ctx.compactionQueuedMessages.map(message => message.text)).toEqual(["/skill:test-skill arg1 arg2"]);
+		expect(ctx.compactionQueuedMessages).toMatchObject([{ text: "/skill:test-skill arg1 arg2", mode: "steer" }]);
 	});
 
 	it("streaming follow-up applies builtin slash commands instead of queueing them", async () => {
@@ -428,7 +435,11 @@ describe("compaction skill re-invocation", () => {
 		await promptCustomMessageCalled;
 
 		const [message, options] = firstPromptCustomCall(promptCustomMessage);
-		expect(options?.originalSubmission).toEqual({ text: "/skill:test-skill arg1 arg2", images: [image], imageLinks: undefined });
+		expect(options?.originalSubmission).toEqual({
+			text: "/skill:test-skill arg1 arg2",
+			images: [image],
+			imageLinks: undefined,
+		});
 		expect(message.customType).toBe(SKILL_PROMPT_MESSAGE_TYPE);
 		expect(message.attribution).toBe("user");
 		if (!Array.isArray(message.content)) {

@@ -7,8 +7,14 @@ import { hasFsCode, isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { peekFileEnds } from "@oh-my-pi/pi-utils/peek-file";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
+import { parseJsonlLenient, readLines } from "@oh-my-pi/pi-utils/stream";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
-import { overlayTitleSlotContent, type SessionTitleUpdate, serializeTitleSlot } from "./session-title-slot";
+import {
+	overlayTitleSlotContent,
+	parseTitleSlotLine,
+	type SessionTitleUpdate,
+	serializeTitleSlot,
+} from "./session-title-slot";
 
 const utf8Decoder = new TextDecoder("utf-8");
 
@@ -16,6 +22,11 @@ export interface SessionStorageStat {
 	size: number;
 	mtimeMs: number;
 	mtime: Date;
+	/** Physical filesystem identity, only when the backend actually provides it. */
+	dev?: number;
+	ino?: number;
+	ctimeMs?: number;
+	mode?: number;
 }
 
 export interface SessionStorageWriter {
@@ -180,6 +191,100 @@ const writerRegistry = new FinalizationRegistry<number>(fd => {
 	}
 });
 
+interface JsonlLocation {
+	start: number;
+	end: number;
+	next?: JsonlLocation;
+}
+interface JournalLocatorIndex {
+	stat: SessionStorageStat;
+	locations: Map<string, JsonlLocation>;
+	prefixEnd: number;
+	terminated?: boolean;
+	ready?: Promise<void>;
+}
+
+function sameJournalVersion(left: SessionStorageStat, right: SessionStorageStat): boolean {
+	return (
+		left.dev === right.dev &&
+		left.ino === right.ino &&
+		left.size === right.size &&
+		left.mtimeMs === right.mtimeMs &&
+		left.ctimeMs === right.ctimeMs
+	);
+}
+
+/** Index only top-level identity tokens; source bodies are parsed only on actual reads. */
+function jsonlRecordId(bytes: Uint8Array): string | undefined {
+	const line = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	let depth = 0;
+	let id: string | undefined;
+	for (let position = 0; position < line.length; position++) {
+		const byte = line[position];
+		if (byte === 0x7b || byte === 0x5b) {
+			depth++;
+			continue;
+		}
+		if (byte === 0x7d || byte === 0x5d) {
+			depth--;
+			continue;
+		}
+		if (byte !== 0x22) continue;
+		let end = line.indexOf(0x22, position + 1);
+		while (end !== -1) {
+			let slash = end - 1;
+			while (slash > position && line[slash] === 0x5c) slash--;
+			if ((end - slash) % 2 === 1) break;
+			end = line.indexOf(0x22, end + 1);
+		}
+		if (end === -1) return undefined;
+		let next = end + 1;
+		while (line[next] === 0x20 || line[next] === 0x09 || line[next] === 0x0d) next++;
+		if (depth === 1 && line[next] === 0x3a) {
+			let key: string | undefined;
+			if (end === position + 3 && line[position + 1] === 0x69 && line[position + 2] === 0x64) key = "id";
+			else {
+				let escaped = false;
+				for (let cursor = position + 1; cursor < end; cursor++)
+					if (line[cursor] === 0x5c) {
+						escaped = true;
+						break;
+					}
+				if (escaped) {
+					try {
+						key = JSON.parse(line.toString("utf8", position, end + 1));
+					} catch {
+						return undefined;
+					}
+				}
+			}
+			if (key === "id") {
+				next++;
+				while (line[next] === 0x20 || line[next] === 0x09 || line[next] === 0x0d) next++;
+				id = undefined;
+				if (line[next] === 0x22) {
+					let finish = line.indexOf(0x22, next + 1);
+					while (finish !== -1) {
+						let slash = finish - 1;
+						while (slash > next && line[slash] === 0x5c) slash--;
+						if ((finish - slash) % 2 === 1) break;
+						finish = line.indexOf(0x22, finish + 1);
+					}
+					if (finish === -1) return undefined;
+					try {
+						id = JSON.parse(line.toString("utf8", next, finish + 1));
+					} catch {
+						return undefined;
+					}
+					end = finish;
+				}
+			}
+		}
+		position = end;
+	}
+	return id;
+}
+
 class FileSessionStorageWriter implements SessionStorageWriter {
 	#fd: number;
 	#fpath: string;
@@ -188,6 +293,7 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 	#error: Error | undefined;
 	#onError: ((err: Error) => void) | undefined;
 
+	#onAppend: ((before: fs.Stats, bytes: Buffer) => void) | undefined;
 	constructor(
 		fpath: string,
 		options?: {
@@ -195,10 +301,12 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 			onError?: (err: Error) => void;
 			publishLock?: (task: () => void) => void;
 		},
+		onAppend?: (before: fs.Stats, bytes: Buffer) => void,
 	) {
 		this.#fpath = fpath;
 		this.#publishLock = options?.publishLock;
 		this.#onError = options?.onError;
+		this.#onAppend = onAppend;
 		const flags = options?.flags ?? "a";
 		// Ensure parent directory exists
 		const dir = path.dirname(fpath);
@@ -245,7 +353,8 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 	}
 
 	#writeNow(line: string): void {
-		const originalSize = fs.fstatSync(this.#fd).size;
+		const before = fs.fstatSync(this.#fd);
+		const originalSize = before.size;
 		const buf = Buffer.from(line, "utf-8");
 		let offset = 0;
 		try {
@@ -267,6 +376,7 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 			}
 			throw writeError;
 		}
+		this.#onAppend?.(before, buf);
 	}
 
 	appendSync(line: string): void {
@@ -382,6 +492,116 @@ function isPidAlive(pid: number): boolean {
 }
 
 export class FileSessionStorage implements SessionStorage {
+	#journalIndexes?: Map<string, JournalLocatorIndex>;
+
+	#indexJournalLine(index: JournalLocatorIndex, line: Uint8Array, start: number, end: number): void {
+		if (!index.prefixEnd || end < index.prefixEnd) {
+			const text = utf8Decoder.decode(line);
+			if ((start !== 0 || !parseTitleSlotLine(text)) && parseJsonlLenient(text).length) index.prefixEnd = end;
+		}
+		const id = jsonlRecordId(line);
+		if (id !== undefined) index.locations.set(id, { start, end, next: index.locations.get(id) });
+	}
+
+	async #journalIndex(filePath: string): Promise<JournalLocatorIndex> {
+		const stat = this.statSync(filePath);
+		let index = this.#journalIndexes?.get(filePath);
+		if (index && sameJournalVersion(index.stat, stat)) {
+			await index.ready;
+			return index;
+		}
+		index = { stat, locations: new Map(), prefixEnd: 0 };
+		(this.#journalIndexes ??= new Map()).set(filePath, index);
+		const building = index;
+		building.ready = (async () => {
+			let start = 0,
+				records = 0;
+			for await (const line of readLines(Bun.file(filePath).slice(0, stat.size).stream())) {
+				this.#indexJournalLine(building, line, start, Math.min(start + line.length + 1, stat.size));
+				start += line.length + 1;
+				if ((++records & 8191) === 0) await Bun.sleep(0);
+			}
+			const terminated = start === stat.size;
+			// Appending to an unterminated old record changes its physical bounds.
+			if (
+				(!terminated && building.stat.size !== stat.size) ||
+				!sameJournalVersion(building.stat, this.statSync(filePath))
+			) {
+				if (this.#journalIndexes?.get(filePath) === building) this.#journalIndexes.delete(filePath);
+			} else if (building.stat.size === stat.size) building.terminated = terminated;
+		})();
+		try {
+			await building.ready;
+		} catch (error) {
+			if (this.#journalIndexes?.get(filePath) === building) this.#journalIndexes.delete(filePath);
+			throw error;
+		} finally {
+			building.ready = undefined;
+		}
+		return building;
+	}
+
+	#recordJournalAppend(filePath: string, before: fs.Stats, bytes: Buffer): void {
+		const index = this.#journalIndexes?.get(filePath);
+		if (!index) return;
+		try {
+			const after = this.statSync(filePath);
+			if (
+				!sameJournalVersion(index.stat, before) ||
+				index.terminated === false ||
+				after.dev !== before.dev ||
+				after.ino !== before.ino ||
+				after.size !== before.size + bytes.length
+			) {
+				this.#journalIndexes!.delete(filePath);
+				return;
+			}
+			let start = 0;
+			while (start < bytes.length) {
+				const newline = bytes.indexOf(0x0a, start);
+				const end = newline === -1 ? bytes.length : newline + 1;
+				this.#indexJournalLine(
+					index,
+					bytes.subarray(start, newline === -1 ? end : newline),
+					before.size + start,
+					before.size + end,
+				);
+				start = end;
+			}
+			index.stat = after;
+			index.terminated = bytes.length === 0 ? index.terminated : bytes[bytes.length - 1] === 0x0a;
+		} catch {
+			// Locator maintenance cannot turn a completed physical append into a failed append.
+			this.#journalIndexes!.delete(filePath);
+		}
+	}
+
+	/** Journal-owned coordinates only. Every selected whole record and its header are read afresh. */
+	async readJsonlLinesById(
+		filePath: string,
+		entryIds: ReadonlySet<string>,
+	): Promise<{ prefix: string; lines: string[] }> {
+		const index = await this.#journalIndex(filePath);
+		const locations: JsonlLocation[] = [];
+		for (const id of entryIds) {
+			for (let location = index.locations.get(id); location; location = location.next) locations.push(location);
+		}
+		locations.sort((left, right) => left.start - right.start);
+		const file = Bun.file(filePath);
+		const prefix = await file.slice(0, index.prefixEnd).text();
+		const lines: string[] = [];
+		for (const location of locations) {
+			let line = await file.slice(Math.max(0, location.start - 1), location.end).text();
+			if (location.start > 0) {
+				if (!line.startsWith("\n")) continue;
+				line = line.slice(1);
+			}
+			if (!line.endsWith("\n") && location.end !== this.statSync(filePath).size) continue;
+			lines.push(line);
+		}
+		return { prefix, lines };
+	}
+
 	#assertExpectedSize(fpath: string, expectedSize: number | null | undefined): void {
 		if (expectedSize === undefined) return;
 		let actualSize: number | null;
@@ -624,6 +844,8 @@ export class FileSessionStorage implements SessionStorage {
 
 	async updateSessionTitle(fpath: string, update: SessionTitleUpdate): Promise<void> {
 		const fd = fs.openSync(fpath, "r+");
+		const index = this.#journalIndexes?.get(fpath);
+		const before = index ? fs.fstatSync(fd) : undefined;
 		try {
 			const buf = Buffer.from(serializeTitleSlot(update), "utf-8");
 			let offset = 0;
@@ -634,6 +856,17 @@ export class FileSessionStorage implements SessionStorage {
 				}
 				offset += written;
 			}
+			if (index && before) {
+				const after = this.statSync(fpath);
+				if (
+					sameJournalVersion(index.stat, before) &&
+					after.dev === before.dev &&
+					after.ino === before.ino &&
+					after.size === before.size
+				)
+					index.stat = after;
+				else this.#journalIndexes?.delete(fpath);
+			}
 		} catch (err) {
 			throw toError(err);
 		} finally {
@@ -643,7 +876,15 @@ export class FileSessionStorage implements SessionStorage {
 
 	statSync(path: string): SessionStorageStat {
 		const stats = fs.statSync(path);
-		return { size: stats.size, mtimeMs: stats.mtimeMs, mtime: stats.mtime };
+		return {
+			size: stats.size,
+			mtimeMs: stats.mtimeMs,
+			mtime: stats.mtime,
+			dev: stats.dev,
+			ino: stats.ino,
+			ctimeMs: stats.ctimeMs,
+			mode: stats.mode,
+		};
 	}
 
 	listFilesSync(dir: string, pattern: string): string[] {
@@ -837,6 +1078,7 @@ export class FileSessionStorage implements SessionStorage {
 	}
 
 	unlink(path: string): Promise<void> {
+		this.#journalIndexes?.delete(path);
 		return fs.promises.unlink(path);
 	}
 
@@ -847,10 +1089,14 @@ export class FileSessionStorage implements SessionStorage {
 	}
 
 	openWriter(path: string, options?: { flags?: "a" | "w"; onError?: (err: Error) => void }): SessionStorageWriter {
-		return new FileSessionStorageWriter(path, {
-			...options,
-			publishLock: task => this.#withPublishLock(path, task),
-		});
+		return new FileSessionStorageWriter(
+			path,
+			{
+				...options,
+				publishLock: task => this.#withPublishLock(path, task),
+			},
+			(before, bytes) => this.#recordJournalAppend(path, before, bytes),
+		);
 	}
 
 	/** Run a synchronous session mutation under its cross-process lock. */
@@ -868,6 +1114,7 @@ export class FileSessionStorage implements SessionStorage {
 			if (!shouldDelete(content)) return false;
 
 			fs.unlinkSync(sessionPath);
+			this.#journalIndexes?.delete(sessionPath);
 			const artifactsDir = sessionPath.slice(0, -6);
 			try {
 				fs.rmSync(artifactsDir, { recursive: true, force: true });

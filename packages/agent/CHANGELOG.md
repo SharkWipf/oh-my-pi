@@ -35,6 +35,10 @@
 - Pre-model-call gates now receive the resolved request model and original context identity alongside the actual post-inband provider context, so accounting and admission can correlate transformed requests without preparing them again.
 - Local compaction preserves selected source spans chronologically without refunding selected-user cut costs; complete admitted non-user atoms are charged once before the calibrated ordinary walk. Repeated sparse retention no longer resurrects intervening omitted originals.
 - Authored images interleaved with snap archive frames keep their one-time original-image estimate instead of being priced as rasterized transcript frames.
+
+### Added
+
+- Pre-model-call gates receive the resolved request model alongside the actual post-inband provider context, so accounting and admission use the dispatched representation without preparing it again.
 ### Added
 
 - Added optional queued-message preparation with cancellation-safe delivery and appended context ([#11835](https://github.com/can1357/oh-my-pi/pull/11835) by [@andrebrait](https://github.com/andrebrait)).

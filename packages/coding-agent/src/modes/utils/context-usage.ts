@@ -320,16 +320,20 @@ export function computeNonMessageBreakdown(
 	const entry = nonMessageTokenCacheEntry(session, tokenizer);
 	if (entry.breakdown) return entry.breakdown;
 	const tools = session.agent?.state?.tools ?? EMPTY_TOOLS;
-	const visibleSkills = session.settings?.get("skillful") === false
-		? EMPTY_SKILLS
-		: renderedSkills(session.skills ?? EMPTY_SKILLS, tools);
+	const visibleSkills =
+		session.settings?.get("skillful") === false
+			? EMPTY_SKILLS
+			: renderedSkills(session.skills ?? EMPTY_SKILLS, tools);
 	const skillsTokens = visibleSkills.length === 0 ? 0 : estimateSkillsTokens(visibleSkills, tokenizer);
 	const toolsTokens = estimateToolSchemaTokens(tools, tokenizer, session.settings?.revision);
 	const systemPromptParts = session.systemPrompt ?? EMPTY_STRING_PARTS;
 	const systemContextTokens = tokenizer.countTokens(Array.from(systemPromptParts.slice(1), part => part ?? ""));
 	const systemPromptTokens = Math.max(0, tokenizer.countTokens(systemPromptParts[0] ?? "") - skillsTokens);
 	const breakdown = {
-		skillsTokens, toolsTokens, systemContextTokens, systemPromptTokens,
+		skillsTokens,
+		toolsTokens,
+		systemContextTokens,
+		systemPromptTokens,
 		counts: {
 			systemPrompt: systemPromptParts.length > 0 ? 1 : 0,
 			tools: tools.length,
@@ -668,10 +672,14 @@ function diagnosticTokens(quantity: DiagnosticTokenQuantity): string {
 	if (quantity.tokens === null || quantity.basis === "unknown") return "unknown";
 	const amount = formatNumber(quantity.tokens);
 	switch (quantity.basis) {
-		case "upper-bound": return "≤" + amount;
-		case "tokenizer": return amount;
-		case "provider-reported": return amount + " reported";
-		default: return "~" + amount;
+		case "upper-bound":
+			return "≤" + amount;
+		case "tokenizer":
+			return amount;
+		case "provider-reported":
+			return amount + " reported";
+		default:
+			return "~" + amount;
 	}
 }
 
@@ -680,13 +688,31 @@ export function renderCompactionDiagnosticsSummary(diagnostics: CompactionDiagno
 	const target = diagnostics.target.ordinaryTokens ?? diagnostics.target.calibratedOrdinaryTokens;
 	const calibrated = diagnostics.target.calibratedOrdinaryTokens;
 	const distribution = diagnostics.distribution;
-	const targetLabel = target === undefined ? diagnostics.method === "remote" || diagnostics.method.startsWith("openai-native") ? "No ordinary allocator" : "Target unknown" : "Target " + formatNumber(target) + (calibrated !== undefined && calibrated !== target ? " (cal " + formatNumber(calibrated) + ")" : "");
+	const targetLabel =
+		target === undefined
+			? diagnostics.method === "remote" || diagnostics.method.startsWith("openai-native")
+				? "No ordinary allocator"
+				: "Target unknown"
+			: "Target " +
+				formatNumber(target) +
+				(calibrated !== undefined && calibrated !== target ? " (cal " + formatNumber(calibrated) + ")" : "");
 	const unknown = diagnostics.rows.some(row => row.quantity.tokens === null) ? " + unknown" : "";
-	return targetLabel +
-		" · " + diagnosticTokens(diagnostics.before) + "→" + diagnosticTokens(diagnostics.total) + unknown + " tokens\n" +
-		"Ordinary " + diagnosticTokens(distribution.ordinary) +
-		" · added " + diagnosticTokens(distribution.addedUser) +
-		" · shared " + diagnosticTokens(distribution.shared) + " (counted once)";
+	return (
+		targetLabel +
+		" · " +
+		diagnosticTokens(diagnostics.before) +
+		"→" +
+		diagnosticTokens(diagnostics.total) +
+		unknown +
+		" tokens\n" +
+		"Ordinary " +
+		diagnosticTokens(distribution.ordinary) +
+		" · added " +
+		diagnosticTokens(distribution.addedUser) +
+		" · shared " +
+		diagnosticTokens(distribution.shared) +
+		" (counted once)"
+	);
 }
 
 function diagnosticQuantityDetail(quantity: DiagnosticTokenQuantity): string {
@@ -701,51 +727,121 @@ export function renderCompactionDiagnosticsDetails(diagnostics: CompactionDiagno
 			? "Snapshot: Actual prepared request (OMP-prehook; not confirmed sent)"
 			: "Snapshot: " + diagnostics.snapshot,
 		"Model: " + diagnostics.model + " · method: " + diagnostics.method,
-		"Maximum context: " + (diagnostics.contextWindow === null ? "unknown" : diagnostics.contextWindow.toLocaleString()) + " tokens",
+		"Maximum context: " +
+			(diagnostics.contextWindow === null ? "unknown" : diagnostics.contextWindow.toLocaleString()) +
+			" tokens",
 	];
-	if (!prepared) lines.push(renderCompactionDiagnosticsSummary(diagnostics), "Before: " + diagnosticQuantityDetail(diagnostics.before));
+	if (!prepared)
+		lines.push(
+			renderCompactionDiagnosticsSummary(diagnostics),
+			"Before: " + diagnosticQuantityDetail(diagnostics.before),
+		);
 	lines.push(
-		(prepared ? "Actual prepared local total: " : "Disjoint local total: ") + diagnosticQuantityDetail(diagnostics.total),
+		(prepared ? "Actual prepared local total: " : "Disjoint local total: ") +
+			diagnosticQuantityDetail(diagnostics.total),
 		"Ordinary: " + diagnosticQuantityDetail(diagnostics.distribution.ordinary),
 		"Added user: " + diagnosticQuantityDetail(diagnostics.distribution.addedUser),
 		"Shared: " + diagnosticQuantityDetail(diagnostics.distribution.shared),
-		"Selected user sources: " + diagnostics.distribution.selectedUserSources +
-			" · added sources: " + diagnostics.distribution.addedUserSources +
-			" · manual non-user sources: " + diagnostics.distribution.manualNonUserSources,
+		"Selected user sources: " +
+			diagnostics.distribution.selectedUserSources +
+			" · added sources: " +
+			diagnostics.distribution.addedUserSources +
+			" · manual non-user sources: " +
+			diagnostics.distribution.manualNonUserSources,
 		"Selection subtotals overlap; shared coverage is counted once, not added again.",
 	);
-	if (diagnostics.target.ordinaryTokens !== undefined) lines.push("Configured ordinary target: " + diagnostics.target.ordinaryTokens.toLocaleString() + " tokens");
-	if (diagnostics.target.calibratedOrdinaryTokens !== undefined) lines.push("Calibrated ordinary target: " + diagnostics.target.calibratedOrdinaryTokens.toLocaleString() + " tokens");
-	if (diagnostics.target.manualNonUserTokens !== undefined) lines.push("Manual non-user reservation inside ordinary target: " + diagnostics.target.manualNonUserTokens.toLocaleString() + " tokens");
-	if (diagnostics.target.residualOrdinaryTokens !== undefined) lines.push("Residual ordinary target after reservation: " + diagnostics.target.residualOrdinaryTokens.toLocaleString() + " tokens");
-	if (diagnostics.target.reserveTokens !== undefined) lines.push("Reserve target: " + diagnostics.target.reserveTokens.toLocaleString() + " tokens");
-	if (diagnostics.providerAnchor) lines.push("Provider anchor: " + diagnosticQuantityDetail(diagnostics.providerAnchor));
+	if (diagnostics.target.ordinaryTokens !== undefined)
+		lines.push("Configured ordinary target: " + diagnostics.target.ordinaryTokens.toLocaleString() + " tokens");
+	if (diagnostics.target.calibratedOrdinaryTokens !== undefined)
+		lines.push(
+			"Calibrated ordinary target: " + diagnostics.target.calibratedOrdinaryTokens.toLocaleString() + " tokens",
+		);
+	if (diagnostics.target.manualNonUserTokens !== undefined)
+		lines.push(
+			"Manual non-user reservation inside ordinary target: " +
+				diagnostics.target.manualNonUserTokens.toLocaleString() +
+				" tokens",
+		);
+	if (diagnostics.target.residualOrdinaryTokens !== undefined)
+		lines.push(
+			"Residual ordinary target after reservation: " +
+				diagnostics.target.residualOrdinaryTokens.toLocaleString() +
+				" tokens",
+		);
+	if (diagnostics.target.reserveTokens !== undefined)
+		lines.push("Reserve target: " + diagnostics.target.reserveTokens.toLocaleString() + " tokens");
+	if (diagnostics.providerAnchor)
+		lines.push("Provider anchor: " + diagnosticQuantityDetail(diagnostics.providerAnchor));
 	if (diagnostics.warning) lines.push("Warning: " + diagnostics.warning);
 	lines.push(...diagnostics.notes, "", "Ordered physical inventory");
 	for (const item of diagnostics.rows) {
 		lines.push("", item.location + " · " + item.kind + " · " + item.label);
 		lines.push("  " + diagnosticQuantityDetail(item.quantity));
 		const counts = item.counts;
-		lines.push("  Counts: " + counts.messages + " messages · " + counts.blocks + " blocks · " + counts.frames + " frames · " + counts.images + " image blocks" + (counts.items === undefined ? "" : " · " + counts.items + " native items"));
-		lines.push("  Coverage: " + item.coverage + (item.sourceIds?.length ? " · sources " + item.sourceIds.join(", ") : ""));
-		if (item.selectionReasons.length) lines.push("  Group selection reasons (union): " + item.selectionReasons.join(", "));
+		lines.push(
+			"  Counts: " +
+				counts.messages +
+				" messages · " +
+				counts.blocks +
+				" blocks · " +
+				counts.frames +
+				" frames · " +
+				counts.images +
+				" image blocks" +
+				(counts.items === undefined ? "" : " · " + counts.items + " native items"),
+		);
+		lines.push(
+			"  Coverage: " + item.coverage + (item.sourceIds?.length ? " · sources " + item.sourceIds.join(", ") : ""),
+		);
+		if (item.selectionReasons.length)
+			lines.push("  Group selection reasons (union): " + item.selectionReasons.join(", "));
 		if (diagnostics.selection && item.sourceIds?.length) {
 			const sourceReasons = diagnostics.selection.sourceReasons;
-			lines.push("  Source reason membership: " + item.sourceIds.map(id => id + ": " + (sourceReasons[id]?.join(", ") || "not recorded")).join("; "));
+			lines.push(
+				"  Source reason membership: " +
+					item.sourceIds.map(id => id + ": " + (sourceReasons[id]?.join(", ") || "not recorded")).join("; "),
+			);
 		}
-		if (item.contributions?.length) lines.push("  Physical ownership: " + item.contributions.join(" + ") + (item.contributions.length > 1 ? " (shared occurrence; charged once)" : ""));
-		if (item.payloadSize) lines.push("  Payload: " + item.payloadSize.value.toLocaleString() + " " + item.payloadSize.unit);
+		if (item.contributions?.length)
+			lines.push(
+				"  Physical ownership: " +
+					item.contributions.join(" + ") +
+					(item.contributions.length > 1 ? " (shared occurrence; charged once)" : ""),
+			);
+		if (item.payloadSize)
+			lines.push("  Payload: " + item.payloadSize.value.toLocaleString() + " " + item.payloadSize.unit);
 		if (item.controls.length) lines.push("  Controls: " + item.controls.join(" · "));
 		if (item.note) lines.push("  " + item.note);
 	}
 	if (diagnostics.selection) {
-		lines.push("", "Selection quotas (source q; non-additive)", "Quota membership overlaps. These policy counters are not additional physical charges or provider billing.");
+		lines.push(
+			"",
+			"Selection quotas (source q; non-additive)",
+			"Quota membership overlaps. These policy counters are not additional physical charges or provider billing.",
+		);
 		for (const [group, quota] of Object.entries(diagnostics.selection.quota)) {
-			lines.push("  " + group + ": " + quota.count.toLocaleString() + " members · q=" + quota.tokens.toLocaleString() + " tokens");
+			lines.push(
+				"  " +
+					group +
+					": " +
+					quota.count.toLocaleString() +
+					" members · q=" +
+					quota.tokens.toLocaleString() +
+					" tokens",
+			);
 		}
 	}
-	lines.push("", diagnostics.snapshot === "recorded-at-compaction" ? "Recorded operation settings (not today’s settings)" : "Settings captured for this snapshot");
-	for (const [name, value] of Object.entries(diagnostics.settings)) lines.push("  " + name + ": " + JSON.stringify(value));
-	lines.push("", "Reconstruction and OMP-prehook values are not a final provider request. Unobserved post-hook shape and opaque/image billing remain unknown.");
+	lines.push(
+		"",
+		diagnostics.snapshot === "recorded-at-compaction"
+			? "Recorded operation settings (not today’s settings)"
+			: "Settings captured for this snapshot",
+	);
+	for (const [name, value] of Object.entries(diagnostics.settings))
+		lines.push("  " + name + ": " + JSON.stringify(value));
+	lines.push(
+		"",
+		"Reconstruction and OMP-prehook values are not a final provider request. Unobserved post-hook shape and opaque/image billing remain unknown.",
+	);
 	return lines.join("\n");
 }

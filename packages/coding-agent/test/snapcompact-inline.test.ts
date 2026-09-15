@@ -1,6 +1,12 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import type { Context, ImageContent, Message, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
-import { cloneWithSourceOrigins, exportItemOrigins, importItemOrigins, invalidateSourceOrigins, transferSourceOrigin } from "@oh-my-pi/pi-ai/utils/source-origin";
+import {
+	cloneWithSourceOrigins,
+	exportItemOrigins,
+	importItemOrigins,
+	invalidateSourceOrigins,
+	transferSourceOrigin,
+} from "@oh-my-pi/pi-ai/utils/source-origin";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	estimateInlineSavings,
@@ -496,20 +502,28 @@ describe("SnapcompactInlineTransformer", () => {
 		const context: Context = { systemPrompt: [denseText(3000)], messages: [userMessage("do the thing")] };
 		const model = makeModel();
 		const first = await transformer.transform(context, model);
-		const frame = (first.messages[0]!.content as (TextContent | ImageContent)[]).find(block => block.type === "image")! as ImageContent;
+		const frame = (first.messages[0]!.content as (TextContent | ImageContent)[]).find(
+			block => block.type === "image",
+		)! as ImageContent;
 		const data = frame.data;
 		const fact = getInlineFrameAccounting(frame)!;
 		expect(fact.estimatedTokens).toBe(snapcompact.resolveShape(model, TEST_SHAPE).frameTokenEstimate);
 		frame.data = "mutated by provider hook";
 		expect(getInlineFrameAccounting(frame)).toBeUndefined();
 		const second = await transformer.transform(context, model);
-		const restored = (second.messages[0]!.content as (TextContent | ImageContent)[]).find(block => block.type === "image")! as ImageContent;
+		const restored = (second.messages[0]!.content as (TextContent | ImageContent)[]).find(
+			block => block.type === "image",
+		)! as ImageContent;
 		expect(restored.data === data).toBe(true);
 		expect(getInlineFrameAccounting(restored)).toEqual(fact);
 		const google = makeModel({ api: "google-generative-ai", provider: "google" });
 		const third = await transformer.transform(context, google);
-		const repriced = (third.messages[0]!.content as (TextContent | ImageContent)[]).find(block => block.type === "image")! as ImageContent;
-		expect(getInlineFrameAccounting(repriced)?.estimatedTokens).toBe(snapcompact.resolveShape(google, TEST_SHAPE).frameTokenEstimate);
+		const repriced = (third.messages[0]!.content as (TextContent | ImageContent)[]).find(
+			block => block.type === "image",
+		)! as ImageContent;
+		expect(getInlineFrameAccounting(repriced)?.estimatedTokens).toBe(
+			snapcompact.resolveShape(google, TEST_SHAPE).frameTokenEstimate,
+		);
 		expect(getInlineFrameAccounting(restored)).toEqual(fact);
 	});
 
@@ -519,7 +533,10 @@ describe("SnapcompactInlineTransformer", () => {
 			withTestShape({ renderSystemPrompt: "all", renderToolResults: false }),
 		);
 		const original: ImageContent = { type: "image", data: "authored", mimeType: "image/png" };
-		const context: Context = { systemPrompt: [denseText(3000)], messages: [{ role: "user", content: [original], timestamp: 0 }] };
+		const context: Context = {
+			systemPrompt: [denseText(3000)],
+			messages: [{ role: "user", content: [original], timestamp: 0 }],
+		};
 		const rendered = await transformer.transform(context, model);
 		const content = rendered.messages[0]!.content as (TextContent | ImageContent)[];
 		const frame = content.find(block => block.type === "image" && block !== original)! as ImageContent;
@@ -528,7 +545,10 @@ describe("SnapcompactInlineTransformer", () => {
 		expect(getInlineTextAccounting({ ...note })).toBeUndefined();
 		expect(getInlineFrameAccounting(original)).toBeUndefined();
 		const converted = await convertImageToPng(frame);
-		const decorated = decorateContextImages({ messages: [{ role: "user", content: [converted], timestamp: 0 }] }, () => "https://example.invalid/frame");
+		const decorated = decorateContextImages(
+			{ messages: [{ role: "user", content: [converted], timestamp: 0 }] },
+			() => "https://example.invalid/frame",
+		);
 		const inlined = await inlineContextImages(decorated, async () => null);
 		const finalFrame = (inlined.messages[0]!.content as ImageContent[])[0]!;
 		expect(getInlineFrameAccounting(finalFrame)).toEqual(getInlineFrameAccounting(frame));

@@ -898,7 +898,9 @@ describe("openai-codex streaming", () => {
 		if (payload?.type !== "openaiResponsesHistory") throw new Error("Expected native history");
 		bindMessageSource(result, "interleaved-turn", 0);
 		expect(payload.items.map(item => item.id)).toEqual([
-			"rs_interleaved", "msg_interleaved", "item_interleaved_computer",
+			"rs_interleaved",
+			"msg_interleaved",
+			"item_interleaved_computer",
 		]);
 		for (const [index, item] of payload.items.entries()) {
 			const origin = getSourceOrigin(item);

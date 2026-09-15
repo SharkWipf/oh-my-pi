@@ -53,20 +53,41 @@ import { parseCompactionOverridePrompt } from "./preserved-message-settings";
 export function getOriginalSourceMessage(message: UserMessage): UserMessage {
 	const original = message.originalSubmission;
 	if (!original) return message;
-	const text = message.compactionOverride !== undefined
-		? parseCompactionOverridePrompt(original.text)?.text ?? original.text : original.text;
+	const text =
+		message.compactionOverride !== undefined
+			? (parseCompactionOverridePrompt(original.text)?.text ?? original.text)
+			: original.text;
 	const content = message.content;
 	const images = original.images;
 	if (typeof content === "string") {
 		if (!images?.length && content === text) return message;
-	} else if (content.length === 1 + (images?.length ?? 0) && content[0]?.type === "text" && content[0].text === text &&
-		(!images || images.every((image, index) => {
-			const delivered = content[index + 1];
-			return delivered?.type === "image" && delivered.data === image.data && delivered.mimeType === image.mimeType;
-		}))) return message;
+	} else if (
+		content.length === 1 + (images?.length ?? 0) &&
+		content[0]?.type === "text" &&
+		content[0].text === text &&
+		(!images ||
+			images.every((image, index) => {
+				const delivered = content[index + 1];
+				return (
+					delivered?.type === "image" && delivered.data === image.data && delivered.mimeType === image.mimeType
+				);
+			}))
+	)
+		return message;
 	// The two projections bind independent transient origins; their image blocks cannot alias.
-	return { ...message, providerPayload: undefined, content: images?.length ? [{ type: "text", text }, ...images.map(image => ({ ...image }))] : text };
+	return {
+		...message,
+		providerPayload: undefined,
+		content: images?.length ? [{ type: "text", text }, ...images.map(image => ({ ...image }))] : text,
+	};
 }
+declare module "@oh-my-pi/pi-ai" {
+	interface UserMessage {
+		imageLinks?: (string | undefined)[];
+		compactionOverride?: "keep" | "exclude";
+	}
+}
+
 declare module "@oh-my-pi/pi-ai" {
 	interface UserMessage {
 		imageLinks?: (string | undefined)[];

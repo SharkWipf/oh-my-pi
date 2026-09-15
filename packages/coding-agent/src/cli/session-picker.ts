@@ -1,6 +1,8 @@
 import { ProcessTerminal, TUI } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
+import { settings } from "../config/settings";
 import { SessionSelectorComponent } from "../modes/components/session-selector";
+import { confirmRequirementsJournalDeletion } from "../requirements/commands";
 import { HistoryStorage } from "../session/history-storage";
 import type { SessionInfo } from "../session/session-listing";
 import { SessionManager } from "../session/session-manager";
@@ -77,7 +79,8 @@ export async function selectSession(
 				onDelete:
 					options.allowDelete === false
 						? undefined
-						: async (session: SessionInfo) => {
+						: async (session, choose) => {
+								if (!(await confirmRequirementsJournalDeletion(settings, session.path, choose))) return false;
 								await storage.deleteSessionWithArtifacts(session.path);
 								return true;
 							},

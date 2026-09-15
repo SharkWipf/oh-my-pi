@@ -69,7 +69,16 @@ import { getProxyForUrl } from "../utils/proxy";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { adaptSchemaForStrict, NO_STRICT, sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
 import { notifyRawSseEvent } from "../utils/sse-debug";
-import { cloneWithSourceOrigins, combineContentSourceOrigins, getSourceOrigin, invalidateSourceOrigins, mergeSourceHistory, setSourceOrigin, transferSourceOrigin, transferTransformedSourceOrigin } from "../utils/source-origin";
+import {
+	cloneWithSourceOrigins,
+	combineContentSourceOrigins,
+	getSourceOrigin,
+	invalidateSourceOrigins,
+	mergeSourceHistory,
+	setSourceOrigin,
+	transferSourceOrigin,
+	transferTransformedSourceOrigin,
+} from "../utils/source-origin";
 import { compactGrammarDefinition } from "./grammar";
 import {
 	type CodexLiteShapedBody,
@@ -1303,13 +1312,15 @@ function unrollCodexComputerItems(items: ResponseInput, supportsImageDetailOrigi
 	for (const item of replayItems) {
 		if (item.type === "computer_call") {
 			const actions = item.actions ?? (item.action ? [item.action] : []);
-			unrolled.push(transferTransformedSourceOrigin(item, {
-				type: "function_call",
-				call_id: item.call_id,
-				name: "computer",
-				arguments: JSON.stringify({ actions }),
-				status: item.status,
-			}));
+			unrolled.push(
+				transferTransformedSourceOrigin(item, {
+					type: "function_call",
+					call_id: item.call_id,
+					name: "computer",
+					arguments: JSON.stringify({ actions }),
+					status: item.status,
+				}),
+			);
 			continue;
 		}
 		if (item.type === "computer_call_output") {
@@ -1327,14 +1338,25 @@ function unrollCodexComputerItems(items: ResponseInput, supportsImageDetailOrigi
 								file_id: item.output.file_id,
 							} satisfies ResponseInputContent)
 						: undefined;
-			unrolled.push(setSourceOrigin({
-				type: "function_call_output",
-				call_id: item.call_id,
-				output: image ? "(see attached image)" : "",
-			}, { kind: "synthetic", reason: "provider-control" }));
+			unrolled.push(
+				setSourceOrigin(
+					{
+						type: "function_call_output",
+						call_id: item.call_id,
+						output: image ? "(see attached image)" : "",
+					},
+					{ kind: "synthetic", reason: "provider-control" },
+				),
+			);
 			if (image) {
 				transferSourceOrigin(item.output, image);
-				const content: ResponseInputContent[] = [setSourceOrigin({ type: "input_text", text: "Attached image from computer tool result:" }, { kind: "synthetic", reason: "prefix" }), image];
+				const content: ResponseInputContent[] = [
+					setSourceOrigin(
+						{ type: "input_text", text: "Attached image from computer tool result:" },
+						{ kind: "synthetic", reason: "prefix" },
+					),
+					image,
+				];
 				unrolled.push(setSourceOrigin({ role: "user", content }, combineContentSourceOrigins(content)));
 			}
 			continue;
@@ -1858,7 +1880,11 @@ async function openCodexWebSocketTransport(
 	if (replacementWebsocketRequest !== undefined) {
 		websocketRequest = replacementWebsocketRequest as typeof websocketRequest;
 	}
-	if (options?.onPayload) invalidateSourceOrigins(websocketRequest, replacementWebsocketRequest === undefined ? "externally-mutated" : "externally-replaced");
+	if (options?.onPayload)
+		invalidateSourceOrigins(
+			websocketRequest,
+			replacementWebsocketRequest === undefined ? "externally-mutated" : "externally-replaced",
+		);
 	recordCodexTurnRequestDiagnostics(websocketState, websocketRequest, "websocket", canAppendBeforeRequest);
 	const websocketHeaders = createCodexHeaders(
 		requestContext.requestHeaders,
@@ -1988,9 +2014,17 @@ async function openCodexSseTransport(
 	if (replacementWireBody !== undefined) {
 		wireBody = replacementWireBody as RequestBody;
 	}
-	if (options?.onPayload) invalidateSourceOrigins(wireBody, replacementWireBody === undefined ? "externally-mutated" : "externally-replaced");
+	if (options?.onPayload)
+		invalidateSourceOrigins(
+			wireBody,
+			replacementWireBody === undefined ? "externally-mutated" : "externally-replaced",
+		);
 	recordCodexTurnRequestDiagnostics(state, wireBody, "sse", canAppendBeforeRequest);
-	return { eventStream: await open(wireBody), requestBodyForState: cloneWithSourceOrigins(wireBody), transport: "sse" };
+	return {
+		eventStream: await open(wireBody),
+		requestBodyForState: cloneWithSourceOrigins(wireBody),
+		transport: "sse",
+	};
 }
 
 function isJsonWhitespaceOnly(value: string): boolean {
@@ -2453,7 +2487,10 @@ class CodexStreamProcessor {
 		const contentIndex = entry?.contentIndex ?? output.content.length - 1;
 
 		if (item.type === "image_generation_call" && item.result) {
-			runtime.nativeOutputContentIndices.set(nativeOutputItem, appendResponsesImageResult(output, stream, item.result));
+			runtime.nativeOutputContentIndices.set(
+				nativeOutputItem,
+				appendResponsesImageResult(output, stream, item.result),
+			);
 			runtime.closeOpenItem(entry);
 			return;
 		}
@@ -4639,7 +4676,12 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 				if (text === msg.content) transferSourceOrigin(msg, normalizedContent[0]);
 				else transferTransformedSourceOrigin(msg, normalizedContent[0]);
 			}
-			messages.push(setSourceOrigin({ role: msg.role, content: normalizedContent }, combineContentSourceOrigins(normalizedContent)));
+			messages.push(
+				setSourceOrigin(
+					{ role: msg.role, content: normalizedContent },
+					combineContentSourceOrigins(normalizedContent),
+				),
+			);
 			msgIndex += 1;
 			continue;
 		}

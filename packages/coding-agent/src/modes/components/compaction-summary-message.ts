@@ -115,7 +115,9 @@ export class CompactionSummaryMessageComponent implements Component {
 	readonly #diagnosticLines: string[] | undefined;
 
 	constructor(private readonly message: CompactionSummaryMessage) {
-		this.#diagnosticLines = message.diagnostics ? renderCompactionDiagnosticsSummary(message.diagnostics).split("\n") : undefined;
+		this.#diagnosticLines = message.diagnostics
+			? renderCompactionDiagnosticsSummary(message.diagnostics).split("\n")
+			: undefined;
 		this.#divider = new SummaryDividerComponent({
 			// A dead-end warning stamped by the progress guard badges the bar;
 			// the full text lives in the ctrl+o detail block below.
@@ -160,7 +162,9 @@ export class CompactionSummaryMessageComponent implements Component {
 		const frameNote =
 			frameCount > 0 ? `\n\n_${frameCount} snapcompact frame${frameCount === 1 ? "" : "s"} attached_` : "";
 		const warningNote = this.message.warning ? `\n\n${theme.icon.warning} **Warning:** ${this.message.warning}` : "";
-		const diagnosticNote = this.#diagnosticLines ? `\n\n${this.#diagnosticLines.join("\n\n")}\n\nUse /context details for ordered inventory and measurement basis.` : "";
+		const diagnosticNote = this.#diagnosticLines
+			? `\n\n${this.#diagnosticLines.join("\n\n")}\n\nUse /context details for ordered inventory and measurement basis.`
+			: "";
 		return `**${tokenLine}**${warningNote}${diagnosticNote}\n\n${this.message.summary}${frameNote}`;
 	}
 }

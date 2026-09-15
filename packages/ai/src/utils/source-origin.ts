@@ -26,8 +26,10 @@ export interface NativeSourcePart {
 
 /** Transient physical facts recorded by the inline renderer, never provider billing. */
 export type InlinePhysical = Readonly<
-	{ owner: "system" | "context" | "tool"; toolCallId?: string } &
-	({ kind: "frame"; estimatedTokens: number } | { kind: "note" })
+	{ owner: "system" | "context" | "tool"; toolCallId?: string } & (
+		| { kind: "frame"; estimatedTokens: number }
+		| { kind: "note" }
+	)
 >;
 
 /** Transient identity of one actual emitted archive frame, never inferred from aggregate coverage. */
@@ -39,11 +41,18 @@ export type ArchiveFrameAccounting = Readonly<{
 export type NativeItemOrigin =
 	| { kind: "source"; parts: NativeSourcePart[] }
 	| { kind: "synthetic"; reason: string; anchorEntryId?: string; inlinePhysical?: InlinePhysical }
-	| { kind: "aggregate"; compactionEntryId: string; coveredSources?: NativeSourcePart[]; archiveFrame?: ArchiveFrameAccounting }
+	| {
+			kind: "aggregate";
+			compactionEntryId: string;
+			coveredSources?: NativeSourcePart[];
+			archiveFrame?: ArchiveFrameAccounting;
+	  }
 	| { kind: "unknown"; reason: string };
 
 const nativePositionSchema = type("number.integer").narrow(value => value >= 0);
-const nativeRangeSchema = type({ start: nativePositionSchema, end: nativePositionSchema }).narrow(range => range.end >= range.start);
+const nativeRangeSchema = type({ start: nativePositionSchema, end: nativePositionSchema }).narrow(
+	range => range.end >= range.start,
+);
 const nativeSourcePartSchema: FluentType<NativeSourcePart> = type({
 	entryId: "string",
 	"projection?": "'original' | undefined",
@@ -70,9 +79,26 @@ const inlinePhysicalSchema: FluentType<InlinePhysical> = type({
 	kind: "'frame'",
 	estimatedTokens: type("number").narrow(value => Number.isFinite(value) && value >= 0),
 }).or(type({ owner: "'system' | 'context' | 'tool'", "toolCallId?": "string | undefined", kind: "'note'" }));
-const nativeItemOriginSchema: FluentType<NativeItemOrigin> = type({ kind: "'source'", parts: nativeSourcePartSchema.array() })
-	.or(type({ kind: "'synthetic'", reason: "string", "anchorEntryId?": "string | undefined", "inlinePhysical?": inlinePhysicalSchema.or(type("undefined")) }))
-	.or(type({ kind: "'aggregate'", compactionEntryId: "string", "coveredSources?": nativeSourcePartSchema.array().or(type("undefined")), "archiveFrame?": archiveFrameSchema.or(type("undefined")) }))
+const nativeItemOriginSchema: FluentType<NativeItemOrigin> = type({
+	kind: "'source'",
+	parts: nativeSourcePartSchema.array(),
+})
+	.or(
+		type({
+			kind: "'synthetic'",
+			reason: "string",
+			"anchorEntryId?": "string | undefined",
+			"inlinePhysical?": inlinePhysicalSchema.or(type("undefined")),
+		}),
+	)
+	.or(
+		type({
+			kind: "'aggregate'",
+			compactionEntryId: "string",
+			"coveredSources?": nativeSourcePartSchema.array().or(type("undefined")),
+			"archiveFrame?": archiveFrameSchema.or(type("undefined")),
+		}),
+	)
 	.or(type({ kind: "'unknown'", reason: "string" }));
 const nativeItemOriginsSchema = nativeItemOriginSchema.array();
 const nativeSourcePartsSchema = nativeSourcePartSchema.array();
@@ -101,8 +127,22 @@ export function hasNativeHistorySourceMapping(items: readonly object[], value: u
 
 type PhysicalSnapshot =
 	| { kind: "note"; text: string }
-	| { kind: "frame"; data: string; mimeType: string; detail: ImageContent["detail"]; url: string | undefined; fileProvider: string | undefined; fileId: string | undefined };
-type OriginEntry = NativeItemOrigin | { kind: "physical"; origin: Extract<NativeItemOrigin, { kind: "synthetic" | "aggregate" }>; snapshot: PhysicalSnapshot };
+	| {
+			kind: "frame";
+			data: string;
+			mimeType: string;
+			detail: ImageContent["detail"];
+			url: string | undefined;
+			fileProvider: string | undefined;
+			fileId: string | undefined;
+	  };
+type OriginEntry =
+	| NativeItemOrigin
+	| {
+			kind: "physical";
+			origin: Extract<NativeItemOrigin, { kind: "synthetic" | "aggregate" }>;
+			snapshot: PhysicalSnapshot;
+	  };
 const origins = new WeakMap<object, OriginEntry>();
 
 function withoutPhysicalAccounting(origin: NativeItemOrigin): NativeItemOrigin {
@@ -124,7 +164,15 @@ function physicalSnapshot(value: object, kind: PhysicalSnapshot["kind"]): Physic
 	}
 	if (kind !== "frame" || value.type !== "image") return undefined;
 	const image = value as ImageContent;
-	return { kind: "frame", data: image.data, mimeType: image.mimeType, detail: image.detail, url: image.url, fileProvider: image.providerFile?.provider, fileId: image.providerFile?.id };
+	return {
+		kind: "frame",
+		data: image.data,
+		mimeType: image.mimeType,
+		detail: image.detail,
+		url: image.url,
+		fileProvider: image.providerFile?.provider,
+		fileId: image.providerFile?.id,
+	};
 }
 
 function physicalSnapshotMatches(value: object, snapshot: PhysicalSnapshot): boolean {
@@ -132,7 +180,14 @@ function physicalSnapshotMatches(value: object, snapshot: PhysicalSnapshot): boo
 	if (snapshot.kind === "note") return value.type === "text" && "text" in value && value.text === snapshot.text;
 	if (value.type !== "image") return false;
 	const image = value as ImageContent;
-	return image.data === snapshot.data && image.mimeType === snapshot.mimeType && image.detail === snapshot.detail && image.url === snapshot.url && image.providerFile?.provider === snapshot.fileProvider && image.providerFile?.id === snapshot.fileId;
+	return (
+		image.data === snapshot.data &&
+		image.mimeType === snapshot.mimeType &&
+		image.detail === snapshot.detail &&
+		image.url === snapshot.url &&
+		image.providerFile?.provider === snapshot.fileProvider &&
+		image.providerFile?.id === snapshot.fileId
+	);
 }
 const unknownOrigin: NativeItemOrigin = { kind: "unknown", reason: "legacy-map-absent" };
 let sourceBindingGeneration = 0;
@@ -164,12 +219,25 @@ export function getArchiveFrameAccounting(value: object): ArchiveFrameAccounting
 }
 
 export function setSourceOrigin<T extends object>(value: T, origin: NativeItemOrigin): T {
-	const kind = origin.kind === "synthetic" ? origin.inlinePhysical?.kind : origin.kind === "aggregate" && origin.archiveFrame ? "frame" : undefined;
+	const kind =
+		origin.kind === "synthetic"
+			? origin.inlinePhysical?.kind
+			: origin.kind === "aggregate" && origin.archiveFrame
+				? "frame"
+				: undefined;
 	const snapshot = kind ? physicalSnapshot(value, kind) : undefined;
 	if (origin.kind === "synthetic" && origin.inlinePhysical && snapshot) {
-		origins.set(value, { kind: "physical", origin: { ...origin, inlinePhysical: Object.freeze({ ...origin.inlinePhysical }) }, snapshot });
+		origins.set(value, {
+			kind: "physical",
+			origin: { ...origin, inlinePhysical: Object.freeze({ ...origin.inlinePhysical }) },
+			snapshot,
+		});
 	} else if (origin.kind === "aggregate" && origin.archiveFrame && snapshot) {
-		origins.set(value, { kind: "physical", origin: { ...origin, archiveFrame: Object.freeze({ ...origin.archiveFrame }) }, snapshot });
+		origins.set(value, {
+			kind: "physical",
+			origin: { ...origin, archiveFrame: Object.freeze({ ...origin.archiveFrame }) },
+			snapshot,
+		});
 	} else {
 		origins.set(value, withoutPhysicalAccounting(origin));
 	}
@@ -194,11 +262,18 @@ export function transferTransformedSourceOrigin<T extends object>(
 	if (origin.kind !== "source") return setSourceOrigin(to, origin);
 	return setSourceOrigin(to, {
 		kind: "source",
-		parts: origin.parts.map(({ sourceSpan: _sourceSpan, transportSpan: _transportSpan, currentSourceSpan: _currentSourceSpan, ...part }) => ({
-			...part,
-			coverage: part.coverage === "full" ? coverage : part.coverage,
-			representation: "transformed-text",
-		})),
+		parts: origin.parts.map(
+			({
+				sourceSpan: _sourceSpan,
+				transportSpan: _transportSpan,
+				currentSourceSpan: _currentSourceSpan,
+				...part
+			}) => ({
+				...part,
+				coverage: part.coverage === "full" ? coverage : part.coverage,
+				representation: "transformed-text",
+			}),
+		),
 	});
 }
 
@@ -211,7 +286,7 @@ export function combineSourceOrigins(values: readonly unknown[]): NativeItemOrig
 		sole ??= origin;
 		if (origin?.kind === "source") parts.push(...origin.parts);
 	}
-	return parts.length ? { kind: "source", parts } : sole ?? unknownOrigin;
+	return parts.length ? { kind: "source", parts } : (sole ?? unknownOrigin);
 }
 
 /** Assemble an emitted content array with its actual transport positions. */
@@ -251,11 +326,13 @@ export function bindMessageSource(
 			blockIndex,
 			coverage: "full",
 			representation: image ? "original-image" : "native",
-			...(text === undefined ? {} : {
-				sourceLength: text.length,
-				sourceSpan: { start: 0, end: text.length },
-				transportSpan: { start: 0, end: text.length },
-			}),
+			...(text === undefined
+				? {}
+				: {
+						sourceLength: text.length,
+						sourceSpan: { start: 0, end: text.length },
+						transportSpan: { start: 0, end: text.length },
+					}),
 		};
 		parts.push(part);
 		setSourceOrigin(block, { kind: "source", parts: [part] });
@@ -264,7 +341,12 @@ export function bindMessageSource(
 	else {
 		for (let index = 0; index < message.content.length; index++) {
 			const block = message.content[index]!;
-			bind(block, index, block.type === "text" ? block.text : block.type === "thinking" ? block.thinking : undefined, block.type === "image");
+			bind(
+				block,
+				index,
+				block.type === "text" ? block.text : block.type === "thinking" ? block.thinking : undefined,
+				block.type === "image",
+			);
 		}
 	}
 	if (message.role === "toolResult" && message.providerMetadata) {
@@ -291,19 +373,33 @@ export function bindMessageSource(
 		if (contentBlock) {
 			const block = message.content[contentBlock.contentIndex];
 			if (block) {
-				bind(item, contentBlock.contentIndex, block.type === "text" ? block.text : block.type === "thinking" ? block.thinking : undefined);
+				bind(
+					item,
+					contentBlock.contentIndex,
+					block.type === "text" ? block.text : block.type === "thinking" ? block.thinking : undefined,
+				);
 				parts.pop()!.transportSpan = undefined;
 			} else setSourceOrigin(item, { kind: "unknown", reason: "native-content-absent" });
 			continue;
 		}
-		const text = typeof item.content === "string" ? item.content : typeof item.arguments === "string" ? item.arguments : undefined;
+		const text =
+			typeof item.content === "string"
+				? item.content
+				: typeof item.arguments === "string"
+					? item.arguments
+					: undefined;
 		bind(item, component, text);
 		if (Array.isArray(item.content)) {
 			for (let blockIndex = 0; blockIndex < item.content.length; blockIndex++) {
 				const block: unknown = item.content[blockIndex];
 				if (!block || typeof block !== "object") continue;
 				const blockText = "text" in block && typeof block.text === "string" ? block.text : undefined;
-				bind(block, `${component}.content.${blockIndex}`, blockText, "type" in block && block.type === "input_image");
+				bind(
+					block,
+					`${component}.content.${blockIndex}`,
+					blockText,
+					"type" in block && block.type === "input_image",
+				);
 				parts[parts.length - 1]!.transportBlockIndex = blockIndex;
 			}
 		}
@@ -346,7 +442,11 @@ export function importItemOrigins(items: readonly object[], itemOrigins?: readon
 /** JSON-shaped native data clone with identity transfer during each actual recursive clone. */
 export function cloneWithSourceOrigins<T>(value: T): T {
 	if (!value || typeof value !== "object") return value;
-	if (Array.isArray(value)) return transferSourceOrigin(value, value.map(item => cloneWithSourceOrigins(item))) as T;
+	if (Array.isArray(value))
+		return transferSourceOrigin(
+			value,
+			value.map(item => cloneWithSourceOrigins(item)),
+		) as T;
 	const clone: Record<string, unknown> = {};
 	for (const [key, child] of Object.entries(value)) clone[key] = cloneWithSourceOrigins(child);
 	return transferSourceOrigin(value, clone) as T;
@@ -360,7 +460,13 @@ export function invalidateSourceOrigins(value: unknown, reason = "externally-mut
 		if (!node || typeof node !== "object" || seen.has(node)) return;
 		seen.add(node);
 		setSourceOrigin(node, { kind: "unknown", reason });
-		if ("type" in node && node.type === "openaiResponsesHistory" && "items" in node && Array.isArray(node.items) && "origins" in node) {
+		if (
+			"type" in node &&
+			node.type === "openaiResponsesHistory" &&
+			"items" in node &&
+			Array.isArray(node.items) &&
+			"origins" in node
+		) {
 			node.origins = node.items.map(() => ({ kind: "unknown", reason }));
 		}
 		if ("replacementHistory" in node && Array.isArray(node.replacementHistory) && "replacementOrigins" in node) {
@@ -375,12 +481,24 @@ function occurrenceKey(item: object): string | object {
 	const origin = getSourceOrigin(item);
 	if (origin?.kind === "aggregate") return JSON.stringify(["aggregate", origin.compactionEntryId]);
 	if (origin?.kind !== "source" || origin.parts.length === 0) return item;
-	return JSON.stringify(origin.parts.map(part => [
-		compactionSourceKey(part), part.order, part.blockIndex, part.coverage, part.representation,
-		part.sourceSpan?.start, part.sourceSpan?.end, part.transportSpan?.start, part.transportSpan?.end,
-		part.transportBlockIndex, part.status ?? "exact-current", part.currentBlockIndex ?? part.blockIndex,
-		(part.currentSourceSpan ?? part.sourceSpan)?.start, (part.currentSourceSpan ?? part.sourceSpan)?.end,
-	]));
+	return JSON.stringify(
+		origin.parts.map(part => [
+			compactionSourceKey(part),
+			part.order,
+			part.blockIndex,
+			part.coverage,
+			part.representation,
+			part.sourceSpan?.start,
+			part.sourceSpan?.end,
+			part.transportSpan?.start,
+			part.transportSpan?.end,
+			part.transportBlockIndex,
+			part.status ?? "exact-current",
+			part.currentBlockIndex ?? part.blockIndex,
+			(part.currentSourceSpan ?? part.sourceSpan)?.start,
+			(part.currentSourceSpan ?? part.sourceSpan)?.end,
+		]),
+	);
 }
 
 function sourceOrder(item: object): number | undefined {
@@ -426,13 +544,21 @@ export function mergeSourceHistory<T extends object>(prefix: readonly T[], histo
 }
 
 /** Remap current correspondence only; never rewrite captured native bytes or source coordinates. */
-export function remapNativeItemOrigins(itemOrigins: readonly NativeItemOrigin[], rewrites: readonly SourceRewrite[]): NativeItemOrigin[] {
+export function remapNativeItemOrigins(
+	itemOrigins: readonly NativeItemOrigin[],
+	rewrites: readonly SourceRewrite[],
+): NativeItemOrigin[] {
 	const byEntry = new Map(rewrites.map(rewrite => [compactionSourceKey(rewrite), rewrite]));
 	const remapPart = (part: NativeSourcePart): NativeSourcePart[] => {
 		const rewrite = byEntry.get(compactionSourceKey(part));
 		if (!rewrite || part.status === "historical-not-current" || part.status === "unknown") return [part];
 		const historical = (status: "historical-not-current" | "unknown"): NativeSourcePart[] => {
-			const { currentSourceSpan: _current, currentBlockIndex: _block, currentSourceLength: _length, ...captured } = part;
+			const {
+				currentSourceSpan: _current,
+				currentBlockIndex: _block,
+				currentSourceLength: _length,
+				...captured
+			} = part;
 			return [{ ...captured, status }];
 		};
 		if (!rewrite.blocks) return historical("unknown");
@@ -442,11 +568,23 @@ export function remapNativeItemOrigins(itemOrigins: readonly NativeItemOrigin[],
 		if (block.newBlockIndex === null) return historical("historical-not-current");
 		const edits = block.textEdits;
 		const priorLength = part.currentSourceLength ?? part.sourceLength;
-		if (!edits?.length) return [{ ...part, currentBlockIndex: block.newBlockIndex, currentSourceLength: priorLength, status: "exact-current" }];
-		const currentSourceLength = priorLength === undefined ? undefined : priorLength + edits.reduce((sum, edit) => sum + edit.replacementLength - (edit.end - edit.start), 0);
+		if (!edits?.length)
+			return [
+				{
+					...part,
+					currentBlockIndex: block.newBlockIndex,
+					currentSourceLength: priorLength,
+					status: "exact-current",
+				},
+			];
+		const currentSourceLength =
+			priorLength === undefined
+				? undefined
+				: priorLength + edits.reduce((sum, edit) => sum + edit.replacementLength - (edit.end - edit.start), 0);
 		const current = part.currentSourceSpan ?? part.sourceSpan;
 		const capture = part.sourceSpan;
-		if (!current || !capture || current.end - current.start !== capture.end - capture.start) return historical("unknown");
+		if (!current || !capture || current.end - current.start !== capture.end - capture.start)
+			return historical("unknown");
 		const result: NativeSourcePart[] = [];
 		let cursor = current.start;
 		let delta = 0;
@@ -454,9 +592,10 @@ export function remapNativeItemOrigins(itemOrigins: readonly NativeItemOrigin[],
 			if (end <= start) return;
 			const sourceSpan = { start: capture.start + start - current.start, end: capture.start + end - current.start };
 			const transport = part.transportSpan;
-			const transportSpan = transport && transport.end - transport.start === current.end - current.start
-				? { start: transport.start + start - current.start, end: transport.start + end - current.start }
-				: undefined;
+			const transportSpan =
+				transport && transport.end - transport.start === current.end - current.start
+					? { start: transport.start + start - current.start, end: transport.start + end - current.start }
+					: undefined;
 			result.push({
 				...part,
 				coverage: "partial",
@@ -485,10 +624,10 @@ export function remapNativeItemOrigins(itemOrigins: readonly NativeItemOrigin[],
 		return result.length ? result : historical("historical-not-current");
 	};
 	return itemOrigins.map(origin => {
-		const parts = origin.kind === "source" ? origin.parts : origin.kind === "aggregate" ? origin.coveredSources : undefined;
+		const parts =
+			origin.kind === "source" ? origin.parts : origin.kind === "aggregate" ? origin.coveredSources : undefined;
 		if (!parts || !parts.some(part => byEntry.has(compactionSourceKey(part)))) return origin;
 		const mapped = parts.flatMap(remapPart);
 		return origin.kind === "source" ? { ...origin, parts: mapped } : { ...origin, coveredSources: mapped };
 	});
 }
-

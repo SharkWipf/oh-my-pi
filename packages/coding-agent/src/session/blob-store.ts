@@ -167,6 +167,17 @@ export class BlobStore {
 		}
 	}
 
+	/** Physical change token without reading bytes; not a content-integrity attestation. */
+	getVersion(hash: string): string | undefined {
+		try {
+			const stat = fs.statSync(path.join(this.dir, hash));
+			return JSON.stringify([stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs, stat.mode]);
+		} catch (err) {
+			if (isEnoent(err)) return undefined;
+			throw err;
+		}
+	}
+
 	/** Stored byte length without reading the blob; null when it is absent. */
 	sizeSync(hash: string): number | null {
 		try {

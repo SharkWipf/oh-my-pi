@@ -57,6 +57,9 @@ export const launchHelp = {
 		"from-claude": Flags.boolean({ description: "Import a Claude Code session into OMP" }),
 		"from-codex": Flags.boolean({ description: "Import a Codex session into OMP" }),
 		"session-dir": Flags.string({ description: "Directory for session storage and lookup" }),
+		"start-without-memory": Flags.boolean({
+			description: "Skip learned-memory startup, recall and automatic writes; rules and context files stay enabled",
+		}),
 		"no-session": Flags.boolean({ description: "Don't save session (ephemeral)" }),
 		models: Flags.string({ description: "Comma-separated model patterns for Ctrl+P cycling" }),
 		"no-tools": Flags.boolean({ description: "Disable all built-in tools" }),

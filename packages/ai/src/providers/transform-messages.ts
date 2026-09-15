@@ -10,7 +10,13 @@ import type {
 	UserMessage,
 } from "../types";
 import { isDemotedThinking, kDemotedThinking, kSyntheticUser, type SyntheticUserCarrier } from "../utils/block-symbols";
-import { combineSourceOrigins, setSourceOrigin, transferMessageSourceOrigin, transferSourceOrigin, transferTransformedSourceOrigin } from "../utils/source-origin";
+import {
+	combineSourceOrigins,
+	setSourceOrigin,
+	transferMessageSourceOrigin,
+	transferSourceOrigin,
+	transferTransformedSourceOrigin,
+} from "../utils/source-origin";
 
 const enum ToolCallStatus {
 	/** A tool result has already been emitted for this tool call; later duplicates must be skipped. */
@@ -321,7 +327,11 @@ function sanitizeMalformedToolCalls(messages: Message[]): Message[] {
 				filtered.push(block);
 			}
 			if (filtered.length === 0) continue;
-			result.push(filtered.length === msg.content.length ? msg : transferMessageSourceOrigin(msg, { ...msg, content: filtered }));
+			result.push(
+				filtered.length === msg.content.length
+					? msg
+					: transferMessageSourceOrigin(msg, { ...msg, content: filtered }),
+			);
 			continue;
 		}
 		if (msg.role === "toolResult") {
@@ -541,7 +551,9 @@ function redactSensitiveCredentialsInMessages(messages: Message[]): Message[] {
 				}
 				return block;
 			});
-			return (changed ? transferMessageSourceOrigin(toolResultMsg, { ...toolResultMsg, content }) : toolResultMsg) as Message;
+			return (
+				changed ? transferMessageSourceOrigin(toolResultMsg, { ...toolResultMsg, content }) : toolResultMsg
+			) as Message;
 		}
 
 		if (msg.role === "assistant") {
@@ -558,7 +570,11 @@ function redactSensitiveCredentialsInMessages(messages: Message[]): Message[] {
 					const redacted = redactSensitiveCredentials(block.thinking);
 					if (redacted !== block.thinking) {
 						changed = true;
-						return transferTransformedSourceOrigin(block, { ...block, thinking: redacted, thinkingSignature: undefined });
+						return transferTransformedSourceOrigin(block, {
+							...block,
+							thinking: redacted,
+							thinkingSignature: undefined,
+						});
 					}
 				} else if (block.type === "toolCall") {
 					if (block.arguments) {
@@ -579,7 +595,9 @@ function redactSensitiveCredentialsInMessages(messages: Message[]): Message[] {
 				}
 				return block;
 			});
-			return (changed ? transferMessageSourceOrigin(assistantMsg, { ...assistantMsg, content }) : assistantMsg) as Message;
+			return (
+				changed ? transferMessageSourceOrigin(assistantMsg, { ...assistantMsg, content }) : assistantMsg
+			) as Message;
 		}
 
 		return msg;
@@ -845,7 +863,9 @@ export function transformMessages<TApi extends Api>(
 					// keeping inert foreign CoT native for those flags loses the
 					// canonical visible-text fallback without adding model context.
 					if (targetReadsForeignThinking(model, targetCompat)) {
-						return sanitized.thinkingSignature ? transferSourceOrigin(sanitized, { ...sanitized, thinkingSignature: undefined }) : sanitized;
+						return sanitized.thinkingSignature
+							? transferSourceOrigin(sanitized, { ...sanitized, thinkingSignature: undefined })
+							: sanitized;
 					}
 					// Other cross-API targets (openai-responses encrypted blobs, google
 					// thought parts, anthropic-target from a non-Anthropic source, or any
@@ -966,7 +986,10 @@ export function transformMessages<TApi extends Api>(
 					if (normalizedId !== undefined) {
 						if (normalizedId !== toolCall.id) {
 							toolCallIdMap.set(toolCall.id, normalizedId);
-							normalizedToolCall = transferSourceOrigin(normalizedToolCall, { ...normalizedToolCall, id: normalizedId });
+							normalizedToolCall = transferSourceOrigin(normalizedToolCall, {
+								...normalizedToolCall,
+								id: normalizedId,
+							});
 						}
 						// Record the Responses call-component → emitted-id mapping
 						// EVEN WHEN the assistant id is plain and normalization is
@@ -996,7 +1019,10 @@ export function transformMessages<TApi extends Api>(
 			// byte-exact replay material.
 			const finalBlock = transformedContent[transformedContent.length - 1];
 			if (finalBlock?.type === "text" && isDemotedThinking(finalBlock)) {
-				transformedContent[transformedContent.length - 1] = transferTransformedSourceOrigin(finalBlock, { ...finalBlock, text: finalBlock.text.trimEnd() });
+				transformedContent[transformedContent.length - 1] = transferTransformedSourceOrigin(finalBlock, {
+					...finalBlock,
+					text: finalBlock.text.trimEnd(),
+				});
 			}
 
 			return transferMessageSourceOrigin(assistantMsg, {
@@ -1083,14 +1109,24 @@ export function transformMessages<TApi extends Api>(
 				toolCallStatus.set(statusKey, ToolCallStatus.Resolved);
 				continue;
 			}
-			result.push(setSourceOrigin({
-				role: "toolResult",
-				toolCallId: tc.id,
-				toolName: tc.name,
-				content: [setSourceOrigin({ type: "text", text: "No result provided" }, { kind: "synthetic", reason: "interrupted-tool-output" })],
-				isError: true,
-				timestamp,
-			} as ToolResultMessage, { kind: "synthetic", reason: "interrupted-tool-output" }));
+			result.push(
+				setSourceOrigin(
+					{
+						role: "toolResult",
+						toolCallId: tc.id,
+						toolName: tc.name,
+						content: [
+							setSourceOrigin(
+								{ type: "text", text: "No result provided" },
+								{ kind: "synthetic", reason: "interrupted-tool-output" },
+							),
+						],
+						isError: true,
+						timestamp,
+					} as ToolResultMessage,
+					{ kind: "synthetic", reason: "interrupted-tool-output" },
+				),
+			);
 			toolCallStatus.set(statusKey, ToolCallStatus.Resolved);
 		}
 		pendingToolCalls = [];
@@ -1107,14 +1143,24 @@ export function transformMessages<TApi extends Api>(
 				toolCallStatus.set(statusKey, ToolCallStatus.Resolved);
 				continue;
 			}
-			result.push(setSourceOrigin({
-				role: "toolResult",
-				toolCallId: tc.id,
-				toolName: tc.name,
-				content: [setSourceOrigin({ type: "text", text: "aborted" }, { kind: "synthetic", reason: "interrupted-tool-output" })],
-				isError: true,
-				timestamp: pendingAbortedTimestamp,
-			} as ToolResultMessage, { kind: "synthetic", reason: "interrupted-tool-output" }));
+			result.push(
+				setSourceOrigin(
+					{
+						role: "toolResult",
+						toolCallId: tc.id,
+						toolName: tc.name,
+						content: [
+							setSourceOrigin(
+								{ type: "text", text: "aborted" },
+								{ kind: "synthetic", reason: "interrupted-tool-output" },
+							),
+						],
+						isError: true,
+						timestamp: pendingAbortedTimestamp,
+					} as ToolResultMessage,
+					{ kind: "synthetic", reason: "interrupted-tool-output" },
+				),
+			);
 			toolCallStatus.set(statusKey, ToolCallStatus.Aborted);
 		}
 		pendingAbortedToolCalls = new Map();
@@ -1232,7 +1278,10 @@ export function transformMessages<TApi extends Api>(
 				}
 				if (textParts.length > 0) {
 					const errorAttr = msg.isError ? ' is-error="true"' : "";
-					const textOrigin = setSourceOrigin({}, combineSourceOrigins(msg.content.filter(part => part.type === "text" && part.text.trim() !== "")));
+					const textOrigin = setSourceOrigin(
+						{},
+						combineSourceOrigins(msg.content.filter(part => part.type === "text" && part.text.trim() !== "")),
+					);
 					const note: UserMessage & SyntheticUserCarrier = {
 						role: "user",
 						content: `<stale-tool-result tool="${msg.toolName}" id="${msg.toolCallId}"${errorAttr}>\n${textParts.join("\n")}\n</stale-tool-result>`,

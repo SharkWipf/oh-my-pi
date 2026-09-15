@@ -406,7 +406,9 @@ export class CustomEditor extends Editor {
 		"originalSubmission" | "text" | "images" | "imageLinks" | "compactionOverride"
 	>[];
 
-	restoreOriginalSubmission(source: NonNullable<CustomEditor["restoredOriginalSubmissions"]>[number] | undefined): void {
+	restoreOriginalSubmission(
+		source: NonNullable<CustomEditor["restoredOriginalSubmissions"]>[number] | undefined,
+	): void {
 		this.restoredOriginalSubmissions = source?.originalSubmission ? [source] : undefined;
 	}
 
@@ -552,13 +554,20 @@ export class CustomEditor extends Editor {
 		}
 		this.setCollapsedText(draftText);
 		this.restoreOriginalSubmission(
-			source || unreferenced ? {
-				...source,
-				text: draftText,
-				images: this.pendingImages,
-				imageLinks: this.pendingImageLinks,
-				originalSubmission: source?.originalSubmission ?? { text, images: this.pendingImages, imageLinks: this.pendingImageLinks, compactionOverride: source?.compactionOverride },
-			} : undefined,
+			source || unreferenced
+				? {
+						...source,
+						text: draftText,
+						images: this.pendingImages,
+						imageLinks: this.pendingImageLinks,
+						originalSubmission: source?.originalSubmission ?? {
+							text,
+							images: this.pendingImages,
+							imageLinks: this.pendingImageLinks,
+							compactionOverride: source?.compactionOverride,
+						},
+					}
+				: undefined,
 		);
 		void this.#materializeDraftLinks();
 	}

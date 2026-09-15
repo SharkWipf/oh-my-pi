@@ -12,7 +12,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent, UserMessage } from "@oh-my-pi/pi-ai";
+import type { ImageContent, OriginalSubmission, UserMessage } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -173,14 +173,6 @@ const HISTORICAL_IMAGE: ImageContent = {
 	mimeType: "image/png",
 };
 
-function historicalImagePrompt(text: string): UserMessage {
-	return {
-		role: "user",
-		content: [{ type: "text", text }, HISTORICAL_IMAGE],
-		timestamp: Date.now(),
-	};
-}
-
 describe("AgentSession branch title metadata", () => {
 	it("preserves an explicit title when branching before the first prompt", async () => {
 		const ctx = await createTestSession({ inMemory: true });
@@ -205,49 +197,58 @@ describe("AgentSession branch title metadata", () => {
 });
 
 describe("AgentSession historical image prompts", () => {
-	it("branches with the original captured draft and disposition instead of transformed delivery", async () => {
+	it("branches with the original draft and disposition instead of transformed delivery", async () => {
 		const ctx = await createTestSession({ inMemory: true });
 		try {
-			const text = "Inspect [Image #1, 1x1]";
-			const sourceCaptureId = await ctx.sessionManager.captureRequirementsInput(
-				text,
-				[HISTORICAL_IMAGE],
-				undefined,
-				"keep",
-			);
+			const originalSubmission: OriginalSubmission = {
+				text: "/keep Inspect [Image #1, 1x1]",
+				images: [HISTORICAL_IMAGE],
+				imageLinks: ["file:///original.png"],
+				compactionOverride: "keep",
+			};
+			const sessionId = ctx.sessionManager.getSessionId();
 			const entryId = ctx.sessionManager.appendMessage({
-				...historicalImagePrompt("Transformed delivery"),
+				role: "user",
 				content: "Transformed delivery",
-				sourceCaptureId,
+				timestamp: Date.now(),
+				originalSubmission,
 				compactionOverride: "keep",
 			});
 
 			const result = await ctx.session.branch(entryId);
 
 			expect(result).toMatchObject({
-				selectedText: `/keep ${text}`,
+				selectedText: originalSubmission.text,
 				selectedImages: [HISTORICAL_IMAGE],
+				sourceInput: { ...originalSubmission, originalSubmission },
 				cancelled: false,
 			});
+			expect(ctx.sessionManager.getSessionId()).not.toBe(sessionId);
+			expect(ctx.session.messages).toEqual([]);
+			expect(ctx.sessionManager.buildSessionContext().messages).toEqual([]);
 		} finally {
 			await ctx.cleanup();
 		}
 	});
 
-	it("navigates with captured images and once disposition instead of normalized delivery", async () => {
+	it("navigates with original images and once disposition instead of normalized delivery", async () => {
 		const ctx = await createTestSession({ inMemory: true });
 		try {
-			const text = "Compare [Image #1, 1x1]";
-			const sourceCaptureId = await ctx.sessionManager.captureRequirementsInput(
-				text,
-				[HISTORICAL_IMAGE],
-				undefined,
-				"exclude",
-			);
+			const originalSubmission: OriginalSubmission = {
+				text: "/once Compare [Image #1, 1x1]",
+				images: [HISTORICAL_IMAGE],
+				imageLinks: ["file:///original.png"],
+				compactionOverride: "exclude",
+			};
+			const sessionId = ctx.sessionManager.getSessionId();
+			ctx.sessionManager.appendMessage({ role: "user", content: "first", timestamp: Date.now() });
+			const parentId = ctx.sessionManager.appendMessage(assistantMsg("reply"));
+			const retainedMessages = ctx.sessionManager.buildSessionContext().messages;
 			const entryId = ctx.sessionManager.appendMessage({
-				...historicalImagePrompt("Transformed delivery"),
+				role: "user",
 				content: "Transformed delivery",
-				sourceCaptureId,
+				timestamp: Date.now(),
+				originalSubmission,
 				compactionOverride: "exclude",
 			});
 			ctx.sessionManager.appendMessage(assistantMsg("Compared."));
@@ -255,30 +256,14 @@ describe("AgentSession historical image prompts", () => {
 			const result = await ctx.session.navigateTree(entryId);
 
 			expect(result).toMatchObject({
-				editorText: `/once ${text}`,
+				editorText: originalSubmission.text,
 				editorImages: [HISTORICAL_IMAGE],
+				sourceInput: { ...originalSubmission, originalSubmission },
 				cancelled: false,
 			});
-		} finally {
-			await ctx.cleanup();
-		}
-	});
-
-	it("leaves the branch intact when a referenced original source is unavailable", async () => {
-		const ctx = await createTestSession({ inMemory: true });
-		try {
-			const entryId = ctx.sessionManager.appendMessage({
-				...historicalImagePrompt("Transformed delivery"),
-				sourceCaptureId: "missing-original",
-			});
-			ctx.sessionManager.appendMessage(assistantMsg("Compared."));
-			const leaf = ctx.sessionManager.getLeafId();
-			const sessionId = ctx.sessionManager.getSessionId();
-			await expect(ctx.session.navigateTree(entryId)).rejects.toThrow();
-			expect(ctx.sessionManager.getLeafId()).toBe(leaf);
-			await expect(ctx.session.branch(entryId)).rejects.toThrow();
-			expect(ctx.sessionManager.getLeafId()).toBe(leaf);
+			expect(ctx.sessionManager.getLeafId()).toBe(parentId);
 			expect(ctx.sessionManager.getSessionId()).toBe(sessionId);
+			expect(ctx.sessionManager.buildSessionContext().messages).toEqual(retainedMessages);
 		} finally {
 			await ctx.cleanup();
 		}
@@ -300,6 +285,30 @@ describe("AgentSession historical image prompts", () => {
 
 			expect(result.editorText).toBe(text);
 			expect(result.editorImages).toEqual([HISTORICAL_IMAGE, second]);
+		} finally {
+			await ctx.cleanup();
+		}
+	});
+
+	it("restores a text-only original draft without images added by delivery", async () => {
+		const ctx = await createTestSession({ inMemory: true });
+		try {
+			const originalSubmission: OriginalSubmission = { text: "/skill:review original request" };
+			const entryId = ctx.sessionManager.appendMessage({
+				role: "user",
+				content: [{ type: "text", text: "Expanded delivery" }, HISTORICAL_IMAGE],
+				imageLinks: ["file:///generated.png"],
+				originalSubmission,
+				timestamp: Date.now(),
+			});
+			ctx.sessionManager.appendMessage(assistantMsg("Reviewed."));
+
+			const result = await ctx.session.navigateTree(entryId);
+
+			expect(result.editorText).toBe(originalSubmission.text);
+			expect(result.editorImages).toBeUndefined();
+			expect(result.sourceInput?.imageLinks).toBeUndefined();
+			expect(result.sourceInput?.originalSubmission).toEqual(originalSubmission);
 		} finally {
 			await ctx.cleanup();
 		}

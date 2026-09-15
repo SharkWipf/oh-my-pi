@@ -408,9 +408,10 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 			await this.#client.unsafe(this.#q.upsertAppend, [path, line, mtimeMs]);
 			return;
 		}
-		const result = expectedSize === null
-			? await this.#client.unsafe(this.#q.insertIfMissing, [path, line, mtimeMs, null, null, null])
-			: await this.#client.unsafe(this.#q.appendIfSize, [line, mtimeMs, path, expectedSize]);
+		const result =
+			expectedSize === null
+				? await this.#client.unsafe(this.#q.insertIfMissing, [path, line, mtimeMs, null, null, null])
+				: await this.#client.unsafe(this.#q.appendIfSize, [line, mtimeMs, path, expectedSize]);
 		const written = this.#adapter === "mysql" ? result.affectedRows === 1 : result.length === 1;
 		if (written) return;
 		const current = await this.readFull(path);

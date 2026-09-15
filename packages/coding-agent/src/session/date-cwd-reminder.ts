@@ -11,7 +11,12 @@
  * for the lifetime of a session/day and refresh automatically at midnight.
  */
 import type { Context, Message, UserMessage } from "@oh-my-pi/pi-ai";
-import { combineContentSourceOrigins, getSourceOrigin, setSourceOrigin, transferTransformedSourceOrigin } from "@oh-my-pi/pi-ai/utils/source-origin";
+import {
+	combineContentSourceOrigins,
+	getSourceOrigin,
+	setSourceOrigin,
+	transferTransformedSourceOrigin,
+} from "@oh-my-pi/pi-ai/utils/source-origin";
 import { prompt } from "@oh-my-pi/pi-utils";
 import dateCwdReminderTemplate from "../prompts/system/date-cwd-reminder.md" with { type: "text" };
 
@@ -27,7 +32,10 @@ function messageStartsWithReminder(message: UserMessage, reminder: string): bool
 
 function injectReminder(message: UserMessage, reminder: string): UserMessage {
 	if (typeof message.content !== "string") {
-		const control = setSourceOrigin({ type: "text" as const, text: reminder }, { kind: "synthetic", reason: "provider-control" });
+		const control = setSourceOrigin(
+			{ type: "text" as const, text: reminder },
+			{ kind: "synthetic", reason: "provider-control" },
+		);
 		const content = [control, ...message.content];
 		return setSourceOrigin({ ...message, content }, combineContentSourceOrigins(content));
 	}
@@ -39,7 +47,14 @@ function injectReminder(message: UserMessage, reminder: string): UserMessage {
 		kind: "source",
 		parts: origin.parts.map(part => ({
 			...part,
-			...(part.transportSpan ? { transportSpan: { start: part.transportSpan.start + prefix.length, end: part.transportSpan.end + prefix.length } } : {}),
+			...(part.transportSpan
+				? {
+						transportSpan: {
+							start: part.transportSpan.start + prefix.length,
+							end: part.transportSpan.end + prefix.length,
+						},
+					}
+				: {}),
 		})),
 	});
 }
@@ -93,12 +108,15 @@ export class DateCwdReminderInjector {
 				const anchor = messages.at(-1)!;
 				this.#controls.push({
 					anchor,
-					message: setSourceOrigin({
-						role: "developer",
-						content: reminder,
-						synthetic: true,
-						timestamp: Date.now(),
-					}, { kind: "synthetic", reason: "provider-control" }),
+					message: setSourceOrigin(
+						{
+							role: "developer",
+							content: reminder,
+							synthetic: true,
+							timestamp: Date.now(),
+						},
+						{ kind: "synthetic", reason: "provider-control" },
+					),
 				});
 			}
 			this.#currentReminder = reminder;

@@ -381,6 +381,8 @@ function applyMCPEnvironment(result: { exaApiKeys: string[] }): void {
 
 // Types
 export interface CreateAgentSessionOptions {
+	/** Skip learned-memory startup, injection and automatic writes for this run. */
+	startWithoutMemory?: boolean;
 	/** Working directory for project-local discovery. Default: getProjectDir() */
 	cwd?: string;
 	/** Additional workspace directories beyond cwd (multi-root), absolute or cwd-relative. */
@@ -1343,9 +1345,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	registerSshCleanup();
 	registerEvalCleanup();
 
-	const settings = await (options.settings ??
+	let settings = await (options.settings ??
 		options.settingsManager ??
 		logger.time("settings", Settings.init, { cwd, agentDir }));
+	if (options.startWithoutMemory) {
+		settings = await settings.cloneForCwd(cwd);
+		settings.override("memory.backend", "off");
+		settings.override("autolearn.enabled", false);
+		settings.override("requirements.enabled", false);
+	}
 	logger.time("initializeWithSettings", initializeWithSettings, settings);
 	// Snapshot this session's effective configured lane onto its invocation scope
 	// so startup sub-discovery sees the same complete policy that post-startup
@@ -1462,6 +1470,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		logger.time("sessionManager", () =>
 			SessionManager.create(cwd, SessionManager.getDefaultSessionDir(cwd, agentDir)),
 		);
+	if (options.startWithoutMemory && options.sessionManager) {
+		await sessionManager.newSession();
+	}
 	const configuredDirs = options.additionalDirectories
 		? options.additionalDirectories
 		: settings.get("workspace.additionalDirectories");
@@ -1471,7 +1482,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const merged = [...new Set([...existing, ...configuredDirs])];
 		await sessionManager.setAdditionalDirectories(merged);
 	}
-	const providerSessionId = options.providerSessionId ?? sessionManager.getSessionId();
+	const providerSessionId = options.startWithoutMemory
+		? sessionManager.getSessionId()
+		: (options.providerSessionId ?? sessionManager.getSessionId());
 	if (options.credentialSourceSessionId) {
 		modelRegistry.authStorage.inheritSessionCredentials(options.credentialSourceSessionId, providerSessionId);
 	}
@@ -3230,12 +3243,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// session-start build — so a subagent that filtered them out, a mid-session
 			// enable that never built them, or a same-named custom tool while auto-learn
 			// is off all get no guidance.
-			const autoLearnInstructions = restrictToolNames
-				? undefined
-				: buildAutoLearnInstructions({
-						manageSkill: builtInToolNames.includes("manage_skill"),
-						learn: builtInToolNames.includes("learn"),
-					});
+			const autoLearnInstructions =
+				restrictToolNames || !settings.get("autolearn.enabled")
+					? undefined
+					: buildAutoLearnInstructions({
+							manageSkill: builtInToolNames.includes("manage_skill"),
+							learn: builtInToolNames.includes("learn"),
+						});
 			const appendParts: string[] = [];
 			if (memoryInstructions) appendParts.push(memoryInstructions);
 			if (autoLearnInstructions) appendParts.push(autoLearnInstructions);
@@ -3567,7 +3581,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			transformed = clampProviderContextImages(
 				transformed,
 				transformModel,
-				selection ? entryId => selection.P.has(entryId) || selection.N.has(entryId) || selection.H.has(entryId) : undefined,
+				selection
+					? entryId => selection.P.has(entryId) || selection.N.has(entryId) || selection.H.has(entryId)
+					: undefined,
 			);
 			transformed = await normalizeProviderContextImagesForModel(transformed, transformModel);
 			// After the model-specific normalizers: they carry better wording for the
@@ -3716,7 +3732,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					settings.get("externalThinking") &&
 					agent.state.tools.some(tool => tool.name === "think") &&
 					supportsExternalThinking(streamModel);
-				return settingsAwareStreamFn(streamModel, context, {
+				const stream = settingsAwareStreamFn(streamModel, context, {
 					...streamOptions,
 					anthropicCacheRefresh: true,
 					forceReasoningOff: externalThinking || streamOptions?.forceReasoningOff,
@@ -3724,6 +3740,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						? {}
 						: { toolNamespacesInfo: codeModeState.namespacesInfo }),
 				});
+				session.requirements.recordDispatch();
+				return stream;
 			},
 			cursorExecHandlers,
 			getCursorTools: () => (toolSession.xdev ? listXdevTools(toolSession.xdev) : []),
@@ -3851,6 +3869,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// block createAgentSession for tens of seconds while the whole file is
 		// streamed and parsed on the main thread.
 		session = new AgentSession({
+			startWithoutMemory: options.startWithoutMemory,
+			getMemoryRecoveryContextFiles: () => contextFiles.map(file => file.path),
 			codeModeState,
 			advisorWatchdogPrompt,
 			advisorContextPrompt,
@@ -3903,7 +3923,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						return mcpManager.getTools();
 					}
 				: undefined,
-			memoryEnabled: !restrictToolNames,
+			memoryEnabled: !restrictToolNames && !options.startWithoutMemory,
 			memoryAgentDir: agentDir,
 			memoryTaskDepth: taskDepth,
 			createMemoryTools: restrictToolNames
@@ -3962,7 +3982,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			obfuscator,
 			agentId: resolvedAgentId,
 			agentKind,
-			providerSessionId: options.providerSessionId,
+			providerSessionId: options.startWithoutMemory ? undefined : options.providerSessionId,
 			providerPromptCacheKeySource,
 			parentEvalSessionId: options.parentEvalSessionId,
 			advisorTools,
@@ -4348,16 +4368,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// mid-session enable fire a nudge pointing at tools the session never built.
 		// Activation is therefore a session-start decision for BOTH the controller
 		// and the tools; the fire-time re-check in `#onAgentEnd` still handles a
-		// mid-session DISABLE. The subscription lives for the session's lifetime; the
-		// reference is intentionally discarded (the listener retains it).
+		// mid-session DISABLE. Keep its disposer so recovery detaches before abort events.
 		if (!restrictToolNames) {
 			if (settings.get("autolearn.enabled") && taskDepth === 0) {
 				await logger.time("startMemoryStartupTask", startMemoryBackend);
-				new AutoLearnController({
+				const autoLearn = new AutoLearnController({
 					session,
 					settings,
 					capture: content => session.runAutolearnCapture(signal => runAutoLearnCapture(content, signal)),
 				});
+				session.setAutolearnDisposer(() => autoLearn.dispose());
 			} else {
 				void logger.time("startMemoryStartupTask", startMemoryBackend);
 			}

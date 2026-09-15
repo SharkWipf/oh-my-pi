@@ -171,13 +171,12 @@ describe("AgentSession per-turn prune persistence", () => {
 			expect(await settled).toBeUndefined();
 			expect(session.agent.state.messages).toBe(replacement);
 			expect(liveResultText()).toBe(original);
-			const sources = sessionManager.getEntries().flatMap(entry =>
-				entry.type === "message" && entry.message.role === "toolResult" ? [entry.message.content] : [],
-			);
-			expect(sources).toEqual([
-				[{ type: "text", text: original }],
-				[{ type: "text", text: original }],
-			]);
+			const sources = sessionManager
+				.getEntries()
+				.flatMap(entry =>
+					entry.type === "message" && entry.message.role === "toolResult" ? [entry.message.content] : [],
+				);
+			expect(sources).toEqual([[{ type: "text", text: original }], [{ type: "text", text: original }]]);
 		} finally {
 			release.resolve();
 			await settled;
@@ -188,13 +187,18 @@ describe("AgentSession per-turn prune persistence", () => {
 		const failure = new Error("preservation source storage unavailable");
 		const original = liveResultText();
 		vi.spyOn(sessionManager, "rewriteEntries").mockRejectedValueOnce(failure);
-		await expect(Promise.resolve(dispatch({ type: "agent_end", messages: [...session.agent.state.messages] }))).rejects.toBe(failure);
+		await expect(
+			Promise.resolve(dispatch({ type: "agent_end", messages: [...session.agent.state.messages] })),
+		).rejects.toBe(failure);
 		expect(liveResultText()).toBe(original);
 	});
 
 	it("does not price unchanged historical users on a no-candidate ordinary turn", async () => {
-		const oldResult = sessionManager.getEntries().find(entry => entry.type === "message" && entry.message.role === "toolResult");
-		if (oldResult?.type !== "message" || oldResult.message.role !== "toolResult") throw new Error("Missing result fixture");
+		const oldResult = sessionManager
+			.getEntries()
+			.find(entry => entry.type === "message" && entry.message.role === "toolResult");
+		if (oldResult?.type !== "message" || oldResult.message.role !== "toolResult")
+			throw new Error("Missing result fixture");
 		oldResult.message.prunedAt = Date.now();
 		const finalAssistant = session.agent.state.messages.findLast(message => message.role === "assistant");
 		if (finalAssistant?.role !== "assistant") throw new Error("Missing assistant fixture");
@@ -204,7 +208,11 @@ describe("AgentSession per-turn prune persistence", () => {
 			sessionManager.appendMessage(message);
 			history.add(message);
 		}
-		const currentUser = sessionManager.appendMessage({ role: "user", content: "Continue normally", timestamp: Date.now() });
+		const currentUser = sessionManager.appendMessage({
+			role: "user",
+			content: "Continue normally",
+			timestamp: Date.now(),
+		});
 		sessionManager.appendCompaction("Historical context", undefined, currentUser, 4096);
 		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
 		const tokenizer = session.agent.tokenizer;
@@ -226,7 +234,9 @@ describe("AgentSession per-turn prune persistence", () => {
 	});
 
 	it("keeps an admitted Always tool exchange intact when it becomes a real prune candidate", async () => {
-		const result = sessionManager.getEntries().find(entry => entry.type === "message" && entry.message.role === "toolResult");
+		const result = sessionManager
+			.getEntries()
+			.find(entry => entry.type === "message" && entry.message.role === "toolResult");
 		if (result?.type !== "message") throw new Error("Missing result fixture");
 		session.settings.override("compaction.keepLastLimit", "all");
 		await session.setPreservedMessageOverride(result.id, "keep");
@@ -244,7 +254,6 @@ describe("AgentSession per-turn prune persistence", () => {
 		await dispatch({ type: "agent_end", messages: [completed] });
 		expect(liveResultText()).toBe(USELESS_NOTICE);
 	});
-
 
 	it("persists the pruned rewrite so a from-disk rebuild matches the live context", async () => {
 		const finalAssistant = {

@@ -42,13 +42,24 @@ describe("indexed session context", () => {
 		session.appendMessage({ role: "user", content: "replay after provider boundary", timestamp: 3 });
 		session.appendCompaction("summary", undefined, first, 100, {
 			providerReplayThroughEntryId: first,
-			preserveData: { openaiRemoteCompaction: { provider: "openai", replacementHistory: [{ type: "message", role: "user", content: "provider-owned" }] } },
+			preserveData: {
+				openaiRemoteCompaction: {
+					provider: "openai",
+					replacementHistory: [{ type: "message", role: "user", content: "provider-owned" }],
+				},
+			},
 		});
 		session.appendMessage({ role: "user", content: "new", timestamp: 4 });
 		for (const options of [undefined, { transcript: true, collapseCompactedHistory: true }, { transcript: true }]) {
-			expect(session.buildSessionContext(options)).toEqual(buildSessionContext(session.getEntries(), session.getLeafId(), undefined, options));
+			expect(session.buildSessionContext(options)).toEqual(
+				buildSessionContext(session.getEntries(), session.getLeafId(), undefined, options),
+			);
 		}
-		expect(session.buildSessionContext().messages.map(message => message.role)).toEqual(["compactionSummary", "user", "user"]);
+		expect(session.buildSessionContext().messages.map(message => message.role)).toEqual([
+			"compactionSummary",
+			"user",
+			"user",
+		]);
 		session.appendResetBoundary();
 		expect(session.buildSessionContext().messages).toEqual([]);
 	});
@@ -79,7 +90,10 @@ describe("indexed session context", () => {
 		await session.rewriteEntries();
 		expect(session.getLeafId()).toBe(selected);
 		expect(session.buildSessionContext().models.default).toBe("anthropic/rewritten");
-		expect(session.getCredentialPins().get("anthropic")).toEqual({ hash: "rewritten", lastUsedAt: assistant.timestamp });
+		expect(session.getCredentialPins().get("anthropic")).toEqual({
+			hash: "rewritten",
+			lastUsedAt: assistant.timestamp,
+		});
 		expect(session.getAssistantUsageStatistics().input).toBe(17);
 		expect(session.getUsageStatistics().input).toBe(17);
 	});
@@ -89,8 +103,27 @@ describe("indexed session context", () => {
 		const assistant = makeAssistantMessage();
 		assistant.usage.cost.total = 0.25;
 		const first = session.appendMessage(assistant);
-		session.appendMessage({ role: "toolResult", toolCallId: "task", toolName: "task", content: [], details: { usage: { ...assistant.usage, cost: { ...assistant.usage.cost, total: 2 } } }, isError: false, timestamp: 2 });
-		session.appendModelUsage({ purpose: "background", role: "smol", api: assistant.api, provider: assistant.provider, model: assistant.model, stopReason: "stop", usage: { ...assistant.usage, cost: { ...assistant.usage.cost, total: 3 } } }, { sessionId: session.getSessionId(), parentId: session.getLeafId() });
+		session.appendMessage({
+			role: "toolResult",
+			toolCallId: "task",
+			toolName: "task",
+			content: [],
+			details: { usage: { ...assistant.usage, cost: { ...assistant.usage.cost, total: 2 } } },
+			isError: false,
+			timestamp: 2,
+		});
+		session.appendModelUsage(
+			{
+				purpose: "background",
+				role: "smol",
+				api: assistant.api,
+				provider: assistant.provider,
+				model: assistant.model,
+				stopReason: "stop",
+				usage: { ...assistant.usage, cost: { ...assistant.usage.cost, total: 3 } },
+			},
+			{ sessionId: session.getSessionId(), parentId: session.getLeafId() },
+		);
 		session.branch(first);
 		await session.rewriteEntries();
 		expect(session.getAssistantUsageStatistics().cost).toBe(0.25);

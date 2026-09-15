@@ -585,6 +585,7 @@ async function resolveMnemopiProviderOptions(
 		return {
 			...base,
 			llm: async (prompt, opts) => {
+				opts?.signal?.throwIfAborted();
 				const request = resolveMemoryCompletionInput(prompt, opts);
 				const hasApiKey = await modelRegistry.getApiKey(model, sessionId);
 				if (!hasApiKey) {
@@ -594,6 +595,7 @@ async function resolveMnemopiProviderOptions(
 					});
 					return null;
 				}
+				opts?.signal?.throwIfAborted();
 				const message = await retryTransientCompletion(
 					() =>
 						completeSimple(
@@ -603,6 +605,7 @@ async function resolveMnemopiProviderOptions(
 								messages: [{ role: "user", content: request.prompt, timestamp: Date.now() }],
 							},
 							{
+								signal: opts?.signal,
 								apiKey: modelRegistry.resolver(model, sessionId),
 								sessionId,
 								maxTokens: opts?.maxTokens,

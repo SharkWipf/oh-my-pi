@@ -9,7 +9,12 @@ import {
 	type SourceRewrite,
 } from "@oh-my-pi/pi-ai/compaction-source";
 import type { AgentMessage } from "../types";
-import { combineContentSourceOrigins, getSourceOrigin, type NativeSourcePart, setSourceOrigin } from "@oh-my-pi/pi-ai/utils/source-origin";
+import {
+	combineContentSourceOrigins,
+	getSourceOrigin,
+	type NativeSourcePart,
+	setSourceOrigin,
+} from "@oh-my-pi/pi-ai/utils/source-origin";
 
 export type * from "@oh-my-pi/pi-ai/compaction-source";
 
@@ -40,10 +45,17 @@ function remapCoverage(run: SourceCoverageRun, rewrite: SourceRewrite): SourceCo
 		if (end <= start) return;
 		const offset = start - current.start;
 		const length = end - start;
-		const snapshot = { ...run.snapshot, start: run.snapshot.start + offset, end: run.snapshot.start + offset + length };
-		const normalized = run.normalized && run.normalized.end - run.normalized.start === current.end - current.start
-			? { start: run.normalized.start + offset, end: run.normalized.start + offset + length }
-			: start === current.start && end === current.end ? run.normalized : undefined;
+		const snapshot = {
+			...run.snapshot,
+			start: run.snapshot.start + offset,
+			end: run.snapshot.start + offset + length,
+		};
+		const normalized =
+			run.normalized && run.normalized.end - run.normalized.start === current.end - current.start
+				? { start: run.normalized.start + offset, end: run.normalized.start + offset + length }
+				: start === current.start && end === current.end
+					? run.normalized
+					: undefined;
 		output.push({
 			...run,
 			snapshot,
@@ -73,10 +85,13 @@ function remapCoverage(run: SourceCoverageRun, rewrite: SourceRewrite): SourceCo
 
 function remapSpan(span: SourceBlockRange, block: SourceBlockRewrite): SourceBlockRange[] {
 	const run: SourceCoverageRun = {
-		entryId: "", order: 0, snapshot: span, current: span, status: "exact-current",
+		entryId: "",
+		order: 0,
+		snapshot: span,
+		current: span,
+		status: "exact-current",
 	};
-	return remapCoverage(run, { entryId: "", blocks: [block] })
-		.flatMap(part => part.current ? [part.current] : []);
+	return remapCoverage(run, { entryId: "", blocks: [block] }).flatMap(part => (part.current ? [part.current] : []));
 }
 
 function remapLayout(part: SourceLayoutPart, rewrite: SourceRewrite): SourceLayoutPart[] {
@@ -109,8 +124,11 @@ export function remapCompactionSourceRepresentation(
 	const representation = getCompactionSourceRepresentation(preserveData);
 	if (!representation || rewrites.length === 0) return preserveData;
 	const byId = new Map(rewrites.map(rewrite => [compactionSourceKey(rewrite), rewrite]));
-	if (!representation.coverage.some(run => byId.has(compactionSourceKey(run))) &&
-		!representation.layout.some(part => "entryId" in part && byId.has(compactionSourceKey(part)))) return preserveData;
+	if (
+		!representation.coverage.some(run => byId.has(compactionSourceKey(run))) &&
+		!representation.layout.some(part => "entryId" in part && byId.has(compactionSourceKey(part)))
+	)
+		return preserveData;
 	const coverage = representation.coverage.flatMap(run => {
 		const rewrite = byId.get(compactionSourceKey(run));
 		return rewrite ? remapCoverage(run, rewrite) : [run];
@@ -163,16 +181,26 @@ export function materializeCompactionSourceMessage(
 			if (origin?.kind === "source") {
 				for (const part of origin.parts) {
 					if (part.blockIndex !== blockIndex) continue;
-					parts.push({ ...part, coverage: range.start === 0 && range.end === text.length ? "full" : "partial",
-						sourceSpan: { start: range.start, end: range.end }, sourceLength: text.length,
-						transportSpan: { start: transportStart, end: result.length } });
+					parts.push({
+						...part,
+						coverage: range.start === 0 && range.end === text.length ? "full" : "partial",
+						sourceSpan: { start: range.start, end: range.end },
+						sourceLength: text.length,
+						transportSpan: { start: transportStart, end: result.length },
+					});
 				}
 			}
 			cursor = range.end;
 		}
 		if (cursor < text.length) result += "[truncated]";
-		return { text: result, origin: parts.length ? { kind: "source" as const, parts } : origin?.kind === "source"
-			? { kind: "synthetic" as const, reason: "truncation-marker" } : origin };
+		return {
+			text: result,
+			origin: parts.length
+				? { kind: "source" as const, parts }
+				: origin?.kind === "source"
+					? { kind: "synthetic" as const, reason: "truncation-marker" }
+					: origin,
+		};
 	};
 	if (typeof message.content === "string") {
 		if (!selected.has(0)) return undefined;
@@ -200,5 +228,7 @@ export function materializeCompactionSourceMessage(
 			}
 		} else if (selected.has(index)) content.push(block);
 	}
-	return content.length ? setSourceOrigin({ ...message, content } as AgentMessage, combineContentSourceOrigins(content)) : undefined;
+	return content.length
+		? setSourceOrigin({ ...message, content } as AgentMessage, combineContentSourceOrigins(content))
+		: undefined;
 }

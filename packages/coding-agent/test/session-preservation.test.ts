@@ -19,9 +19,15 @@ import { toRestoredQueuedMessage } from "../src/session/queued-messages";
 
 const policy: PreservationPolicySettings = {
 	enabled: false,
-	first: { mode: "off" }, recent: { mode: "off" }, hardRecent: { mode: "off" },
-	alwaysCap: "uncapped", prune: "no", maxTokens: 2_000,
-	heuristics: false, regexRules: [], classifier: true,
+	first: { mode: "off" },
+	recent: { mode: "off" },
+	hardRecent: { mode: "off" },
+	alwaysCap: "uncapped",
+	prune: "no",
+	maxTokens: 2_000,
+	heuristics: false,
+	regexRules: [],
+	classifier: true,
 	categoryActions: DEFAULT_PRESERVATION_CATEGORY_ACTIONS,
 };
 
@@ -80,7 +86,9 @@ async function fixture(seed: (manager: SessionManager) => void) {
 	const changed: string[][] = [];
 	const prepare = async () => {
 		await ensurePreservedMessageStateOnDisk(manager);
-		const built = await PreservedMessageQuery.build(manager.getBranch(), policy, new Tokenizer(), { isCurrent: () => true });
+		const built = await PreservedMessageQuery.build(manager.getBranch(), policy, new Tokenizer(), {
+			isCurrent: () => true,
+		});
 		if (!built) throw new Error("Query preparation unexpectedly cancelled");
 		query = built;
 		return query;
@@ -99,10 +107,18 @@ async function fixture(seed: (manager: SessionManager) => void) {
 		onChanged: ids => changed.push([...ids]),
 	});
 	return {
-		manager, storage, preservation, changed, prepare,
+		manager,
+		storage,
+		preservation,
+		changed,
+		prepare,
 		query: () => query,
-		transition: () => { ownership = {}; },
-		onAppend: (callback: (entry: SessionEntry) => void) => { onAppend = callback; },
+		transition: () => {
+			ownership = {};
+		},
+		onAppend: (callback: (entry: SessionEntry) => void) => {
+			onAppend = callback;
+		},
 	};
 }
 
@@ -111,13 +127,17 @@ function user(manager: SessionManager, content: string): string {
 }
 
 function overrides(manager: SessionManager) {
-	return manager.getEntries().filter(entry => entry.type === "custom" && entry.customType === MESSAGE_OVERRIDE_CUSTOM_TYPE);
+	return manager
+		.getEntries()
+		.filter(entry => entry.type === "custom" && entry.customType === MESSAGE_OVERRIDE_CUSTOM_TYPE);
 }
 
 async function reopenedQuery(manager: SessionManager): Promise<PreservedMessageQuery> {
 	const reopened = await SessionManager.open(manager.getSessionFile()!);
 	try {
-		const query = await PreservedMessageQuery.build(reopened.getBranch(), policy, new Tokenizer(), { isCurrent: () => true });
+		const query = await PreservedMessageQuery.build(reopened.getBranch(), policy, new Tokenizer(), {
+			isCurrent: () => true,
+		});
 		if (!query) throw new Error("Query preparation unexpectedly cancelled");
 		return query;
 	} finally {
@@ -200,14 +220,16 @@ describe("durable manual preservation actions", () => {
 	});
 
 	it("resets captured hidden sources, allows suffixes, and skips newer same-value journal revisions", async () => {
-		let first = "", second = "", tag = "";
+		let first = "",
+			second = "",
+			tag = "";
 		const f = await fixture(manager => {
 			first = user(manager, "same content");
 			second = user(manager, "same content");
 			manager.appendCustomEntry(MESSAGE_OVERRIDE_CUSTOM_TYPE, { messageIds: [first, second], state: "keep" });
 			tag = manager.appendCustomEntry(USER_MESSAGE_CLASSIFICATION_CUSTOM_TYPE, { v: 1, c: [first, 1, second, 2] });
 		});
-		const snapshot = (await f.preservation.capturePreservedMessageOverrideReset());
+		const snapshot = await f.preservation.capturePreservedMessageOverrideReset();
 		expect(snapshot.sourceCount).toBe(2);
 		expect(snapshot.groupCount).toBe(2);
 		const suffix = user(f.manager, "outside the confirmation");
@@ -229,7 +251,9 @@ describe("durable manual preservation actions", () => {
 
 	it("orders a queued Auto edit after an unflushed Keep rather than treating it as a no-op", async () => {
 		let source = "";
-		const f = await fixture(manager => { source = user(manager, "queued edits"); });
+		const f = await fixture(manager => {
+			source = user(manager, "queued edits");
+		});
 		const keep = f.preservation.setPreservedMessageOverride(source, "keep");
 		const auto = f.preservation.setPreservedMessageOverride(source, "auto");
 		await Promise.all([keep, auto]);
@@ -238,27 +262,65 @@ describe("durable manual preservation actions", () => {
 	});
 
 	it("sets and resets complete assistant/tool atoms and skips the whole atom after a companion edit", async () => {
-		let assistant = "", resultA = "", resultB = "";
+		let assistant = "",
+			resultA = "",
+			resultB = "";
 		const f = await fixture(manager => {
 			user(manager, "run two tools");
-			assistant = manager.appendMessage({ role: "assistant", content: [
-				{ type: "toolCall", id: "a", name: "read", arguments: {} },
-				{ type: "toolCall", id: "b", name: "read", arguments: {} },
-			], api: "anthropic-messages", provider: "anthropic", model: "test", stopReason: "toolUse", timestamp: 1,
-			usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
-			resultA = manager.appendMessage({ role: "toolResult", toolCallId: "a", toolName: "read", content: [{ type: "text", text: "a" }], isError: false, timestamp: 1 });
-			resultB = manager.appendMessage({ role: "toolResult", toolCallId: "b", toolName: "read", content: [{ type: "text", text: "b" }], isError: false, timestamp: 1 });
+			assistant = manager.appendMessage({
+				role: "assistant",
+				content: [
+					{ type: "toolCall", id: "a", name: "read", arguments: {} },
+					{ type: "toolCall", id: "b", name: "read", arguments: {} },
+				],
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "test",
+				stopReason: "toolUse",
+				timestamp: 1,
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+			});
+			resultA = manager.appendMessage({
+				role: "toolResult",
+				toolCallId: "a",
+				toolName: "read",
+				content: [{ type: "text", text: "a" }],
+				isError: false,
+				timestamp: 1,
+			});
+			resultB = manager.appendMessage({
+				role: "toolResult",
+				toolCallId: "b",
+				toolName: "read",
+				content: [{ type: "text", text: "b" }],
+				isError: false,
+				timestamp: 1,
+			});
 		});
 		await f.preservation.setPreservedMessageOverride(resultB, "keep");
 		expect(f.changed).toEqual([[assistant, resultA, resultB]]);
-		const snapshot = (await f.preservation.capturePreservedMessageOverrideReset([assistant, resultB]));
+		const snapshot = await f.preservation.capturePreservedMessageOverrideReset([assistant, resultB]);
 		expect(snapshot.sourceCount).toBe(3);
 		expect(snapshot.groupCount).toBe(1);
 		f.manager.appendCustomEntry(MESSAGE_OVERRIDE_CUSTOM_TYPE, { messageIds: [resultA], state: "exclude" });
 		expect(await f.preservation.resetPreservedMessageOverrides(snapshot)).toEqual({ reset: 0, skipped: 3 });
-		expect(await f.preservation.resetPreservedMessageOverrides((await f.preservation.capturePreservedMessageOverrideReset()))).toEqual({ reset: 3, skipped: 0 });
-		expect((await reopenedQuery(f.manager)).getManualGroup(resultA)?.members.map(member => member.state)).toEqual(["auto", "auto", "auto"]);
+		expect(
+			await f.preservation.resetPreservedMessageOverrides(
+				await f.preservation.capturePreservedMessageOverrideReset(),
+			),
+		).toEqual({ reset: 3, skipped: 0 });
+		expect((await reopenedQuery(f.manager)).getManualGroup(resultA)?.members.map(member => member.state)).toEqual([
+			"auto",
+			"auto",
+			"auto",
+		]);
 	});
 
 	it("rejects lost ancestry, clear epochs, and an A-to-B-to-A ownership change", async () => {
@@ -267,7 +329,7 @@ describe("durable manual preservation actions", () => {
 			source = user(manager, "origin");
 			manager.appendCustomEntry(MESSAGE_OVERRIDE_CUSTOM_TYPE, { messageIds: [source], state: "keep" });
 		});
-		const snapshot = (await f.preservation.capturePreservedMessageOverrideReset());
+		const snapshot = await f.preservation.capturePreservedMessageOverrideReset();
 		const leaf = f.manager.getLeafId()!;
 		f.manager.branch(source);
 		await f.prepare();
@@ -276,7 +338,7 @@ describe("durable manual preservation actions", () => {
 		f.transition();
 		await f.prepare();
 		await expect(f.preservation.resetPreservedMessageOverrides(snapshot)).rejects.toThrow("changed");
-		const beforeClear = (await f.preservation.capturePreservedMessageOverrideReset());
+		const beforeClear = await f.preservation.capturePreservedMessageOverrideReset();
 		f.manager.appendResetBoundary();
 		f.transition();
 		await f.prepare();
@@ -292,7 +354,7 @@ describe("durable manual preservation actions", () => {
 			source = user(manager, "keep until durable reset");
 			manager.appendCustomEntry(MESSAGE_OVERRIDE_CUSTOM_TYPE, { messageIds: [source], state: "keep" });
 		});
-		const snapshot = (await f.preservation.capturePreservedMessageOverrideReset());
+		const snapshot = await f.preservation.capturePreservedMessageOverrideReset();
 		const repairStarted = Promise.withResolvers<void>();
 		const repairRelease = Promise.withResolvers<void>();
 		f.storage.atomicWriteGate = { reached: repairStarted.resolve, release: repairRelease.promise };
@@ -318,7 +380,9 @@ describe("durable manual preservation actions", () => {
 
 	it("retries a manual state change after preflight fails without publishing a duplicate override", async () => {
 		let source = "";
-		const f = await fixture(manager => { source = user(manager, "manual state retry"); });
+		const f = await fixture(manager => {
+			source = user(manager, "manual state retry");
+		});
 		f.storage.failDrain = true;
 		await expect(f.preservation.setPreservedMessageOverride(source, "keep")).rejects.toThrow("flush failed");
 		expect(overrides(f.manager)).toEqual([]);
@@ -335,7 +399,7 @@ describe("durable manual preservation actions", () => {
 			source = user(manager, "durable identity");
 			manager.appendCustomEntry(MESSAGE_OVERRIDE_CUSTOM_TYPE, { messageIds: [source], state: "keep" });
 		});
-		const snapshot = (await f.preservation.capturePreservedMessageOverrideReset());
+		const snapshot = await f.preservation.capturePreservedMessageOverrideReset();
 		f.onAppend(entry => {
 			if (entry.type === "custom" && entry.customType === MESSAGE_OVERRIDE_CUSTOM_TYPE) f.storage.failDrain = true;
 		});
@@ -356,10 +420,13 @@ describe("durable manual preservation actions", () => {
 			source = user(manager, "branch A");
 			manager.appendCustomEntry(MESSAGE_OVERRIDE_CUSTOM_TYPE, { messageIds: [source], state: "keep" });
 		});
-		const snapshot = (await f.preservation.capturePreservedMessageOverrideReset());
+		const snapshot = await f.preservation.capturePreservedMessageOverrideReset();
 		const gate = Promise.withResolvers<void>();
 		const committed = Promise.withResolvers<void>();
-		f.onAppend(() => { f.storage.drainGate = gate.promise; committed.resolve(); });
+		f.onAppend(() => {
+			f.storage.drainGate = gate.promise;
+			committed.resolve();
+		});
 		const pending = f.preservation.resetPreservedMessageOverrides(snapshot);
 		await committed.promise;
 		f.manager.branch(source);
@@ -371,17 +438,29 @@ describe("durable manual preservation actions", () => {
 	});
 
 	it("converts legacy pins and singular overrides in place without changing tags or binary history", async () => {
-		let pin = "", singular = "", binary = "", source = "";
+		let pin = "",
+			singular = "",
+			binary = "",
+			source = "";
 		let original: SessionEntry[] = [];
 		const f = await fixture(manager => {
 			source = user(manager, "legacy");
 			pin = manager.appendCustomEntry("com.omp.compaction-preserved", { messageId: source, pinned: true });
 			singular = manager.appendCustomEntry(MESSAGE_OVERRIDE_CUSTOM_TYPE, { messageId: source, state: "exclude" });
-			binary = manager.appendCustomEntry("com.omp.compaction.preserved-user-messages.v1", { version: 1, preservedIds: [source], classifiedIds: [source] });
+			binary = manager.appendCustomEntry("com.omp.compaction.preserved-user-messages.v1", {
+				version: 1,
+				preservedIds: [source],
+				classifiedIds: [source],
+			});
 			original = structuredClone(manager.getEntries());
 		});
-		expect(f.manager.getEntries().map(entry => [entry.id, entry.parentId, entry.timestamp])).toEqual(original.map(entry => [entry.id, entry.parentId, entry.timestamp]));
-		expect(f.manager.getEntry(pin)).toMatchObject({ customType: MESSAGE_OVERRIDE_CUSTOM_TYPE, data: { messageIds: [source], state: "keep" } });
+		expect(f.manager.getEntries().map(entry => [entry.id, entry.parentId, entry.timestamp])).toEqual(
+			original.map(entry => [entry.id, entry.parentId, entry.timestamp]),
+		);
+		expect(f.manager.getEntry(pin)).toMatchObject({
+			customType: MESSAGE_OVERRIDE_CUSTOM_TYPE,
+			data: { messageIds: [source], state: "keep" },
+		});
 		expect(f.manager.getEntry(singular)).toMatchObject({ data: { messageIds: [source], state: "exclude" } });
 		expect(f.manager.getEntry(binary)).toEqual(original.find(entry => entry.id === binary));
 		expect((await reopenedQuery(f.manager)).getManualGroup(source)?.members[0]?.state).toBe("exclude");
@@ -390,26 +469,53 @@ describe("durable manual preservation actions", () => {
 		expect(fs.readFileSync(f.manager.getSessionFile()!, "utf8")).toBe(before);
 	});
 	it("keeps original images and links across the first representation rewrite and reload", async () => {
-		const image = { type: "image" as const, mimeType: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC" };
+		const image = {
+			type: "image" as const,
+			mimeType: "image/png",
+			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+		};
 		const imageLinks = ["https://example.test/original.png"];
 		let id = "";
 		const f = await fixture(manager => {
-			id = manager.appendMessage({ role: "user", content: [{ type: "text", text: "look" }, image], imageLinks, timestamp: 1 });
+			id = manager.appendMessage({
+				role: "user",
+				content: [{ type: "text", text: "look" }, image],
+				imageLinks,
+				timestamp: 1,
+			});
 		});
 		const entry = f.manager.getEntry(id)!;
 		if (entry.type !== "message" || entry.message.role !== "user") throw new Error("Missing source");
 		const message = entry.message;
-		await f.manager.rewriteEntries([{ entryId: id, blocks: [{ oldBlockIndex: 0, newBlockIndex: 0 }, { oldBlockIndex: 1, newBlockIndex: null }] }], () => {
-			entry.message = { ...message, content: [{ type: "text", text: "look" }] };
-		});
+		await f.manager.rewriteEntries(
+			[
+				{
+					entryId: id,
+					blocks: [
+						{ oldBlockIndex: 0, newBlockIndex: 0 },
+						{ oldBlockIndex: 1, newBlockIndex: null },
+					],
+				},
+			],
+			() => {
+				entry.message = { ...message, content: [{ type: "text", text: "look" }] };
+			},
+		);
 		const reopened = await SessionManager.open(f.manager.getSessionFile()!);
 		try {
 			const restored = reopened.getEntry(id)!;
-			if (restored.type !== "message" || restored.message.role !== "user") throw new Error("Missing restored source");
+			if (restored.type !== "message" || restored.message.role !== "user")
+				throw new Error("Missing restored source");
 			expect(restored.message.content).toEqual([{ type: "text", text: "look" }]);
-			const query = await PreservedMessageQuery.build(reopened.getBranch(), policy, new Tokenizer(), { isCurrent: () => true });
-			expect(query!.inspectCandidate(id, true)!.message).toMatchObject({ content: [{ type: "text", text: "look" }, image] });
+			const query = await PreservedMessageQuery.build(reopened.getBranch(), policy, new Tokenizer(), {
+				isCurrent: () => true,
+			});
+			expect(query!.inspectCandidate(id, true)!.message).toMatchObject({
+				content: [{ type: "text", text: "look" }, image],
+			});
 			expect(toRestoredQueuedMessage(restored.message)).toMatchObject({ text: "look", images: [image], imageLinks });
-		} finally { await reopened.close(); }
+		} finally {
+			await reopened.close();
+		}
 	});
 });

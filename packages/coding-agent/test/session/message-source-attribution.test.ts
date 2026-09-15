@@ -46,7 +46,8 @@ describe("source-aware session conversion", () => {
 		expect(copiedInput[1]).toBe(converted[1]);
 		expect(converted.map(message => parts(message).map(part => part.entryId))).toEqual([["first"], ["second"]]);
 		expect(converted.map(message => parts(blocks(message)[0]!).map(part => part.entryId))).toEqual([
-			["first"], ["second"],
+			["first"],
+			["second"],
 		]);
 		expect(JSON.parse(JSON.stringify(converted))).toEqual([
 			{ role: "developer", content: [{ type: "text", text: "duplicate" }], attribution: "user", timestamp: 1 },
@@ -54,7 +55,9 @@ describe("source-aware session conversion", () => {
 		]);
 		messages.push(first);
 		expect(convertToLlm(messages).map(message => parts(message).map(part => part.entryId))).toEqual([
-			["first"], ["second"], ["first"],
+			["first"],
+			["second"],
+			["first"],
 		]);
 		expect(converted).toHaveLength(2);
 	});
@@ -93,8 +96,15 @@ describe("source-aware session conversion", () => {
 		]);
 		bindMessageSource(message, "mixed", 3);
 		const converted = convertToLlm([message]);
-		expect(converted.map(message => parts(message).map(part => [part.entryId, part.blockIndex, part.transportBlockIndex]))).toEqual([
-			[["mixed", 0, 0], ["mixed", 2, 1]],
+		expect(
+			converted.map(message =>
+				parts(message).map(part => [part.entryId, part.blockIndex, part.transportBlockIndex]),
+			),
+		).toEqual([
+			[
+				["mixed", 0, 0],
+				["mixed", 2, 1],
+			],
 			[["mixed", 1, 1]],
 		]);
 		expect(getSourceOrigin(blocks(converted[1]!)[0]!)).toMatchObject({ kind: "synthetic" });
@@ -103,7 +113,9 @@ describe("source-aware session conversion", () => {
 
 	it("carries steering text without inventing source offsets for the envelope", () => {
 		const message: UserMessage = {
-			role: "user", steering: true, timestamp: 1,
+			role: "user",
+			steering: true,
+			timestamp: 1,
 			content: [
 				{ type: "text", text: "same" },
 				{ type: "image", data: "AA==", mimeType: "image/png" },
@@ -124,7 +136,8 @@ describe("source-aware session conversion", () => {
 
 	it("removes image credit without mutating the original cached request", () => {
 		const message: UserMessage = {
-			role: "user", timestamp: 1,
+			role: "user",
+			timestamp: 1,
 			content: [
 				{ type: "image", data: "AA==", mimeType: "image/png" },
 				{ type: "image", data: "AQ==", mimeType: "image/png" },
@@ -135,7 +148,10 @@ describe("source-aware session conversion", () => {
 		const messages: AgentMessage[] = [message];
 		const converted = convertToLlm(messages);
 		const scrubbed = replaceLlmImagesWithText(converted, "[image omitted]");
-		expect(blocks(scrubbed[0]!)).toEqual([{ type: "text", text: "[image omitted]" }, { type: "text", text: "same" }]);
+		expect(blocks(scrubbed[0]!)).toEqual([
+			{ type: "text", text: "[image omitted]" },
+			{ type: "text", text: "same" },
+		]);
 		expect(getSourceOrigin(blocks(scrubbed[0]!)[0]!)).toMatchObject({ kind: "synthetic" });
 		expect(parts(scrubbed[0]!).map(part => part.blockIndex)).toEqual([2]);
 		expect(parts(converted[0]!).map(part => part.blockIndex)).toEqual([0, 1, 2]);
@@ -146,10 +162,21 @@ describe("source-aware session conversion", () => {
 	it("drops stripped thinking credit and marks merged pruned text as partial", () => {
 		const assistant: AssistantMessage = {
 			role: "assistant",
-			content: [{ type: "text", text: "answer" }, { type: "thinking", thinking: "unfinished" }],
-			api: "anthropic-messages", provider: "anthropic", model: "fixture", stopReason: "aborted", timestamp: 1,
+			content: [
+				{ type: "text", text: "answer" },
+				{ type: "thinking", thinking: "unfinished" },
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "fixture",
+			stopReason: "aborted",
+			timestamp: 1,
 			usage: {
-				input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			},
 		};
@@ -157,7 +184,12 @@ describe("source-aware session conversion", () => {
 		const converted = convertToLlm([assistant, custom("continuity", INTERRUPTED_THINKING_MESSAGE_TYPE)]);
 		expect(parts(converted[0]!).map(part => part.blockIndex)).toEqual([0]);
 		const tool: ToolResultMessage = {
-			role: "toolResult", toolCallId: "call", toolName: "read", isError: false, timestamp: 2, prunedAt: 3,
+			role: "toolResult",
+			toolCallId: "call",
+			toolName: "read",
+			isError: false,
+			timestamp: 2,
+			prunedAt: 3,
 			content: [
 				{ type: "text", text: "a" },
 				{ type: "image", data: "AA==", mimeType: "image/png" },
@@ -168,7 +200,8 @@ describe("source-aware session conversion", () => {
 		const result = convertToLlm([tool])[0]!;
 		expect((blocks(result)[0] as TextContent).text).toBe("ab");
 		expect(parts(blocks(result)[0]!).map(part => [part.blockIndex, part.coverage, part.sourceSpan])).toEqual([
-			[0, "partial", undefined], [2, "partial", undefined],
+			[0, "partial", undefined],
+			[2, "partial", undefined],
 		]);
 		expect(parts(blocks(result)[1]!)[0]).toMatchObject({ blockIndex: 1, representation: "original-image" });
 	});
@@ -176,7 +209,10 @@ describe("source-aware session conversion", () => {
 	it("keeps opaque summaries aggregate and archive lead-ins synthetic", () => {
 		const summary: AgentMessage = { role: "branchSummary", summary: "summary", fromId: "old", timestamp: 1 };
 		setSourceOrigin(summary, { kind: "aggregate", compactionEntryId: "compaction" });
-		expect(getSourceOrigin(convertToLlm([summary])[0]!)).toEqual({ kind: "aggregate", compactionEntryId: "compaction" });
+		expect(getSourceOrigin(convertToLlm([summary])[0]!)).toEqual({
+			kind: "aggregate",
+			compactionEntryId: "compaction",
+		});
 		const block: TextContent = { type: "text", text: "retained" };
 		bindMessageSource({ role: "user", content: [block], timestamp: 1 }, "retained", 8);
 		const archive = convertToLlm([

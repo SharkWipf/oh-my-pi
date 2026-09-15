@@ -35,10 +35,21 @@ const allFalseCategories = {
 };
 function reply(text: string): AssistantMessage {
 	return {
-		role: "assistant", content: [{ type: "text", text }], api: model.api, provider: model.provider,
-		model: model.id, stopReason: "stop", timestamp: 1,
-		usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+		role: "assistant",
+		content: [{ type: "text", text }],
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		stopReason: "stop",
+		timestamp: 1,
+		usage: {
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
 	};
 }
 
@@ -49,7 +60,9 @@ class ControlledProvider {
 	readonly stream: StreamFn = (_model, context, options) => {
 		const stream = createAssistantMessageEventStream();
 		let finished = false;
-		this.requests.push({ context, signal: options?.signal,
+		this.requests.push({
+			context,
+			signal: options?.signal,
 			finish(text = JSON.stringify(allFalseCategories)) {
 				if (finished) return;
 				finished = true;
@@ -59,8 +72,13 @@ class ControlledProvider {
 		return stream;
 	};
 	forSource(text: string) {
-		const request = this.requests.find(request => request.context.messages.some(message =>
-			Array.isArray(message.content) && message.content.some(part => part.type === "text" && part.text === text)));
+		const request = this.requests.find(request =>
+			request.context.messages.some(
+				message =>
+					Array.isArray(message.content) &&
+					message.content.some(part => part.type === "text" && part.text === text),
+			),
+		);
 		if (!request) throw new Error(`No classifier request for ${text}`);
 		return request;
 	}
@@ -85,7 +103,11 @@ class PausedRegistry extends ModelRegistry {
 	readonly entered = Promise.withResolvers<void>();
 	readonly released = Promise.withResolvers<void>();
 	armed = false;
-	override async getApiKey(model: Model, sessionId?: string, options?: { signal?: AbortSignal }): Promise<string | undefined> {
+	override async getApiKey(
+		model: Model,
+		sessionId?: string,
+		options?: { signal?: AbortSignal },
+	): Promise<string | undefined> {
 		if (this.armed) {
 			this.entered.resolve();
 			await this.released.promise;
@@ -125,8 +147,16 @@ describe("message classifier session jobs", () => {
 			return stream;
 		};
 		const created = new AgentSession({
-			agent: new Agent({ initialState: { model, systemPrompt: [], tools: [], messages: [] }, streamFn, getApiKey: () => "synthetic-key" }),
-			sessionManager: source, settings, modelRegistry: registry, sideStreamFn: provider.stream, extensionRunner,
+			agent: new Agent({
+				initialState: { model, systemPrompt: [], tools: [], messages: [] },
+				streamFn,
+				getApiKey: () => "synthetic-key",
+			}),
+			sessionManager: source,
+			settings,
+			modelRegistry: registry,
+			sideStreamFn: provider.stream,
+			extensionRunner,
 		});
 		sessions.push(created);
 		return created;
@@ -140,17 +170,24 @@ describe("message classifier session jobs", () => {
 		return masks;
 	}
 	function save(id: string, mask: number) {
-		manager.appendCustomEntry(USER_MESSAGE_CLASSIFICATION_CUSTOM_TYPE, packPreservedUserMessageClassifications([{ id, mask }]));
+		manager.appendCustomEntry(
+			USER_MESSAGE_CLASSIFICATION_CUSTOM_TYPE,
+			packPreservedUserMessageClassifications([{ id, mask }]),
+		);
 	}
 	function job(id: string) {
 		const status = session.getMessageClassificationStatus().jobs.find(job => job.id === id);
 		if (!status) throw new Error(`Missing classifier job ${id}`);
 		return status;
 	}
-	async function settled(id: string) { await until(() => job(id).state !== "running"); }
+	async function settled(id: string) {
+		await until(() => job(id).state !== "running");
+	}
 	async function reopen() {
 		await manager.flush();
-		const reopened = await SessionManager.open(manager.getSessionFile()!, dir.path(), undefined, { suppressBreadcrumb: true });
+		const reopened = await SessionManager.open(manager.getSessionFile()!, dir.path(), undefined, {
+			suppressBreadcrumb: true,
+		});
 		managers.push(reopened);
 		return reopened;
 	}
@@ -203,7 +240,8 @@ describe("message classifier session jobs", () => {
 		manager.appendCustomEntry(USER_MESSAGE_CLASSIFICATION_CUSTOM_TYPE, { v: 99, c: [unknown, 1024] });
 		const savedRows: string[] = [];
 		const unsubscribe = session.subscribeMessageClassification((status, affected) => {
-			for (const id of affected) if (status.rows.some(row => row.entryId === id && row.state === "saved")) savedRows.push(id);
+			for (const id of affected)
+				if (status.rows.some(row => row.entryId === id && row.state === "saved")) savedRows.push(id);
 		});
 		const backfill = await session.startMessageClassificationBackfill(33);
 		await until(() => provider.requests.length === 2);
@@ -237,7 +275,12 @@ describe("message classifier session jobs", () => {
 		provider.requests[1]!.finish();
 		await settled(backfill);
 		expect(notifications).toBe(closedAt);
-		expect(await facts(await reopen())).toEqual(new Map([[first, 0], [second, 0]]));
+		expect(await facts(await reopen())).toEqual(
+			new Map([
+				[first, 0],
+				[second, 0],
+			]),
+		);
 	});
 
 	it("canceling backfill neither cancels selected nor live work and never saves its late response", async () => {
@@ -295,7 +338,11 @@ describe("message classifier session jobs", () => {
 		expect(manager.getLeafId()).toBe(active);
 		const persisted = await reopen();
 		expect(persisted.getLeafId()).toBe(active);
-		expect(persisted.getEntries().filter(entry => entry.type === "custom" && entry.customType === USER_MESSAGE_CLASSIFICATION_CUSTOM_TYPE)).toEqual([]);
+		expect(
+			persisted
+				.getEntries()
+				.filter(entry => entry.type === "custom" && entry.customType === USER_MESSAGE_CLASSIFICATION_CUSTOM_TYPE),
+		).toEqual([]);
 	});
 
 	it("clear does not await blocked classification, rejects its late result, and excludes pre-clear sources from backfill", async () => {
@@ -334,8 +381,15 @@ describe("message classifier session jobs", () => {
 		const resumedJob = await resumed.startMessageClassificationBackfill(1);
 		await until(() => provider.requests.length === 2);
 		provider.requests[1]!.finish();
-		await until(() => resumed.getMessageClassificationStatus().jobs.find(job => job.id === resumedJob)?.state === "completed");
-		expect(await facts(reopened)).toEqual(new Map([[saved, 3], [pending, 0]]));
+		await until(
+			() => resumed.getMessageClassificationStatus().jobs.find(job => job.id === resumedJob)?.state === "completed",
+		);
+		expect(await facts(reopened)).toEqual(
+			new Map([
+				[saved, 3],
+				[pending, 0],
+			]),
+		);
 	});
 
 	it("exposes an unavailable model rather than silently accepting missing classifications", async () => {
@@ -369,7 +423,9 @@ describe("message classifier session jobs", () => {
 			await settled(first);
 			expect(provider.requests).toHaveLength(1);
 			expect((await facts(await reopen())).get(id)).toBe(0);
-		} finally { paused.released.resolve(); }
+		} finally {
+			paused.released.resolve();
+		}
 	});
 
 	it("does not report a missing-only backfill complete when overlapping selected classification fails", async () => {
@@ -410,7 +466,9 @@ describe("message classifier session jobs", () => {
 			await settled(subsequent);
 			expect(provider.requests).toHaveLength(1);
 			expect(await facts(await reopen())).toEqual(new Map([[next, 0]]));
-		} finally { storage.released.resolve(); }
+		} finally {
+			storage.released.resolve();
+		}
 	});
 	it("actual tree navigation rejects a sibling late result without moving its selected leaf", async () => {
 		const root = user("synthetic navigation ancestor");
@@ -429,7 +487,11 @@ describe("message classifier session jobs", () => {
 		expect(manager.getLeafId()).toBe(target);
 		const persisted = await reopen();
 		expect(persisted.getLeafId()).toBe(durableLeafBeforeReply);
-		expect(persisted.getEntries().filter(entry => entry.type === "custom" && entry.customType === USER_MESSAGE_CLASSIFICATION_CUSTOM_TYPE)).toEqual([]);
+		expect(
+			persisted
+				.getEntries()
+				.filter(entry => entry.type === "custom" && entry.customType === USER_MESSAGE_CLASSIFICATION_CUSTOM_TYPE),
+		).toEqual([]);
 	});
 
 	for (const transition of ["tree", "branch"] as const) {
@@ -439,15 +501,21 @@ describe("message classifier session jobs", () => {
 			const entered = Promise.withResolvers<void>();
 			const released = Promise.withResolvers<void>();
 			const runtime = new ExtensionRuntime();
-			const extension = await loadExtensionFromFactory(pi => {
-				const veto = async () => {
-					entered.resolve();
-					await released.promise;
-					return { cancel: true };
-				};
-				if (transition === "tree") pi.on("session_before_tree", veto);
-				else pi.on("session_before_branch", veto);
-			}, dir.path(), new EventBus(), runtime, "synthetic-classifier-veto");
+			const extension = await loadExtensionFromFactory(
+				pi => {
+					const veto = async () => {
+						entered.resolve();
+						await released.promise;
+						return { cancel: true };
+					};
+					if (transition === "tree") pi.on("session_before_tree", veto);
+					else pi.on("session_before_branch", veto);
+				},
+				dir.path(),
+				new EventBus(),
+				runtime,
+				"synthetic-classifier-veto",
+			);
 			const runner = new ExtensionRunner([extension], runtime, dir.path(), manager, registry);
 			session = createSession(manager, false, runner);
 			const target = user("synthetic veto navigation target");
@@ -456,7 +524,8 @@ describe("message classifier session jobs", () => {
 			await until(() => provider.requests.length === 1);
 			const originalSessionId = manager.getSessionId();
 			try {
-				const navigating = transition === "tree" ? session.navigateTree(target, { summarize: false }) : session.branch(target);
+				const navigating =
+					transition === "tree" ? session.navigateTree(target, { summarize: false }) : session.branch(target);
 				await entered.promise;
 				provider.requests[0]!.finish();
 				expect((await facts()).has(current)).toBe(false);
@@ -466,7 +535,9 @@ describe("message classifier session jobs", () => {
 				expect(job(started).state).toBe("completed");
 				expect(manager.getSessionId()).toBe(originalSessionId);
 				expect((await facts(await reopen())).get(current)).toBe(0);
-			} finally { released.resolve(); }
+			} finally {
+				released.resolve();
+			}
 		});
 	}
 	it("allows immediate retry after source invalidation without letting the old result replace the new fact", async () => {
@@ -485,13 +556,20 @@ describe("message classifier session jobs", () => {
 		provider.forSource("synthetic source after explicit invalidation").finish();
 		await settled(retry);
 		expect((await facts(await reopen())).get(id)).toBe(0);
-		provider.forSource("synthetic source before explicit invalidation").finish(JSON.stringify({ ...allFalseCategories, question: true }));
+		provider
+			.forSource("synthetic source before explicit invalidation")
+			.finish(JSON.stringify({ ...allFalseCategories, question: true }));
 		await until(() => job(original).running === 0);
 		expect((await facts(await reopen())).get(id)).toBe(0);
 	});
 	it("skips a not-yet-admitted source made eligible by a rewrite while unaffected backfill continues", async () => {
 		const first = user("synthetic blocking first source");
-		const changed = manager.appendMessage({ role: "user", content: "synthetic newly eligible source", attribution: "agent", timestamp: 1 });
+		const changed = manager.appendMessage({
+			role: "user",
+			content: "synthetic newly eligible source",
+			attribution: "agent",
+			timestamp: 1,
+		});
 		const separator = user("synthetic stable neighborhood separator");
 		const unaffected = user("synthetic unaffected later source");
 		save(separator, 0);
@@ -508,11 +586,20 @@ describe("message classifier session jobs", () => {
 		provider.forSource("synthetic unaffected later source").finish();
 		await settled(backfill);
 		expect(provider.requests).toHaveLength(2);
-		expect(await facts(await reopen())).toEqual(new Map([[first, 0], [separator, 0], [unaffected, 0]]));
+		expect(await facts(await reopen())).toEqual(
+			new Map([
+				[first, 0],
+				[separator, 0],
+				[unaffected, 0],
+			]),
+		);
 	});
 	it("rejects a pending result when a reasoning-only neighbor becomes visible without changing either user source", async () => {
 		user("synthetic unchanged previous user");
-		const neighbor = manager.appendMessage({ ...reply(""), content: [{ type: "thinking", thinking: "synthetic hidden reasoning" }] });
+		const neighbor = manager.appendMessage({
+			...reply(""),
+			content: [{ type: "thinking", thinking: "synthetic hidden reasoning" }],
+		});
 		const target = user("synthetic unchanged current user");
 		const started = await session.startMessageClassification(target);
 		await until(() => provider.requests.length === 1);

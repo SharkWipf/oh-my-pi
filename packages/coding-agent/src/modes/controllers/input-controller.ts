@@ -874,7 +874,9 @@ export class InputController {
 		const source = this.ctx.editor.restoredOriginalSubmissions?.[index];
 		if (
 			!source?.originalSubmission ||
-			(source.compactionOverride ? parseCompactionOverridePrompt(source.text)?.text ?? source.text : source.text) !== text ||
+			(source.compactionOverride
+				? (parseCompactionOverridePrompt(source.text)?.text ?? source.text)
+				: source.text) !== text ||
 			source.compactionOverride !== compactionOverride ||
 			(source.images?.length ?? 0) !== (images?.length ?? 0)
 		)
@@ -907,13 +909,17 @@ export class InputController {
 				originalText = restoredSubmission.text;
 				text = parseCompactionOverridePrompt(originalText)?.text ?? originalText;
 			}
-			const originalSubmission = restoredSubmission ?? { text: originalText, images: this.ctx.editor.pendingImages.length ? [...this.ctx.editor.pendingImages] : undefined, imageLinks: this.ctx.editor.pendingImageLinks.length ? [...this.ctx.editor.pendingImageLinks] : undefined, compactionOverride };
+			const originalSubmission = restoredSubmission ?? {
+				text: originalText,
+				images: this.ctx.editor.pendingImages.length ? [...this.ctx.editor.pendingImages] : undefined,
+				imageLinks: this.ctx.editor.pendingImageLinks.length ? [...this.ctx.editor.pendingImageLinks] : undefined,
+				compactionOverride,
+			};
 			const restoredOriginalSubmissions = this.ctx.editor.restoredOriginalSubmissions;
 			const hasPendingImages = this.ctx.editor.pendingImages.length > 0;
 			if (!compactionOverride && (!isSettingsInitialized() || settings.get("emojiAutocomplete")) && text) {
 				const expandedText = expandEmoticons(text);
 				if (expandedText !== text) {
-
 					text = expandedText;
 				}
 			}
@@ -958,23 +964,25 @@ export class InputController {
 			}
 
 			const runner = this.ctx.session.extensionRunner;
-			let inputImages = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
-			let inputImageLinks =
-				this.ctx.editor.pendingImageLinks.length > 0 ? [...this.ctx.editor.pendingImageLinks] : undefined;
+			let inputImages = originalSubmission.images;
+			let inputImageLinks = originalSubmission.imageLinks;
 			let hasInputImages = (inputImages?.length ?? 0) > 0;
 			const submittedText = text;
 			const submittedImages = inputImages;
 			const restoreDraft = () => {
 				const original = originalSubmission;
 				this.ctx.editor.pendingImages = original.images ? [...original.images] : [];
-				this.ctx.editor.pendingImageLinks = original.imageLinks ? [...original.imageLinks] : this.ctx.editor.pendingImages.map(() => undefined);
+				this.ctx.editor.pendingImageLinks = original.imageLinks
+					? [...original.imageLinks]
+					: this.ctx.editor.pendingImages.map(() => undefined);
 				this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
-				this.ctx.editor.setCollapsedText(restoredSubmission ? restoredOriginalSubmissions?.[0]?.text ?? original.text : original.text);
+				this.ctx.editor.setCollapsedText(
+					restoredSubmission ? (restoredOriginalSubmissions?.[0]?.text ?? original.text) : original.text,
+				);
 				this.ctx.editor.restoredOriginalSubmissions = restoredOriginalSubmissions;
 			};
 
 			if (runner?.hasHandlers("input")) {
-
 				const result = await runner.emitInput(text, inputImages, "interactive");
 				if (result?.handled) {
 					this.ctx.editor.clearDraft();
@@ -1046,12 +1054,10 @@ export class InputController {
 					return;
 				}
 				if (typeof slashResult === "object") {
-
 					text = slashResult.prompt;
 					compactionOverride = slashResult.compactionOverride;
 				}
 				if (typeof slashResult === "string") {
-
 					// Command handled but returned remaining text to use as prompt.
 					// Record the original slash command text so Up Arrow recalls
 					// "/loop 10 fix bug" rather than just "fix bug".
@@ -1314,7 +1320,8 @@ export class InputController {
 					this.ctx.showError(error instanceof Error ? error.message : String(error));
 					// Dispatch rejected after the body was armed: park it so the
 					// failed prompt is not resubmitted on next idle.
-					if (this.ctx.loopPrompt === restoreCompactionOverridePrompt(text, compactionOverride)) this.ctx.pauseLoop();
+					if (this.ctx.loopPrompt === restoreCompactionOverridePrompt(text, compactionOverride))
+						this.ctx.pauseLoop();
 				}
 				this.ctx.updatePendingMessagesDisplay();
 				this.ctx.ui.requestRender();
@@ -1381,7 +1388,8 @@ export class InputController {
 			// prompt() handles idle (new turn) and streaming (queues per streamingBehavior).
 			await this.ctx.withLocalSubmission(
 				text,
-				() => target.prompt(text, { streamingBehavior, images, imageLinks, compactionOverride, originalSubmission }),
+				() =>
+					target.prompt(text, { streamingBehavior, images, imageLinks, compactionOverride, originalSubmission }),
 				{
 					imageCount: images?.length ?? 0,
 				},
@@ -1395,7 +1403,11 @@ export class InputController {
 				this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
 			}
 			const restored = restoredOriginalSubmissions?.[0];
-			this.ctx.editor.setCollapsedText(restored && restored.originalSubmission === originalSubmission ? restored.text : originalSubmission?.text ?? restoreCompactionOverridePrompt(text, compactionOverride));
+			this.ctx.editor.setCollapsedText(
+				restored && restored.originalSubmission === originalSubmission
+					? restored.text
+					: (originalSubmission?.text ?? restoreCompactionOverridePrompt(text, compactionOverride)),
+			);
 			this.ctx.editor.restoredOriginalSubmissions = restoredOriginalSubmissions;
 			this.ctx.showError(error instanceof Error ? error.message : String(error));
 		}
@@ -1573,7 +1585,9 @@ export class InputController {
 		const restoreDraft = () => {
 			const original = originalSubmission ?? { text, images: draftImages, imageLinks: draftImageLinks };
 			this.ctx.editor.pendingImages = original.images ? [...original.images] : [];
-			this.ctx.editor.pendingImageLinks = original.imageLinks ? [...original.imageLinks] : this.ctx.editor.pendingImages.map(() => undefined);
+			this.ctx.editor.pendingImageLinks = original.imageLinks
+				? [...original.imageLinks]
+				: this.ctx.editor.pendingImages.map(() => undefined);
 			this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
 			this.ctx.editor.setCollapsedText(original.text);
 		};
@@ -1669,7 +1683,12 @@ export class InputController {
 					messageLinks,
 					directive?.compactionOverride,
 					index,
-				) ?? { text: compacted ? rawText.replace(body, compacted.text) : rawText, images: messageImages, imageLinks: messageLinks, compactionOverride: directive?.compactionOverride },
+				) ?? {
+					text: compacted ? rawText.replace(body, compacted.text) : rawText,
+					images: messageImages,
+					imageLinks: messageLinks,
+					compactionOverride: directive?.compactionOverride,
+				},
 			};
 		});
 		if (messages.some(message => message.compactionOverride && !message.text.trim())) {
@@ -1822,7 +1841,14 @@ export class InputController {
 		// queued text into a user-attributed skill invocation before delivery.
 		if (this.ctx.session.isCompacting) {
 			const images = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
-			await this.ctx.queueCompactionMessage(text, "followUp", images, imageLinks, compactionOverride, originalSubmission);
+			await this.ctx.queueCompactionMessage(
+				text,
+				"followUp",
+				images,
+				imageLinks,
+				compactionOverride,
+				originalSubmission,
+			);
 			return;
 		}
 
@@ -1866,7 +1892,11 @@ export class InputController {
 				this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
 			}
 			// Collapse restores the chip tokens (and their band cards) for the failed draft.
-			this.ctx.editor.setCollapsedText(restoredSubmission ? restoredOriginalSubmissions?.[0]?.text ?? originalSubmission.text : originalSubmission.text);
+			this.ctx.editor.setCollapsedText(
+				restoredSubmission
+					? (restoredOriginalSubmissions?.[0]?.text ?? originalSubmission.text)
+					: originalSubmission.text,
+			);
 			this.ctx.editor.restoredOriginalSubmissions = restoredOriginalSubmissions;
 			this.ctx.showError(error instanceof Error ? error.message : String(error));
 		};
@@ -1941,7 +1971,9 @@ export class InputController {
 	 * Returns the number of entries restored.
 	 */
 	#restoreEntriesToEditor(entries: RestoredQueuedMessage[], currentText?: string): number {
-		const allQueued = entries.map(entry => entry.originalSubmission ? { ...entry, ...entry.originalSubmission } : entry);
+		const allQueued = entries.map(entry =>
+			entry.originalSubmission ? { ...entry, ...entry.originalSubmission } : entry,
+		);
 		if (entries.length === 0) {
 			this.ctx.updatePendingMessagesDisplay();
 			return 0;
@@ -1961,7 +1993,12 @@ export class InputController {
 		let imageOffset = this.ctx.editor.pendingImages.length;
 		for (const entry of allQueued) {
 			parts.push(
-				shiftImageMarkers(entry.originalSubmission ? entry.text : restoreCompactionOverridePrompt(entry.text, entry.compactionOverride), imageOffset),
+				shiftImageMarkers(
+					entry.originalSubmission
+						? entry.text
+						: restoreCompactionOverridePrompt(entry.text, entry.compactionOverride),
+					imageOffset,
+				),
 			);
 			imageOffset += entry.images?.length ?? 0;
 		}

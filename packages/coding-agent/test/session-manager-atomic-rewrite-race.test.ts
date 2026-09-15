@@ -343,7 +343,9 @@ describe("SessionManager cross-process rewrite freshness", () => {
 			await second.close();
 
 			await expect(first.rewriteEntries()).rejects.toBeInstanceOf(SessionWriteConflictError);
-			await expect(first.recoverPersistenceFromCurrentState()).rejects.toBeInstanceOf(SessionPersistenceIndeterminateError);
+			await expect(first.recoverPersistenceFromCurrentState()).rejects.toBeInstanceOf(
+				SessionPersistenceIndeterminateError,
+			);
 
 			const reopened = await SessionManager.open(sessionFile, tempDir.path(), new FileSessionStorage(), {
 				suppressBreadcrumb: true,
@@ -846,7 +848,11 @@ describe("SessionManager atomic entry batches", () => {
 				return writer;
 			}
 
-			override async appendTextAtomic(path: string, suffix: string, options?: WriteTextAtomicOptions): Promise<void> {
+			override async appendTextAtomic(
+				path: string,
+				suffix: string,
+				options?: WriteTextAtomicOptions,
+			): Promise<void> {
 				if (!firstPublication) return super.appendTextAtomic(path, suffix, options);
 				firstPublication = false;
 				staging.resolve();

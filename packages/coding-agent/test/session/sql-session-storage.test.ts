@@ -35,7 +35,9 @@ describe("SqlSessionStorage (SQLite backend)", () => {
 			const expected = outcomes[0].status === "fulfilled" ? "seed\nfirst-é\n" : "seed\nsecond-猫\n";
 			expect(await storage.readText(path)).toBe(expected);
 			const stale = outcomes[0].status === "fulfilled" ? peer : storage;
-			await expect(stale.writeTextAtomic(path, "stale", { expectedSize: 5 })).rejects.toBeInstanceOf(SessionWriteConflictError);
+			await expect(stale.writeTextAtomic(path, "stale", { expectedSize: 5 })).rejects.toBeInstanceOf(
+				SessionWriteConflictError,
+			);
 			expect(await storage.readText(path)).toBe(expected);
 			const fresh = await SqlSessionStorage.create({ client });
 			await fresh.writeTextAtomic(path, "fresh", { expectedSize: Buffer.byteLength(expected) });
@@ -56,7 +58,9 @@ describe("SqlSessionStorage (SQLite backend)", () => {
 			]);
 			expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
 			const stale = results[0].status === "fulfilled" ? peer : storage;
-			await expect(stale.writeTextAtomic(path, "basesame", { expectedSize: 4 })).rejects.toBeInstanceOf(SessionWriteConflictError);
+			await expect(stale.writeTextAtomic(path, "basesame", { expectedSize: 4 })).rejects.toBeInstanceOf(
+				SessionWriteConflictError,
+			);
 			expect(stale.statSync(path).size).toBe(4);
 			expect(await storage.readText(path)).toBe("basesame");
 		} finally {
@@ -116,7 +120,10 @@ describe("SqlSessionStorage (SQLite backend)", () => {
 			await storage.appendTextAtomic(path, "cancelled\n", {
 				commitGuard: () => {
 					checks++;
-					if (checks === 2) queueMicrotask(() => { dependent = writer.append("dependent\n").catch(error => error); });
+					if (checks === 2)
+						queueMicrotask(() => {
+							dependent = writer.append("dependent\n").catch(error => error);
+						});
 					return checks < 3;
 				},
 			});

@@ -4,15 +4,30 @@ import type { SourceMessage, SourceRepresentation } from "@oh-my-pi/pi-ai/compac
 import { compact, createFileOps, getPreservedArchive, type Shape } from "../src/snapcompact";
 
 test("first measured PNG-byte nonfit spills every later admitted span instead of packing newer frames into holes", async () => {
-	const shape: Shape = { font: "8x8", cellWidth: 8, cellHeight: 8, lineRepeat: 1, variant: "bw", frameSize: 128, frameTokenEstimate: 100 };
+	const shape: Shape = {
+		font: "8x8",
+		cellWidth: 8,
+		cellHeight: 8,
+		lineRepeat: 1,
+		variant: "bw",
+		frameSize: 128,
+		frameTokenEstimate: 100,
+	};
 	const sources: SourceMessage<Message>[] = Array.from({ length: 10 }, (_, order) => ({
-		entryId: `u${order}`, order,
+		entryId: `u${order}`,
+		order,
 		message: { role: "user", content: `${String.fromCharCode(65 + order)}${order} `.repeat(220), timestamp: order },
 	}));
 	const input = {
-		firstKeptEntryId: "tail", messagesToSummarize: sources.map(source => source.message), turnPrefixMessages: [],
-		sourcesToSummarize: sources, turnPrefixSources: [], recentSources: [], selectedSources: sources,
-		tokensBefore: 0, fileOps: createFileOps(),
+		firstKeptEntryId: "tail",
+		messagesToSummarize: sources.map(source => source.message),
+		turnPrefixMessages: [],
+		sourcesToSummarize: sources,
+		turnPrefixSources: [],
+		recentSources: [],
+		selectedSources: sources,
+		tokensBefore: 0,
+		fileOps: createFileOps(),
 	};
 	const full = await compact(input, { shape, maxFrames: 3 });
 	const fullArchive = getPreservedArchive(full.preserveData)!;

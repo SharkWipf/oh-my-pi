@@ -495,7 +495,11 @@ export function applyShakeRegions(
 			map.blocks = message.content.map((block, oldBlockIndex) => {
 				if (block.type !== "text") return { oldBlockIndex, newBlockIndex: newBlockIndex++ };
 				if (oldBlockIndex !== replacementIndex) return { oldBlockIndex, newBlockIndex: null };
-				return { oldBlockIndex, newBlockIndex: newBlockIndex++, textEdits: [{ start: 0, end: block.text.length, replacementLength: replacement.length }] };
+				return {
+					oldBlockIndex,
+					newBlockIndex: newBlockIndex++,
+					textEdits: [{ start: 0, end: block.text.length, replacementLength: replacement.length }],
+				};
 			});
 		} else {
 			// String-form content is source block zero; -1 is only the region slot sentinel.

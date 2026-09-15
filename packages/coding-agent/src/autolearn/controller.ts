@@ -6,9 +6,7 @@
  * prompt-cache neutral: the standing system guidance remains available, but no
  * hidden mid-session reminder is inserted into the conversation.
  *
- * Installed once per top-level session (taskDepth 0). The subscription lives
- * for the session's lifetime — `newSession` resets the session in place
- * without re-running startup — so the controller needs no disposal.
+ * Installed once per top-level session; disposal detaches its subscription.
  */
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
@@ -60,17 +58,26 @@ export class AutoLearnController {
 	#captureInFlight = false;
 	/** One newer eligible primary stop arrived while capture was running. */
 	#capturePending = false;
+	#disposed = false;
+	#unsubscribe?: () => void;
+
+	/** Detach and discard queued captures; the session cancels any active capture. */
+	dispose(): void {
+		this.#disposed = true;
+		this.#capturePending = false;
+		this.#unsubscribe?.();
+		this.#unsubscribe = undefined;
+	}
 
 	constructor(options: AutoLearnControllerOptions) {
 		this.#session = options.session;
 		this.#settings = options.settings;
 		this.#capture = options.capture;
-		// The listener closure captures `this`, so the session's listener array
-		// keeps the controller alive — no stored unsubscribe needed.
-		this.#session.subscribe(event => this.#onEvent(event));
+		this.#unsubscribe = this.#session.subscribe(event => this.#onEvent(event));
 	}
 
 	#onEvent(event: AgentSessionEvent): void {
+		if (this.#disposed) return;
 		if (event.type === "agent_start") {
 			// Capture goal-mode state at the turn boundary, before any tool runs.
 			this.#turnStartedInGoalMode = this.#session.getGoalModeState()?.enabled === true;
@@ -137,6 +144,7 @@ export class AutoLearnController {
 	}
 
 	#startCapture(): void {
+		if (this.#disposed) return;
 		this.#captureInFlight = true;
 		void this.#capture(AUTOLEARN_NUDGE_AUTOCONTINUE)
 			.catch(err => {

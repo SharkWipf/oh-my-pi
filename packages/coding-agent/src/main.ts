@@ -395,12 +395,13 @@ export async function submitInteractiveInput(
 				expandPromptTemplates: false,
 				userInitiated: input.userInitiated,
 			});
-		} else if (isKnownSkillCommand(skillHost, input.text)) {
+		} else if (!input.compactionOverride && isKnownSkillCommand(skillHost, input.text)) {
 			// Resubmitted skill text must dispatch through the skill path, or the
 			// model receives a literal `/skill:` token.
 			await invokeSkillCommandFromText(skillHost, input.text, streamingBehavior, {
 				images: input.images,
 				imageLinks: input.imageLinks,
+				originalSubmission: input.originalSubmission,
 				optimistic: true,
 				propagateErrors: true,
 			});
@@ -1219,6 +1220,7 @@ export async function buildSessionOptions(
 	activeSettings: Settings,
 ): Promise<CreateAgentSessionOptions> {
 	const options: CreateAgentSessionOptions = {
+		startWithoutMemory: parsed.startWithoutMemory,
 		cwd: parsed.cwd ?? getProjectDir(),
 		autoApprove: parsed.autoApprove ?? false,
 	};
@@ -2191,7 +2193,19 @@ export async function runRootCommand(
 				notifs.push({ kind: "error", message: modelRegistryError.message });
 			}
 
-			if (!isInteractive && !session.model) {
+			let requirementsCommandsOnly = false;
+			if (!session.model && !isInteractive && mode !== "rpc" && mode !== "rpc-ui") {
+				const { parseSlashCommand } = await import("./slash-commands/helpers/parse");
+				const inputs =
+					initialMessage === undefined ? initialArgs.messages : [initialMessage, ...initialArgs.messages];
+				requirementsCommandsOnly =
+					inputs.length > 0 &&
+					inputs.every(text => {
+						const command = parseSlashCommand(text);
+						return command?.name === "memory" && /^requirements(?:\s|$)/i.test(command.args.trim());
+					});
+			}
+			if (!isInteractive && !session.model && !requirementsCommandsOnly && mode !== "rpc" && mode !== "rpc-ui") {
 				if (modelRegistryError) {
 					process.stderr.write(`${chalk.red(modelRegistryError.message)}\n\n`);
 				}

@@ -153,7 +153,11 @@ describe("AgentSession shake", () => {
 	});
 
 	it("drops delivered images without destroying the accepted original draft on reload", async () => {
-		const image: ImageContent = { type: "image", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=", mimeType: "image/png" };
+		const image: ImageContent = {
+			type: "image",
+			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
+			mimeType: "image/png",
+		};
 		const imageLinks = ["https://example.test/original.png"];
 		const entryId = sessionManager.appendMessage({
 			role: "user",
@@ -166,13 +170,23 @@ describe("AgentSession shake", () => {
 		const entry = sessionManager.getEntry(entryId);
 		if (entry?.type !== "message") throw new Error("Missing accepted source");
 		expect(entry.message).toMatchObject({ content: [{ type: "text", text: "original instruction" }] });
-		expect(toRestoredQueuedMessage(entry.message)).toMatchObject({ text: "original instruction", images: [image], imageLinks });
+		expect(toRestoredQueuedMessage(entry.message)).toMatchObject({
+			text: "original instruction",
+			images: [image],
+			imageLinks,
+		});
 		const reloaded = await SessionManager.open(sessionManager.getSessionFile()!, tempDir.path());
 		try {
 			const restored = reloaded.getEntry(entryId);
 			if (restored?.type !== "message") throw new Error("Missing reloaded source");
-			expect(toRestoredQueuedMessage(restored.message)).toMatchObject({ text: "original instruction", images: [image], imageLinks });
-		} finally { await reloaded.close(); }
+			expect(toRestoredQueuedMessage(restored.message)).toMatchObject({
+				text: "original instruction",
+				images: [image],
+				imageLinks,
+			});
+		} finally {
+			await reloaded.close();
+		}
 	});
 
 	describe("elide", () => {

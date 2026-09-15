@@ -57,6 +57,7 @@ export interface Args {
 	version?: boolean;
 	mode?: Mode;
 	noSession?: boolean;
+	startWithoutMemory?: boolean;
 	sessionDir?: string;
 	providerSessionId?: string;
 	providerPromptCacheKey?: string;
@@ -244,6 +245,8 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.fromClaude = true;
 		} else if (arg === "--from-codex") {
 			result.fromCodex = true;
+		} else if (arg === "--start-without-memory") {
+			result.startWithoutMemory = true;
 		} else if (arg === "--no-session") {
 			result.noSession = true;
 		} else if (arg === "--no-tools") {

@@ -10,7 +10,6 @@
  * - Events: AgentSessionEvent objects streamed as they occur
  * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
  */
-
 import type { OriginalSubmission } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
@@ -126,7 +125,10 @@ export type RpcSessionChangeResult =
 
 export type RpcSessionChangeSession = Pick<AgentSession, "newSession" | "switchSession" | "branch">;
 
-export type RpcSkillCommandSession = Pick<AgentSession, "promptCustomMessage" | "skills" | "skillsSettings">;
+export type RpcSkillCommandSession = Pick<
+	AgentSession,
+	"promptCustomMessage" | "skills" | "skillsSettings" | "sessionManager"
+>;
 export type RpcSkillCommandResult = { agentInvoked: true };
 
 export interface RpcSkillInvocation extends SkillPromptInput {
@@ -199,8 +201,7 @@ export async function dispatchRpcSkillPrompt(input: {
 	// keep that error contract by awaiting it before answering. The expensive
 	// promptCustomMessage pipeline (usage preflight, compaction, provider
 	// calls) is what moves behind the acknowledgement.
-	const originalSubmission =
-		input.originalSubmission ?? { text: input.message };
+	const originalSubmission = input.originalSubmission ?? { text: input.message };
 	const built = await buildSkillPromptMessage(invocation.skill, invocation, "user");
 	watchAndReportLocalOnlyPromptResult({
 		id: input.id,
@@ -220,8 +221,7 @@ export async function tryRunRpcSkillCommand(
 ): Promise<RpcSkillCommandResult | false> {
 	const invocation = resolveRpcSkillInvocation(session, text);
 	if (!invocation) return false;
-	const originalSubmission = { text };
-	await runRpcSkillCommand(session, invocation, streamingBehavior, undefined, originalSubmission);
+	await runRpcSkillCommand(session, invocation, streamingBehavior, undefined, { text });
 	return { agentInvoked: true };
 }
 
@@ -1226,7 +1226,11 @@ export async function runRpcMode(
 						watchAndReportLocalOnlyPromptResult({
 							id,
 							startPrompt: () =>
-								session.prompt(builtinResult.prompt, { images: command.images, originalSubmission }),
+								session.prompt(builtinResult.prompt, {
+									images: command.images,
+									originalSubmission,
+									producer: { type: "human" },
+								}),
 							output,
 							onError: promptError => output(error(id, "prompt", promptError.message)),
 							extensionUserMessageTracker,
@@ -1249,6 +1253,7 @@ export async function runRpcMode(
 						session.prompt(command.message, {
 							images: command.images,
 							originalSubmission,
+							producer: { type: "human" },
 							streamingBehavior: command.streamingBehavior,
 						}),
 					output,

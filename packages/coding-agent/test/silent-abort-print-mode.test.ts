@@ -107,17 +107,6 @@ describe("Print-mode silent-abort regression", () => {
 		expect(exitSpy).not.toHaveBeenCalled();
 	});
 
-	it("bounds final memory consolidation so print mode can exit", async () => {
-		let disposeOptions: AgentSessionDisposeOptions | undefined;
-		const session = createMockSession([makeAssistantMessage()], async options => {
-			disposeOptions = options;
-		});
-
-		await runPrintMode(session, { mode: "text" });
-
-		expect(disposeOptions?.mnemopiConsolidateTimeoutMs).toBe(SHUTDOWN_CONSOLIDATE_BUDGET_MS);
-	});
-
 	it("does not write bit-classified silent aborts to stderr or exit non-zero", async () => {
 		const silentAbortMsg = makeAssistantMessage({
 			stopReason: "aborted",

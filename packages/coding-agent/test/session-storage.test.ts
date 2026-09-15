@@ -8,7 +8,12 @@ import {
 	type SessionStorageBackend,
 	type SessionStorageIndexEntry,
 } from "@oh-my-pi/pi-coding-agent/session/indexed-session-storage";
-import { FileSessionStorage, MemorySessionStorage, SessionLockError, SessionWriteConflictError } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import {
+	FileSessionStorage,
+	MemorySessionStorage,
+	SessionLockError,
+	SessionWriteConflictError,
+} from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { type SessionTitleUpdate, serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 
 class ControlledTitleUpdateBackend implements SessionStorageBackend {
@@ -648,7 +653,9 @@ describe("SessionStorage.appendTextAtomic", () => {
 			expect(rejected?.status === "rejected" && rejected.reason).toBeInstanceOf(SessionWriteConflictError);
 			const content = await storage.readText(target);
 			expect(content).toBe(outcomes[0].status === "fulfilled" ? "seed\nfirst-é\n" : "seed\nsecond-猫\n");
-			await expect(Promise.resolve().then(() => storage.writeTextAtomic(target, "stale", { expectedSize: 5 }))).rejects.toBeInstanceOf(SessionWriteConflictError);
+			await expect(
+				Promise.resolve().then(() => storage.writeTextAtomic(target, "stale", { expectedSize: 5 })),
+			).rejects.toBeInstanceOf(SessionWriteConflictError);
 			expect(await storage.readText(target)).toBe(content);
 			await storage.writeTextAtomic(target, "fresh", { expectedSize: Buffer.byteLength(content) });
 			expect(await storage.readText(target)).toBe("fresh");

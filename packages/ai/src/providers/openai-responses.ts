@@ -534,7 +534,10 @@ const streamOpenAIResponsesOnce = (
 					replacementPayload !== undefined ? (replacementPayload as OpenAIResponsesSamplingParams) : requestParams;
 				if (options?.onPayload) {
 					invalidateSourceOrigins(requestParams);
-					invalidateSourceOrigins(payload, replacementPayload !== undefined ? "externally-replaced" : "externally-mutated");
+					invalidateSourceOrigins(
+						payload,
+						replacementPayload !== undefined ? "externally-replaced" : "externally-mutated",
+					);
 				}
 				applyReasoningEffortFallbackForRequest(payload);
 				return payload;
@@ -795,7 +798,8 @@ const streamOpenAIResponsesOnce = (
 						onOutputItemDone: (item, contentIndex) => {
 							// `processResponsesStream` hands over a private clone already; no
 							// second deep copy needed (reasoning items carry multi-KB blobs).
-							if (contentIndex !== undefined) contentBlocks.push({ itemIndex: nativeOutputItems.length, contentIndex });
+							if (contentIndex !== undefined)
+								contentBlocks.push({ itemIndex: nativeOutputItems.length, contentIndex });
 							nativeOutputItems.push(item as unknown as Record<string, unknown>);
 						},
 						onCompleted: () => {
@@ -872,7 +876,12 @@ const streamOpenAIResponsesOnce = (
 				}
 			}
 
-			output.providerPayload = createOpenAIResponsesHistoryPayload(model.provider, nativeOutputItems, true, contentBlocks);
+			output.providerPayload = createOpenAIResponsesHistoryPayload(
+				model.provider,
+				nativeOutputItems,
+				true,
+				contentBlocks,
+			);
 			const replayableResponseItems = sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(
 				cloneWithSourceOrigins(nativeOutputItems),
 			);

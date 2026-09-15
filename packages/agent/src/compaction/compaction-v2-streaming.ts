@@ -949,7 +949,10 @@ function isPrepaidNativeItem(item: object, prepaid: ReadonlySet<string>): boolea
 
 function nativeItemSource(item: object): NativeSourcePart | undefined {
 	const parts = nativeSourceParts(item);
-	return parts.length && parts.every(part => part.entryId === parts[0].entryId && part.projection === parts[0].projection) ? parts[0] : undefined;
+	return parts.length &&
+		parts.every(part => part.entryId === parts[0].entryId && part.projection === parts[0].projection)
+		? parts[0]
+		: undefined;
 }
 
 function mergeNativeSourceItems(
@@ -1020,7 +1023,8 @@ function nativeBlockKey(block: object): string | undefined {
 		!first ||
 		parts.some(
 			part =>
-				part.entryId !== first.entryId || part.projection !== first.projection ||
+				part.entryId !== first.entryId ||
+				part.projection !== first.projection ||
 				(part.currentBlockIndex ?? part.blockIndex) !== (first.currentBlockIndex ?? first.blockIndex) ||
 				(part.status !== undefined && part.status !== "exact-current"),
 		)

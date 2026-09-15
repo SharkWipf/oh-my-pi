@@ -151,10 +151,12 @@ describe("async speculative compaction", () => {
 			getContextUsage: () => undefined,
 			shake: async () => ({ modified: false, tokensRemoved: 0 }),
 			dropImages: async () => ({ removed: 0 }),
-			generateHandoffDocument: options.generateHandoffDocument ?? (async () => {
-				await options.handoff?.();
-				return undefined;
-			}),
+			generateHandoffDocument:
+				options.generateHandoffDocument ??
+				(async () => {
+					await options.handoff?.();
+					return undefined;
+				}),
 			removeAssistantMessageFromActiveContext: () => {},
 			dropPersistedAssistantTurn: async () => undefined,
 			runRecoveryCompactionWithRollback: async () => ({ deferredHandoff: false, continuationScheduled: false }),
@@ -203,19 +205,29 @@ describe("async speculative compaction", () => {
 
 	it("uses the original input for method fallback while retaining the appended suffix", async () => {
 		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
-			summary: [...preparation.messagesToSummarize, ...preparation.turnPrefixMessages, ...preparation.recentMessages]
-				.some(message => JSON.stringify(message).includes("fallback suffix")) ? "changed snapshot" : "original snapshot",
+			summary: [
+				...preparation.messagesToSummarize,
+				...preparation.turnPrefixMessages,
+				...preparation.recentMessages,
+			].some(message => JSON.stringify(message).includes("fallback suffix"))
+				? "changed snapshot"
+				: "original snapshot",
 			firstKeptEntryId: preparation.firstKeptEntryId,
 			tokensBefore: preparation.tokensBefore,
 		}));
 		maintenance = createMaintenance({
 			methodOrder: ["handoff", "soft"],
-			handoff: async () => { sessionManager.appendMessage(userMessage("fallback suffix")); },
+			handoff: async () => {
+				sessionManager.appendMessage(userMessage("fallback suffix"));
+			},
 		});
 		await maintenance.runAutoCompaction("idle", false, true, false);
 		const entry = sessionManager.getEntries().findLast(value => value.type === "compaction");
 		expect(entry?.type === "compaction" ? entry.summary : undefined).toBe("original snapshot");
-		expect(agent.state.messages.at(-1)).toMatchObject({ role: "user", content: [{ type: "text", text: "fallback suffix" }] });
+		expect(agent.state.messages.at(-1)).toMatchObject({
+			role: "user",
+			content: [{ type: "text", text: "fallback suffix" }],
+		});
 	});
 
 	it("retains a suffix appended during a non-speculative native generator", async () => {
@@ -231,8 +243,10 @@ describe("async speculative compaction", () => {
 				tokensBefore: preparation.tokensBefore,
 				preserveData: {
 					openaiRemoteCompaction: {
-						version: "v2", provider: model.provider,
-						replacementHistory: [{ type: "compaction_summary", summary: "snapshot" }], usedTokens: 1_000,
+						version: "v2",
+						provider: model.provider,
+						replacementHistory: [{ type: "compaction_summary", summary: "snapshot" }],
+						usedTokens: 1_000,
 					},
 				},
 			};

@@ -130,7 +130,6 @@ describe("buildSessionContext", () => {
 			expect(ctx.messages.map(m => m.role)).toEqual(["user", "assistant", "user", "assistant"]);
 		});
 
-
 		it("tracks thinking level changes", () => {
 			const entries: SessionEntry[] = [
 				msg("1", null, "user", "hello"),

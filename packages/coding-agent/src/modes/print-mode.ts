@@ -7,6 +7,8 @@
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import { executeRequirementsCommand, renderRequirementsData } from "../requirements/commands";
+import { parseSlashCommand } from "../slash-commands/helpers/parse";
 import { logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
 import { type AgentSession, type AgentSessionEvent, SHUTDOWN_CONSOLIDATE_BUDGET_MS } from "../session/agent-session";
 import { isSilentAbort } from "../session/messages";
@@ -224,15 +226,40 @@ async function runPrintModeCore(
 		wroteTextWorkingIndicator = true;
 	};
 
-	// Send initial message with attachments
-	if (initialMessage !== undefined) {
+	let lastInputWasCommand = false;
+	let commandFailure: string | undefined;
+	const handleRequirements = async (text: string, images?: ImageContent[]): Promise<boolean> => {
+		const parsed = parseSlashCommand(text);
+		if (parsed?.name !== "memory" || !/^requirements(?:\s|$)/i.test(parsed.args.trim())) return false;
+		lastInputWasCommand = true;
+		let output: string;
+		try {
+			if (images?.length)
+				throw new Error(
+					"Requirements commands do not accept image attachments; use evidence with original source IDs.",
+				);
+			output = await executeRequirementsCommand(session, parsed.args.trim().slice("requirements".length).trim());
+		} catch (error) {
+			output = renderRequirementsData(error instanceof Error ? error.message : String(error));
+			commandFailure = output;
+		}
+		writeStdoutLine(
+			mode === "json"
+				? `${JSON.stringify({ type: "command_result", command: "memory requirements", text: output })}\n`
+				: `${output}\n`,
+		);
+		return true;
+	};
+
+	// Operator commands never need primary-model cooperation.
+	if (initialMessage !== undefined && !(await handleRequirements(initialMessage, initialImages))) {
 		writeTextWorkingIndicator();
 		if (mode === "text") session.setTextOutputCommitted(false);
 		await logger.time("print:prompt:initial", () => session.prompt(initialMessage, { images: initialImages }));
 	}
-
-	// Send remaining messages
 	for (const message of messages) {
+		if (await handleRequirements(message)) continue;
+		lastInputWasCommand = false;
 		writeTextWorkingIndicator();
 		if (mode === "text") session.setTextOutputCommitted(false);
 		await logger.time("print:prompt:next", () => session.prompt(message));
@@ -246,7 +273,7 @@ async function runPrintModeCore(
 	// refusal is pruned from active context at settle, and an aborted turn
 	// can trail synthetic tool results — both would hide the terminal
 	// assistant message (and its error) from a last-element read.
-	const assistantMsg = session.getLastAssistantMessage();
+	const assistantMsg = lastInputWasCommand ? undefined : session.getLastAssistantMessage();
 	// The terminal stop reason decides the process exit code in every output
 	// mode: `--mode json` used to report success for the same turn-fatal error
 	// text mode exits 1 on (issue #11498). Silent aborts (plan-mode compaction
@@ -261,7 +288,7 @@ async function runPrintModeCore(
 	// In text mode, output the final response. A terminal failure prints only
 	// the error line below; JSON mode already emitted the assistant message and
 	// stop reason through the event subscription.
-	if (mode === "text" && !terminalFailure) {
+	if (mode === "text" && !lastInputWasCommand && !terminalFailure) {
 		if (assistantMsg) {
 			if (
 				assistantMsg.errorMessage &&
@@ -323,6 +350,7 @@ async function runPrintModeCore(
 		}
 	}
 
+	if (commandFailure !== undefined) throw new Error(commandFailure);
 	await stderrTail;
 	return terminalFailure || durabilityFailure ? 1 : 0;
 }

@@ -258,6 +258,9 @@ export class SessionTools {
 	 * drop it before the request. Cleared when the turn ends.
 	 */
 	#turnSystemPromptOverride: string[] | undefined;
+	#requirementsFragment = "";
+	#appliedPromptBase: string[] | undefined;
+	#appliedRequirementsFragment: string | undefined;
 	#lastAppliedToolSignature: string | undefined;
 	/** Full enabled set, including tools demoted from the model-visible surface. */
 	#enabledToolNames = new Set<string>();
@@ -373,32 +376,67 @@ export class SessionTools {
 		return this.#baseSystemPrompt;
 	}
 
-	/** Replaces the controller-owned base prompt without applying it to the agent. */
+	/** Replace and apply the uncomposed base, preserving the turn override. */
 	setBaseSystemPrompt(prompt: string[]): void {
 		this.#baseSystemPrompt = prompt;
+		this.#applyAgentSystemPrompt(prompt);
 	}
 
-	/**
-	 * Pushes `base` to the agent as the effective system prompt, unless an active
-	 * per-turn {@link #turnSystemPromptOverride} takes precedence. Every base
-	 * rebuild applies its result through here so a mid-turn rebuild preserves the
-	 * override.
-	 */
+	setRequirementsFragment(fragment: string): void {
+		this.#requirementsFragment = fragment;
+		this.#applyAgentSystemPrompt(this.#appliedPromptBase ?? this.#baseSystemPrompt);
+	}
+
+	capturePromptState() {
+		return {
+			base: this.#baseSystemPrompt,
+			turnOverride: this.#turnSystemPromptOverride,
+			appliedBase: this.#appliedPromptBase,
+			basePromptReflectsRosterDelta: this.#basePromptReflectsRosterDelta,
+			basePromptXdevNames: this.#basePromptXdevNames,
+			pendingToolRosterDelta: structuredClone(this.#pendingToolRosterDelta),
+			pendingToolRosterDeltaAfterBase: structuredClone(this.#pendingToolRosterDeltaAfterBase),
+			pendingXdevMountDelta: structuredClone(this.#pendingXdevMountDelta),
+			announcedMounts: new Set(this.#announcedMounts),
+			announcedMountsSeeded: this.#announcedMountsSeeded,
+			promptModelKey: this.#promptModelKey,
+			lastAppliedToolSignature: this.#lastAppliedToolSignature,
+		};
+	}
+
+	restorePromptState(state: ReturnType<SessionTools["capturePromptState"]>): void {
+		this.#baseSystemPrompt = state.base;
+		this.#turnSystemPromptOverride = state.turnOverride;
+		this.#basePromptReflectsRosterDelta = state.basePromptReflectsRosterDelta;
+		this.#basePromptXdevNames = state.basePromptXdevNames;
+		this.#pendingToolRosterDelta = state.pendingToolRosterDelta;
+		this.#pendingToolRosterDeltaAfterBase = state.pendingToolRosterDeltaAfterBase;
+		this.#pendingXdevMountDelta = state.pendingXdevMountDelta;
+		this.#announcedMounts = state.announcedMounts;
+		this.#announcedMountsSeeded = state.announcedMountsSeeded;
+		this.#promptModelKey = state.promptModelKey;
+		this.#lastAppliedToolSignature = state.lastAppliedToolSignature;
+		this.#requirementsFragment = "";
+		this.#appliedPromptBase = undefined;
+		this.#applyAgentSystemPrompt(state.appliedBase ?? state.base);
+	}
+
 	#applyAgentSystemPrompt(base: string[]): void {
-		this.#host.agent.setSystemPrompt(this.#turnSystemPromptOverride ?? base);
+		const effective = this.#turnSystemPromptOverride ?? base;
+		if (this.#appliedPromptBase === effective && this.#appliedRequirementsFragment === this.#requirementsFragment)
+			return;
+		this.#host.agent.setSystemPrompt(
+			this.#requirementsFragment ? [...effective, this.#requirementsFragment] : effective,
+		);
+		this.#appliedPromptBase = effective;
+		this.#appliedRequirementsFragment = this.#requirementsFragment;
 	}
 
-	/**
-	 * Registers the per-turn `before_agent_start` system-prompt override and
-	 * applies it to the agent. Base rebuilds during the turn preserve it until
-	 * {@link clearTurnSystemPromptOverride}.
-	 */
 	setTurnSystemPromptOverride(prompt: string[]): void {
 		this.#turnSystemPromptOverride = prompt;
-		this.#host.agent.setSystemPrompt(prompt);
+		this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
 	}
 
-	/** Drops the active per-turn override; later rebuilds fall back to the base prompt. */
 	clearTurnSystemPromptOverride(): void {
 		this.#turnSystemPromptOverride = undefined;
 	}

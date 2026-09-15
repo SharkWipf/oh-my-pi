@@ -26,18 +26,18 @@ type SkillPromptMessage = Pick<
 };
 
 type SkillPromptOptions = {
-	streamingBehavior: "steer" | "followUp";
-	queueChipText: string;
 	originalSubmission: OriginalSubmission;
 	producer: { type: "human" };
 	imageLinks?: (string | undefined)[];
+	streamingBehavior: "steer" | "followUp";
+	queueChipText: string;
 };
 
 interface InvokeSkillCommandOptions {
+	originalSubmission?: OriginalSubmission;
 	propagateErrors?: boolean;
 	queueOnly?: boolean;
 	images?: ImageContent[];
-	originalSubmission?: OriginalSubmission;
 	imageLinks?: (string | undefined)[];
 	/**
 	 * Paint the built row before the awaited dispatch so a slow preflight (memory
@@ -100,7 +100,14 @@ export async function invokeSkillCommandFromText(
 ): Promise<boolean> {
 	let optimistic = false;
 	try {
-		const built = await buildSkillCommandPrompt(ctx, text, streamingBehavior, options?.images, options?.originalSubmission, options?.imageLinks);
+		const built = await buildSkillCommandPrompt(
+			ctx,
+			text,
+			streamingBehavior,
+			options?.images,
+			options?.originalSubmission,
+			options?.imageLinks,
+		);
 		if (!built) return false;
 		const promptOptions = options?.queueOnly ? { ...built.options, queueOnly: true } : built.options;
 		optimistic = options?.optimistic === true && !options?.queueOnly && !ctx.session.isStreaming;

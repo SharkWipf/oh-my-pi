@@ -34,16 +34,21 @@ describe("chronological committed source context", () => {
 			const older = user(session, "older selected request");
 			const latest = user(session, "latest request remains complete");
 			session.appendCustomEntry(CONTEXT_NOTES_ENTRY_TYPE, { version: 1, text: "CURRENT_NOTE" });
-			const rollover = (tail: string) => session.appendCompaction("window boundary", undefined, tail, 1000, {
-				method: "soft", details: { kind: "experimental-context-rollover" },
-				preserveData: { sourceRepresentation: {
-					...representation([
-						{ kind: "source", entryId: older, order: 3 },
-						{ kind: "source", entryId: latest, order: 4, spans: [{ blockIndex: 0, start: 2, end: 8 }] },
-						{ kind: "source", entryId: tail, order: 6 },
-					]), throughEntryId: tail,
-				} },
-			});
+			const rollover = (tail: string) =>
+				session.appendCompaction("window boundary", undefined, tail, 1000, {
+					method: "soft",
+					details: { kind: "experimental-context-rollover" },
+					preserveData: {
+						sourceRepresentation: {
+							...representation([
+								{ kind: "source", entryId: older, order: 3 },
+								{ kind: "source", entryId: latest, order: 4, spans: [{ blockIndex: 0, start: 2, end: 8 }] },
+								{ kind: "source", entryId: tail, order: 6 },
+							]),
+							throughEntryId: tail,
+						},
+					},
+				});
 			const firstTail = session.appendMessage(makeAssistantMessage());
 			const firstBoundary = rollover(firstTail);
 			const first = session.buildSessionContext({ diagnostics: true });
@@ -52,8 +57,16 @@ describe("chronological committed source context", () => {
 			expect(JSON.stringify(first.messages[0])).toContain("CURRENT_NOTE");
 			expect(JSON.stringify(first.messages)).not.toContain("PRE_CLEAR_NOTE");
 			expect(first.messageSourceIds?.[0]).toBeUndefined();
-			expect(first.sourceLocations?.map(location => first.messageSourceIds?.[location.messageIndex])).toEqual([older, latest, firstTail]);
-			expect(first.sourceLocations?.map(location => first.messages[location.messageIndex].role)).toEqual(["user", "user", "assistant"]);
+			expect(first.sourceLocations?.map(location => first.messageSourceIds?.[location.messageIndex])).toEqual([
+				older,
+				latest,
+				firstTail,
+			]);
+			expect(first.sourceLocations?.map(location => first.messages[location.messageIndex].role)).toEqual([
+				"user",
+				"user",
+				"assistant",
+			]);
 			session.appendCustomEntry(CONTEXT_NOTES_ENTRY_TYPE, { version: 1, text: "FUTURE_NOTE" });
 			user(session, "future request");
 			const addressed = buildSessionContext(session.getEntries(), firstBoundary, undefined, { diagnostics: true });
@@ -68,12 +81,19 @@ describe("chronological committed source context", () => {
 			await session.ensureOnDisk();
 			await session.flush();
 			const reopened = await SessionManager.open(session.getSessionFile()!);
-			try { expect(reopened.buildSessionContext().messages).toEqual(repeated.messages); }
-			finally { await reopened.close(); }
+			try {
+				expect(reopened.buildSessionContext().messages).toEqual(repeated.messages);
+			} finally {
+				await reopened.close();
+			}
 			session.appendResetBoundary();
 			user(session, "fresh request");
-			expect(session.buildSessionContext().messages).toEqual([{ role: "user", content: "fresh request", timestamp: 1 }]);
-		} finally { await session.close(); }
+			expect(session.buildSessionContext().messages).toEqual([
+				{ role: "user", content: "fresh request", timestamp: 1 },
+			]);
+		} finally {
+			await session.close();
+		}
 	});
 
 	it("keeps the latest custom request and valid notebook through plain bounded rollovers", async () => {
@@ -81,21 +101,50 @@ describe("chronological committed source context", () => {
 		try {
 			user(session, "older ordinary request");
 			session.appendCustomEntry(CONTEXT_NOTES_ENTRY_TYPE, { version: 1, text: "NOTE_BEFORE_CUT" });
-			session.appendMessage(createCustomMessage(SKILL_PROMPT_MESSAGE_TYPE, "latest skill request", true, undefined, "2026-09-09T00:00:00.000Z", "user"));
+			session.appendMessage(
+				createCustomMessage(
+					SKILL_PROMPT_MESSAGE_TYPE,
+					"latest skill request",
+					true,
+					undefined,
+					"2026-09-09T00:00:00.000Z",
+					"user",
+				),
+			);
 			for (let index = 0; index < 2; index++) {
 				const tail = session.appendMessage(makeAssistantMessage());
-				session.appendCompaction("window boundary", undefined, tail, 1000, { details: { kind: "experimental-context-rollover" } });
+				session.appendCompaction("window boundary", undefined, tail, 1000, {
+					details: { kind: "experimental-context-rollover" },
+				});
 				const context = session.buildSessionContext({ diagnostics: true });
-				expect(context.messages.filter(message => message.role === "custom" && message.customType === SKILL_PROMPT_MESSAGE_TYPE))
-					.toEqual([createCustomMessage(SKILL_PROMPT_MESSAGE_TYPE, "latest skill request", true, undefined, "2026-09-09T00:00:00.000Z", "user")]);
+				expect(
+					context.messages.filter(
+						message => message.role === "custom" && message.customType === SKILL_PROMPT_MESSAGE_TYPE,
+					),
+				).toEqual([
+					createCustomMessage(
+						SKILL_PROMPT_MESSAGE_TYPE,
+						"latest skill request",
+						true,
+						undefined,
+						"2026-09-09T00:00:00.000Z",
+						"user",
+					),
+				]);
 				expect(userContents(context.messages)).toEqual([]);
 				expect(JSON.stringify(context.messages[0])).toContain("NOTE_BEFORE_CUT");
 			}
 			session.appendCustomEntry(CONTEXT_NOTES_ENTRY_TYPE, { version: 1, text: 42 });
 			expect(JSON.stringify(session.buildSessionContext().messages[0])).toContain("NOTE_BEFORE_CUT");
 			session.appendCustomEntry(CONTEXT_NOTES_ENTRY_TYPE, { version: 1, text: "" });
-			expect(session.buildSessionContext().messages.some(message => message.role === "custom" && message.customType === CONTEXT_NOTES_ENTRY_TYPE)).toBe(false);
-		} finally { await session.close(); }
+			expect(
+				session
+					.buildSessionContext()
+					.messages.some(message => message.role === "custom" && message.customType === CONTEXT_NOTES_ENTRY_TYPE),
+			).toBe(false);
+		} finally {
+			await session.close();
+		}
 	});
 
 	it("retains equal-content source IDs separately and unions partial selection with the untouched ordinary suffix", async () => {
@@ -116,7 +165,11 @@ describe("chronological committed source context", () => {
 				},
 			});
 			const context = session.buildSessionContext({ diagnostics: true });
-			expect(userContents(context.messages)).toEqual(["identical", "identical", "ordinary: αβ\n  preserve every byte\t!"]);
+			expect(userContents(context.messages)).toEqual([
+				"identical",
+				"identical",
+				"ordinary: αβ\n  preserve every byte\t!",
+			]);
 			expect(context.messageSourceIds?.filter(Boolean)).toEqual([first, second, ordinary]);
 			expect(context.messages[0]?.role).toBe("compactionSummary");
 			const ordinaryMessage = context.messages.find((_, index) => context.messageSourceIds?.[index] === ordinary);
@@ -133,44 +186,96 @@ describe("chronological committed source context", () => {
 		const session = SessionManager.create(dir.path(), dir.path());
 		try {
 			const text = "SELECTED_LAST_ORIGINAL";
-			const selected = session.appendMessage({ role: "user", content: "EXPANDED_LAST_BODY", timestamp: 1,
-				compactionOverride: "keep", originalSubmission: { text: `/keep ${text}`, compactionOverride: "keep" } });
+			const selected = session.appendMessage({
+				role: "user",
+				content: "EXPANDED_LAST_BODY",
+				timestamp: 1,
+				compactionOverride: "keep",
+				originalSubmission: { text: `/keep ${text}`, compactionOverride: "keep" },
+			});
 			const ordinary = user(session, "ordinary");
-			session.appendCompaction("recap", undefined, ordinary, 1000, { method: "soft", preserveData: {
-				sourceRepresentation: representation([{ kind: "source", entryId: selected, order: 0, projection: "original",
-					spans: [{ blockIndex: 0, start: 0, end: text.length }] }]),
-			} });
+			session.appendCompaction("recap", undefined, ordinary, 1000, {
+				method: "soft",
+				preserveData: {
+					sourceRepresentation: representation([
+						{
+							kind: "source",
+							entryId: selected,
+							order: 0,
+							projection: "original",
+							spans: [{ blockIndex: 0, start: 0, end: text.length }],
+						},
+					]),
+				},
+			});
 			expect(userContents(session.buildSessionContext().messages)).toEqual([text, "ordinary"]);
 			await session.ensureOnDisk();
 			await session.flush();
 			const reopened = await SessionManager.open(session.getSessionFile()!);
-			try { expect(userContents(reopened.buildSessionContext().messages)).toEqual([text, "ordinary"]); }
-			finally { await reopened.close(); }
-		} finally { await session.close(); }
+			try {
+				expect(userContents(reopened.buildSessionContext().messages)).toEqual([text, "ordinary"]);
+			} finally {
+				await reopened.close();
+			}
+		} finally {
+			await session.close();
+		}
 	});
 
 	it("keeps original text and images beside the untouched ordinary expanded projection", async () => {
 		const session = SessionManager.inMemory();
 		try {
-			const image = { type: "image" as const, data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=", mimeType: "image/png" };
+			const image = {
+				type: "image" as const,
+				data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
+				mimeType: "image/png",
+			};
 			const delivered = [{ type: "text" as const, text: "EXPANDED_WITH_IMAGE" }, image];
-			const selected = session.appendMessage({ role: "user", content: delivered, timestamp: 1,
-				originalSubmission: { text: "raw input", images: [image] } });
-			session.appendCompaction("recap", undefined, selected, 1000, { method: "soft", preserveData: {
-				sourceRepresentation: representation([
-					{ kind: "source", entryId: selected, order: 0, projection: "original", spans: [{ blockIndex: 0, start: 0, end: 9 }] },
-					{ kind: "original-image", entryId: selected, order: 0, projection: "original", blockIndex: 1, currentBlockIndex: 1 },
-				]),
-			} });
+			const selected = session.appendMessage({
+				role: "user",
+				content: delivered,
+				timestamp: 1,
+				originalSubmission: { text: "raw input", images: [image] },
+			});
+			session.appendCompaction("recap", undefined, selected, 1000, {
+				method: "soft",
+				preserveData: {
+					sourceRepresentation: representation([
+						{
+							kind: "source",
+							entryId: selected,
+							order: 0,
+							projection: "original",
+							spans: [{ blockIndex: 0, start: 0, end: 9 }],
+						},
+						{
+							kind: "original-image",
+							entryId: selected,
+							order: 0,
+							projection: "original",
+							blockIndex: 1,
+							currentBlockIndex: 1,
+						},
+					]),
+				},
+			});
 			const context = session.buildSessionContext();
 			expect(userContents(context.messages)).toEqual([[{ type: "text", text: "raw input" }, image], delivered]);
-			const imageOrigins = context.messages.filter(message => message.role === "user")
-				.flatMap(message => Array.isArray(message.content) ? message.content.filter(block => block.type === "image") : [])
+			const imageOrigins = context.messages
+				.filter(message => message.role === "user")
+				.flatMap(message =>
+					Array.isArray(message.content) ? message.content.filter(block => block.type === "image") : [],
+				)
 				.map(block => getSourceOrigin(block));
-			expect(imageOrigins.map(origin => origin?.kind === "source" ? origin.parts.map(part => part.projection) : undefined))
-				.toEqual([["original"], [undefined]]);
+			expect(
+				imageOrigins.map(origin =>
+					origin?.kind === "source" ? origin.parts.map(part => part.projection) : undefined,
+				),
+			).toEqual([["original"], [undefined]]);
 			expect(userContents(session.buildSessionContext({ transcript: true }).messages)).toEqual([delivered]);
-		} finally { await session.close(); }
+		} finally {
+			await session.close();
+		}
 	});
 
 	it("unions overlapping selected ranges without duplicating source bytes or dropping ordinary source", async () => {
@@ -285,12 +390,14 @@ describe("chronological committed source context", () => {
 				},
 			});
 			const context = session.buildSessionContext({ diagnostics: true });
-			expect(context.messages.slice(1).map(message => {
-				if (message.role === "custom" && message.customType === "compaction-source-gap") {
-					return message.details;
-				}
-				return message.role;
-			})).toEqual([{ wholeMessages: 1 }, "user", { wholeMessages: 2 }, "user", { wholeMessages: 1 }]);
+			expect(
+				context.messages.slice(1).map(message => {
+					if (message.role === "custom" && message.customType === "compaction-source-gap") {
+						return message.details;
+					}
+					return message.role;
+				}),
+			).toEqual([{ wholeMessages: 1 }, "user", { wholeMessages: 2 }, "user", { wholeMessages: 1 }]);
 			expect(context.messageSourceIds?.filter(Boolean)).toEqual([first, partial]);
 		} finally {
 			await session.close();
@@ -308,29 +415,40 @@ describe("chronological committed source context", () => {
 				stopReason: "toolUse",
 			});
 			const result = session.appendMessage({
-				role: "toolResult", toolCallId: "call", toolName: "read",
-				content: [{ type: "text", text: "source bytes" }], isError: false, timestamp: 1,
+				role: "toolResult",
+				toolCallId: "call",
+				toolName: "read",
+				content: [{ type: "text", text: "source bytes" }],
+				isError: false,
+				timestamp: 1,
 			});
 			user(session, "omitted after atom");
 			session.appendCompaction("recap", undefined, "", 1000, {
 				method: "soft",
-				preserveData: { sourceRepresentation: representation([
-					{ kind: "source", entryId: assistant, order: 1 },
-					{ kind: "source", entryId: result, order: 2 },
-				]) },
+				preserveData: {
+					sourceRepresentation: representation([
+						{ kind: "source", entryId: assistant, order: 1 },
+						{ kind: "source", entryId: result, order: 2 },
+					]),
+				},
 			});
 			const context = session.buildSessionContext();
 			expect(context.messages.map(message => message.role)).toEqual([
-				"compactionSummary", "custom", "assistant", "toolResult", "custom",
+				"compactionSummary",
+				"custom",
+				"assistant",
+				"toolResult",
+				"custom",
 			]);
 			const emittedAssistant = context.messages[2];
 			if (emittedAssistant?.role !== "assistant") throw new Error("Expected assistant atom");
-			expect(emittedAssistant.content).toEqual([{ type: "toolCall", id: "call", name: "read", arguments: { path: "file" } }]);
+			expect(emittedAssistant.content).toEqual([
+				{ type: "toolCall", id: "call", name: "read", arguments: { path: "file" } },
+			]);
 		} finally {
 			await session.close();
 		}
 	});
-
 
 	it("uses the full committed sparse layout across repeated compaction instead of reopening the firstKept interval", async () => {
 		using dir = TempDir.createSync("@pi-chronological-repeat-");
@@ -347,11 +465,14 @@ describe("chronological committed source context", () => {
 				throughEntryId: formerTail,
 			};
 			session.appendCompaction("first recap", undefined, formerTail, 1000, {
-				method: "soft", preserveData: { sourceRepresentation: firstRepresentation },
+				method: "soft",
+				preserveData: { sourceRepresentation: firstRepresentation },
 			});
 			const next = user(session, "new source");
 			expect(userContents(session.buildSessionContext().messages)).toEqual([
-				"old selected", "former ordinary tail", "new source",
+				"old selected",
+				"former ordinary tail",
+				"new source",
 			]);
 			const nextRepresentation: SourceRepresentation = {
 				...representation([
@@ -361,7 +482,8 @@ describe("chronological committed source context", () => {
 				throughEntryId: next,
 			};
 			session.appendCompaction("second recap", undefined, selected, 1000, {
-				method: "soft", preserveData: { sourceRepresentation: nextRepresentation },
+				method: "soft",
+				preserveData: { sourceRepresentation: nextRepresentation },
 			});
 			const after = user(session, "after second compaction");
 			const context = session.buildSessionContext({ diagnostics: true });
@@ -372,7 +494,6 @@ describe("chronological committed source context", () => {
 		}
 	});
 
-
 	it("maps snap text and original images to actual emitted blocks without replaying archived source", async () => {
 		using dir = TempDir.createSync("@pi-chronological-snap-");
 		const session = SessionManager.create(dir.path(), dir.path());
@@ -380,7 +501,8 @@ describe("chronological committed source context", () => {
 		try {
 			const image = { type: "image" as const, data: "c291cmNl", mimeType: "image/png" };
 			const archived = session.appendMessage({
-				role: "user", timestamp: 1,
+				role: "user",
+				timestamp: 1,
 				content: [{ type: "text", text: "left" }, image, { type: "text", text: "right" }],
 			});
 			const ordinary = user(session, "ordinary");
@@ -388,10 +510,22 @@ describe("chronological committed source context", () => {
 				version: 1,
 				throughEntryId: ordinary,
 				coverage: [
-					{ entryId: archived, order: 0, snapshot: { blockIndex: 0, start: 0, end: 4 },
-						current: { blockIndex: 0, start: 0, end: 4 }, normalized: { start: 0, end: 4 }, status: "exact-current" },
-					{ entryId: archived, order: 0, snapshot: { blockIndex: 2, start: 0, end: 5 },
-						current: { blockIndex: 2, start: 0, end: 5 }, normalized: { start: 4, end: 9 }, status: "exact-current" },
+					{
+						entryId: archived,
+						order: 0,
+						snapshot: { blockIndex: 0, start: 0, end: 4 },
+						current: { blockIndex: 0, start: 0, end: 4 },
+						normalized: { start: 0, end: 4 },
+						status: "exact-current",
+					},
+					{
+						entryId: archived,
+						order: 0,
+						snapshot: { blockIndex: 2, start: 0, end: 5 },
+						current: { blockIndex: 2, start: 0, end: 5 },
+						normalized: { start: 4, end: 9 },
+						status: "exact-current",
+					},
 				],
 				layout: [
 					{ kind: "text", range: { start: 0, end: 4 } },
@@ -410,13 +544,15 @@ describe("chronological committed source context", () => {
 			session.appendMessage(makeAssistantMessage());
 			const context = session.buildSessionContext({ diagnostics: true });
 			expect(userContents(context.messages)).toEqual(["ordinary"]);
-			const sourceBlocks = context.sourceLocations?.filter(location => location.layoutIndex < 3).map(location => {
-				const message = context.messages[location.messageIndex];
-				if (message?.role !== "compactionSummary" || location.blockIndex === undefined) {
-					throw new Error("Expected an actual archive block location");
-				}
-				return { layoutIndex: location.layoutIndex, block: message.blocks?.[location.blockIndex] };
-			});
+			const sourceBlocks = context.sourceLocations
+				?.filter(location => location.layoutIndex < 3)
+				.map(location => {
+					const message = context.messages[location.messageIndex];
+					if (message?.role !== "compactionSummary" || location.blockIndex === undefined) {
+						throw new Error("Expected an actual archive block location");
+					}
+					return { layoutIndex: location.layoutIndex, block: message.blocks?.[location.blockIndex] };
+				});
 			expect(sourceBlocks).toEqual([
 				{ layoutIndex: 0, block: { type: "text", text: "left" } },
 				{ layoutIndex: 1, block: image },
@@ -432,7 +568,6 @@ describe("chronological committed source context", () => {
 		}
 	});
 
-
 	it("does not replay an explicitly deleted image when its former block index now names another image", async () => {
 		using dir = TempDir.createSync("@pi-chronological-image-delete-");
 		const session = SessionManager.create(dir.path(), dir.path());
@@ -441,14 +576,24 @@ describe("chronological committed source context", () => {
 			const content = [{ type: "text" as const, text: "caption" }, survivingImage];
 			const selected = session.appendMessage({ role: "user", content, timestamp: 1 });
 			const ordinary = user(session, "ordinary");
-			const preserveData = remapCompactionSourceRepresentation({ sourceRepresentation: representation([
-				{ kind: "source", entryId: selected, order: 0, spans: [{ blockIndex: 0, start: 0, end: 7 }] },
-				{ kind: "original-image", entryId: selected, order: 0, blockIndex: 1, currentBlockIndex: 1 },
-				{ kind: "original-image", entryId: selected, order: 0, blockIndex: 2, currentBlockIndex: 2 },
-			]) }, [{ entryId: selected, blocks: [
-				{ oldBlockIndex: 1, newBlockIndex: null },
-				{ oldBlockIndex: 2, newBlockIndex: 1 },
-			] }]);
+			const preserveData = remapCompactionSourceRepresentation(
+				{
+					sourceRepresentation: representation([
+						{ kind: "source", entryId: selected, order: 0, spans: [{ blockIndex: 0, start: 0, end: 7 }] },
+						{ kind: "original-image", entryId: selected, order: 0, blockIndex: 1, currentBlockIndex: 1 },
+						{ kind: "original-image", entryId: selected, order: 0, blockIndex: 2, currentBlockIndex: 2 },
+					]),
+				},
+				[
+					{
+						entryId: selected,
+						blocks: [
+							{ oldBlockIndex: 1, newBlockIndex: null },
+							{ oldBlockIndex: 2, newBlockIndex: 1 },
+						],
+					},
+				],
+			);
 			session.appendCompaction("recap", undefined, ordinary, 1000, { method: "soft", preserveData });
 			expect(userContents(session.buildSessionContext().messages)).toEqual([content, "ordinary"]);
 		} finally {
@@ -462,22 +607,57 @@ describe("chronological committed source context", () => {
 		let reopened: SessionManager | undefined;
 		try {
 			const image = { type: "image" as const, data: "YQ==", mimeType: "image/png" };
-			const archived = session.appendCustomMessageEntry("human-note", [{ type: "text", text: "head" }, image], true, { tag: "manual" }, "user", 1);
-			const selected = session.appendCustomMessageEntry("human-note", [{ type: "text", text: "0123456789" }, image], true, { tag: "manual" }, "user", 2);
+			const archived = session.appendCustomMessageEntry(
+				"human-note",
+				[{ type: "text", text: "head" }, image],
+				true,
+				{ tag: "manual" },
+				"user",
+				1,
+			);
+			const selected = session.appendCustomMessageEntry(
+				"human-note",
+				[{ type: "text", text: "0123456789" }, image],
+				true,
+				{ tag: "manual" },
+				"user",
+				2,
+			);
 			const ordinary = user(session, "ordinary");
 			const sourceRepresentation: SourceRepresentation = {
-				version: 1, throughEntryId: ordinary,
-				coverage: [{ entryId: archived, order: 0, snapshot: { blockIndex: 0, start: 0, end: 4 }, current: { blockIndex: 0, start: 0, end: 4 }, normalized: { start: 0, end: 4 }, status: "exact-current" }],
+				version: 1,
+				throughEntryId: ordinary,
+				coverage: [
+					{
+						entryId: archived,
+						order: 0,
+						snapshot: { blockIndex: 0, start: 0, end: 4 },
+						current: { blockIndex: 0, start: 0, end: 4 },
+						normalized: { start: 0, end: 4 },
+						status: "exact-current",
+					},
+				],
 				layout: [
 					{ kind: "text", range: { start: 0, end: 4 } },
 					{ kind: "original-image", entryId: archived, order: 0, blockIndex: 7, currentBlockIndex: 1 },
-					{ kind: "source", entryId: selected, order: 1, spans: [{ blockIndex: 0, start: 2, end: 8 }, { blockIndex: 1, start: 0, end: 0 }] },
+					{
+						kind: "source",
+						entryId: selected,
+						order: 1,
+						spans: [
+							{ blockIndex: 0, start: 2, end: 8 },
+							{ blockIndex: 1, start: 0, end: 0 },
+						],
+					},
 					{ kind: "source", entryId: ordinary, order: 2 },
 				],
 			};
 			session.appendCompaction("recap", undefined, ordinary, 1000, {
 				method: "snapcompact",
-				preserveData: { sourceRepresentation, [snapcompact.PRESERVE_KEY]: { frames: [], text: "head", totalChars: 4, truncatedChars: 0 } },
+				preserveData: {
+					sourceRepresentation,
+					[snapcompact.PRESERVE_KEY]: { frames: [], text: "head", totalChars: 4, truncatedChars: 0 },
+				},
 			});
 			session.appendMessage(makeAssistantMessage());
 			const context = session.buildSessionContext({ diagnostics: true });
@@ -497,5 +677,4 @@ describe("chronological committed source context", () => {
 			await session.close();
 		}
 	});
-
 });

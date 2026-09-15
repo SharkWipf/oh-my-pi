@@ -12,7 +12,15 @@ import {
 	ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, ImageContent, OriginalSubmission, Message, Model, Usage, UsageReport } from "@oh-my-pi/pi-ai";
+import type {
+	AssistantMessage,
+	ImageContent,
+	Message,
+	Model,
+	OriginalSubmission,
+	Usage,
+	UsageReport,
+} from "@oh-my-pi/pi-ai";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { execReplace } from "@oh-my-pi/pi-natives";
 import type {
@@ -1544,6 +1552,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			if (!$env.PI_NO_TITLE && !this.sessionManager.getSessionName()) {
 				tinyTitleClient.prewarm(this.settings.get("providers.tinyModel"));
 			}
+			// Cold source coverage belongs after the first frame, never SDK/session construction.
+			void this.session.requirements.observeCommittedSources().catch(error => {
+				this.showError(`Requirements source initialization failed: ${error}`);
+			});
 		});
 
 		// Host the session before extension hooks run: a dialog raised from a
@@ -2390,7 +2402,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// message, and EventController appends that canonical row on its own. An
 		// ordinary optimistic user row would survive as a duplicate, so mirror the
 		// dispatch condition here.
-		if (!submission.customType && !isKnownSkillCommand(this, submission.text)) {
+		if (!submission.customType && (submission.compactionOverride || !isKnownSkillCommand(this, submission.text))) {
 			this.#resetGoalContinuationSuppression();
 			const imageCount = submission.images?.length ?? 0;
 			this.optimisticUserMessageSignature = `${submission.text}\u0000${imageCount}`;
@@ -2440,10 +2452,16 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!submission.customType && !preserveDraft) {
 			const original = submission.originalSubmission ?? submission;
 			this.editor.pendingImages = original.images ? [...original.images] : [];
-			this.editor.pendingImageLinks = original.imageLinks ? [...original.imageLinks] : this.editor.pendingImages.map(() => undefined);
+			this.editor.pendingImageLinks = original.imageLinks
+				? [...original.imageLinks]
+				: this.editor.pendingImages.map(() => undefined);
 			this.editor.imageLinks = this.editor.pendingImageLinks;
 			this.rebuildChatFromMessages();
-			this.editor.setCollapsedText(submission.originalSubmission ? original.text : restoreCompactionOverridePrompt(original.text, original.compactionOverride));
+			this.editor.setCollapsedText(
+				submission.originalSubmission
+					? original.text
+					: restoreCompactionOverridePrompt(original.text, original.compactionOverride),
+			);
 			this.editor.restoreOriginalSubmission({ ...original, originalSubmission: submission.originalSubmission });
 		}
 		this.updateEditorBorderColor();
@@ -2469,9 +2487,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!this.editor.getText().trim()) {
 			const original = prompt.originalSubmission ?? prompt;
 			this.editor.pendingImages = original.images ? [...original.images] : [];
-			this.editor.pendingImageLinks = original.imageLinks ? [...original.imageLinks] : this.editor.pendingImages.map(() => undefined);
+			this.editor.pendingImageLinks = original.imageLinks
+				? [...original.imageLinks]
+				: this.editor.pendingImages.map(() => undefined);
 			this.editor.imageLinks = this.editor.pendingImageLinks;
-			this.editor.setCollapsedText(prompt.originalSubmission ? original.text : restoreCompactionOverridePrompt(original.text, original.compactionOverride));
+			this.editor.setCollapsedText(
+				prompt.originalSubmission
+					? original.text
+					: restoreCompactionOverridePrompt(original.text, original.compactionOverride),
+			);
 			this.editor.restoreOriginalSubmission({ ...original, originalSubmission: prompt.originalSubmission });
 		}
 		this.ui.requestRender();
@@ -6021,7 +6045,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		compactionOverride?: "keep" | "exclude",
 		originalSubmission?: OriginalSubmission,
 	): Promise<void> {
-		return this.#uiHelpers.queueCompactionMessage(text, mode, images, imageLinks, compactionOverride, originalSubmission);
+		return this.#uiHelpers.queueCompactionMessage(
+			text,
+			mode,
+			images,
+			imageLinks,
+			compactionOverride,
+			originalSubmission,
+		);
 	}
 
 	flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void> {

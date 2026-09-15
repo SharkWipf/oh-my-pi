@@ -16,7 +16,10 @@ import {
 	type SessionStorageBackend,
 	type SessionStorageIndexEntry,
 } from "@oh-my-pi/pi-coding-agent/session/indexed-session-storage";
-import { SessionManager, SessionPersistenceIndeterminateError } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import {
+	SessionManager,
+	SessionPersistenceIndeterminateError,
+} from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { SessionWriteConflictError } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 
 class FakeBackend implements SessionStorageBackend {
@@ -148,7 +151,12 @@ describe("SessionManager + indexed backend durability", () => {
 		const started = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
 		class DelayedBackend extends FakeBackend {
-			override async append(path: string, line: string, mtimeMs: number, expectedSize?: number | null): Promise<void> {
+			override async append(
+				path: string,
+				line: string,
+				mtimeMs: number,
+				expectedSize?: number | null,
+			): Promise<void> {
 				started.resolve();
 				await release.promise;
 				await super.append(path, line, mtimeMs, expectedSize);
@@ -167,7 +175,9 @@ describe("SessionManager + indexed backend durability", () => {
 		await storage.drain();
 		await manager.flush();
 		expect(manager.captureState().expectedDiskSize).toBe(snapshot.expectedDiskSize);
-		await expect(manager.recoverPersistenceFromCurrentState()).rejects.toBeInstanceOf(SessionPersistenceIndeterminateError);
+		await expect(manager.recoverPersistenceFromCurrentState()).rejects.toBeInstanceOf(
+			SessionPersistenceIndeterminateError,
+		);
 		expect(await storage.readText(snapshot.sessionFile!)).toContain("late durable turn");
 	});
 	it("does not advance the durable size before the backend confirms the append", async () => {

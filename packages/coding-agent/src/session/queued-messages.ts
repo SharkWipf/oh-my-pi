@@ -94,7 +94,7 @@ export function queueChipText(message: AgentMessage): string {
 
 /** Converts a queued user message to editor-restorable content. */
 export function toRestoredQueuedMessage(message: AgentMessage): RestoredQueuedMessage {
-	const original = (message.role === "user" || message.role === "custom") ? message.originalSubmission : undefined;
+	const original = message.role === "user" || message.role === "custom" ? message.originalSubmission : undefined;
 	return {
 		text: original?.text ?? queueChipText(message),
 		images: original ? original.images : queuedImageContent(message),
