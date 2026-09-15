@@ -12,6 +12,13 @@
 - Project explicit text/thinking closure into split post-tool segments without freezing interleaved growth, while retaining mid-stream text retirement and revisable-wire protection.
 - Keep done-only prose between reads in chronological order instead of merging its surrounding tool cards into one shared anchor.
 
+### Changed
+
+- Long-session footer totals, credential pins, and retained-context reconstruction now reuse the session index instead of repeatedly scanning cold history. Recent sibling branches reuse a bounded control-state checkpoint; full transcript exports still include historical messages. Indexed context reconstruction also retains lazy persisted-image resolution and rebuilds control state after explicit entry rewrites without changing the selected branch.
+- Transcript retirement and tail updates skip already committed blocks while preserving public middle-child replacements and externally assigned child arrays.
+### Fixed
+
+- Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.
 ### Breaking Changes
 
 - Read tool results no longer duplicate the body in `details.truncation.content`; use result `content` or `details.displayContent` instead. ([#11255](https://github.com/can1357/oh-my-pi/pull/11255) by [@jiwangyihao](https://github.com/jiwangyihao))
