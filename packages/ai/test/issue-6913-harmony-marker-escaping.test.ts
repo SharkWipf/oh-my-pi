@@ -2,9 +2,10 @@ import { describe, expect, it } from "bun:test";
 import { convertCodexResponsesMessages } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import type { ResponseInput } from "@oh-my-pi/pi-ai/providers/openai-responses-wire";
 import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
-import type { AssistantMessage, Context, ToolResultMessage, UserMessage } from "@oh-my-pi/pi-ai/types";
+import type { AssistantMessage, Context, Model, ToolResultMessage, UserMessage } from "@oh-my-pi/pi-ai/types";
 import { createOpenAIResponsesHistoryPayload } from "@oh-my-pi/pi-ai/utils";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { getSourceOrigin, setSourceOrigin } from "../src/utils/source-origin";
 import { createCodexModel } from "./helpers";
 
 // Literal Harmony analysis-channel marker. openai-codex/gpt-oss reject any
@@ -351,4 +352,51 @@ describe("issue #6913: Harmony control-token escaping at the request boundary", 
 		);
 		expect(wire).toContain(MARKER);
 	});
+
+	for (const api of ["openai-responses", "azure-openai-responses", "openai-codex-responses"] as const) {
+		it("escapes typed native logical fields at the " + api + " builder boundary, not opaque payloads", () => {
+			const provider = api === "azure-openai-responses" ? "azure" : api === "openai-codex-responses" ? "openai-codex" : "openai";
+			const model = buildModel({ id: "gpt-oss-120b", name: "Harmony fixture", api, provider, baseUrl: "https://fixture.invalid", reasoning: true, input: ["text", "image"], supportsComputerUse: true, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 272000, maxTokens: 128000 });
+			const opaque = "opaque-" + MARKER;
+			const fixtures: Array<{ input: ResponseInput[number]; expected: object }> = [
+				{ input: { type: "computer_call", id: "cu_fixture", call_id: "computer", status: "completed", actions: [{ type: "type", text: MARKER }], pending_safety_checks: [{ id: opaque, code: opaque, message: MARKER }] }, expected: { actions: [{ type: "type", text: ESCAPED }], pending_safety_checks: [{ id: opaque, code: opaque, message: ESCAPED }] } },
+				{ input: { type: "computer_call_output", call_id: "computer", output: { type: "computer_screenshot", image_url: opaque }, acknowledged_safety_checks: [{ id: opaque, code: opaque, message: MARKER }] }, expected: { output: { type: "computer_screenshot", image_url: opaque }, acknowledged_safety_checks: [{ id: opaque, code: opaque, message: ESCAPED }] } },
+				{ input: { type: "web_search_call", id: "ws_fixture", status: "completed", action: { type: "search", query: MARKER, queries: [MARKER], sources: [{ type: "url", url: MARKER }] } }, expected: { action: { type: "search", query: ESCAPED, queries: [ESCAPED], sources: [{ type: "url", url: ESCAPED }] } } },
+				{ input: { type: "file_search_call", id: "fs_fixture", status: "completed", queries: [MARKER], results: [{ file_id: opaque, filename: MARKER, text: MARKER }] }, expected: { queries: [ESCAPED], results: [{ file_id: opaque, filename: ESCAPED, text: ESCAPED }] } },
+				{ input: { type: "reasoning", id: "rs_fixture", summary: [{ type: "summary_text", text: MARKER }], content: [{ type: "reasoning_text", text: MARKER }], encrypted_content: opaque }, expected: { summary: [{ type: "summary_text", text: ESCAPED }], content: [{ type: "reasoning_text", text: ESCAPED }], encrypted_content: opaque } },
+				{ input: { type: "code_interpreter_call", id: "ci_fixture", status: "completed", container_id: opaque, code: MARKER, outputs: [{ type: "logs", logs: MARKER }, { type: "image", url: opaque }] }, expected: { container_id: opaque, code: ESCAPED, outputs: [{ type: "logs", logs: ESCAPED }, { type: "image", url: opaque }] } },
+				{ input: { type: "mcp_call", id: "mcp_fixture", name: opaque, server_label: opaque, arguments: JSON.stringify({ text: MARKER }), output: MARKER, error: MARKER }, expected: { name: opaque, server_label: opaque, arguments: JSON.stringify({ text: ESCAPED }), output: ESCAPED, error: ESCAPED } },
+				{ input: { type: "mcp_list_tools", id: "list_fixture", server_label: opaque, tools: [{ name: opaque, input_schema: { opaque }, annotations: { opaque }, description: MARKER }], error: MARKER }, expected: { server_label: opaque, tools: [{ name: opaque, input_schema: { opaque }, annotations: { opaque }, description: ESCAPED }], error: ESCAPED } },
+				{ input: { type: "mcp_approval_request", id: "approve_fixture", name: opaque, server_label: opaque, arguments: JSON.stringify({ text: MARKER }) }, expected: { name: opaque, server_label: opaque, arguments: JSON.stringify({ text: ESCAPED }) } },
+				{ input: { type: "mcp_approval_response", approval_request_id: "approve_fixture", approve: false, reason: MARKER }, expected: { approval_request_id: "approve_fixture", approve: false, reason: ESCAPED } },
+				{ input: { type: "shell_call", call_id: "shell", action: { commands: [MARKER] } }, expected: { action: { commands: [ESCAPED] } } },
+				{ input: { type: "shell_call_output", call_id: "shell", output: [{ stdout: MARKER, stderr: MARKER, outcome: { type: "exit", exit_code: 0 } }] }, expected: { output: [{ stdout: ESCAPED, stderr: ESCAPED, outcome: { type: "exit", exit_code: 0 } }] } },
+				{ input: { type: "local_shell_call", id: "local_fixture", call_id: "local", status: "completed", action: { type: "exec", command: [MARKER], env: { VALUE: MARKER }, working_directory: MARKER } }, expected: { action: { command: [ESCAPED], env: { VALUE: ESCAPED }, working_directory: ESCAPED } } },
+				{ input: { type: "local_shell_call_output", id: "local_fixture", output: JSON.stringify({ stdout: MARKER }) }, expected: { output: JSON.stringify({ stdout: ESCAPED }) } },
+				{ input: { type: "apply_patch_call", call_id: "patch", status: "completed", operation: { type: "create_file", path: MARKER, diff: MARKER } }, expected: { operation: { type: "create_file", path: ESCAPED, diff: ESCAPED } } },
+				{ input: { type: "apply_patch_call_output", call_id: "patch", status: "completed", output: MARKER }, expected: { output: ESCAPED } },
+				{ input: { type: "tool_search_call", arguments: { query: MARKER }, call_id: "tools", execution: "server" }, expected: { arguments: { query: ESCAPED } } },
+				{ input: { type: "tool_search_output", call_id: "tools", tools: [{ type: "function", name: opaque, parameters: { opaque }, strict: false, description: MARKER }] }, expected: { tools: [{ name: opaque, parameters: { opaque }, description: ESCAPED }] } },
+				{ input: { type: "additional_tools", role: "developer", tools: [{ type: "namespace", name: opaque, description: MARKER, tools: [{ type: "function", name: opaque, description: MARKER }] }] }, expected: { tools: [{ name: opaque, description: ESCAPED, tools: [{ name: opaque, description: ESCAPED }] }] } },
+				{ input: { type: "image_generation_call", id: "image_fixture", status: "completed", result: opaque }, expected: { result: opaque } },
+			];
+			const items = fixtures.map(({ input }) => input);
+			for (const item of items) setSourceOrigin(item, { kind: "source", parts: [{ entryId: "source-" + item.type, order: 0, blockIndex: 0, representation: "native", coverage: "full" }] });
+			const before = JSON.stringify(items);
+			const user: UserMessage = { role: "user", content: "replay", timestamp: 0, providerPayload: createOpenAIResponsesHistoryPayload(provider, items as unknown as Record<string, unknown>[]) };
+			const convert = (activeModel: typeof model) => api === "openai-codex-responses"
+				? convertCodexResponsesMessages(activeModel as Model<"openai-codex-responses">, { messages: [user] })
+				: buildResponsesInput({ model: activeModel, context: { messages: [user] }, strictResponsesPairing: false, supportsImageDetailOriginal: true, nativeHistory: { replay: true, filterReasoning: false } });
+			const wire = convert(model);
+			for (const fixture of fixtures) {
+				const item = wire.find(item => item.type === fixture.input.type);
+				expect(item).toMatchObject(fixture.expected);
+				if (fixture.input.type === "web_search_call") expect(getSourceOrigin(item!)).toMatchObject({ kind: "source", parts: [{ entryId: "source-web_search_call", coverage: "full", representation: "transformed-text" }] });
+			}
+			expect(JSON.stringify(items)).toBe(before);
+			const plain = convert({ ...model, identity: { ...model.identity, class: "gpt" } });
+			expect(plain.find(item => item.type === "computer_call")).toMatchObject({ actions: [{ text: MARKER }] });
+			expect(plain.find(item => item.type === "web_search_call")).toMatchObject({ action: { queries: [MARKER] } });
+		});
+	}
 });

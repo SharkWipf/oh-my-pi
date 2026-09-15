@@ -16,6 +16,7 @@
 
 import { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type { Context, ImageContent, Model, TextContent, ToolResultMessage, UserMessage } from "@oh-my-pi/pi-ai";
+import { combineContentSourceOrigins, getInlinePhysical, type InlinePhysical, setSourceOrigin, transferSourceOrigin } from "@oh-my-pi/pi-ai/utils/source-origin";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { SnapcompactFrameSink } from "../blob-broker/service";
 import contextFramesNote from "../prompts/system/snapcompact-context-frames-note.md" with { type: "text" };
@@ -25,6 +26,36 @@ import systemStub from "../prompts/system/snapcompact-system-stub.md" with { typ
 import toolResultNote from "../prompts/system/snapcompact-toolresult-note.md" with { type: "text" };
 
 export type SnapcompactSystemPromptMode = "none" | "agents-md" | "all";
+
+/** Estimated raster price and owner for this emitted image, never provider billing. */
+export function getInlineFrameAccounting(image: ImageContent): Extract<InlinePhysical, { kind: "frame" }> | undefined {
+	const fact = getInlinePhysical(image);
+	return fact?.kind === "frame" ? fact : undefined;
+}
+
+/** Identity-bound control note ownership; ordinary equal-text content has no fact. */
+export function getInlineTextAccounting(block: TextContent): Extract<InlinePhysical, { kind: "note" }> | undefined {
+	const fact = getInlinePhysical(block);
+	return fact?.kind === "note" ? fact : undefined;
+}
+
+function inlineNote(text: string, owner: InlinePhysical["owner"], toolCallId?: string): TextContent {
+	return setSourceOrigin({ type: "text", text }, {
+		kind: "synthetic",
+		reason: "raster-control",
+		inlinePhysical: { kind: "note", owner, ...(toolCallId === undefined ? {} : { toolCallId }) },
+	});
+}
+
+function emittedFrames(frames: readonly ImageContent[], shape: snapcompact.Shape, owner: InlinePhysical["owner"], toolCallId?: string): ImageContent[] {
+	// Provider hooks may mutate outgoing blocks. Never expose a render-cache block
+	// or restamp a prior request with a later model or owner estimate.
+	return frames.map(frame => setSourceOrigin({ ...frame }, {
+		kind: "synthetic",
+		reason: owner === "tool" ? "tool-result-raster" : "system-prompt-raster",
+		inlinePhysical: { kind: "frame", owner, estimatedTokens: shape.frameTokenEstimate, ...(toolCallId === undefined ? {} : { toolCallId }) },
+	}));
+}
 
 export interface SnapcompactInlineOptions {
 	renderSystemPrompt: SnapcompactSystemPromptMode;
@@ -417,6 +448,7 @@ export function estimateInlineSavings(input: {
 
 interface FrameCacheEntry {
 	hash: number | bigint;
+	shapeKey: string;
 	frames: ImageContent[];
 }
 
@@ -442,6 +474,7 @@ export class SnapcompactInlineTransformer {
 		if (!model.input.includes("image")) return context;
 
 		const shape = snapcompact.resolveShape(model, this.options.shape);
+		const shapeKey = JSON.stringify(shape);
 		const tokenizer = new Tokenizer(model);
 		const budget = snapcompact.providerImageBudget(model.provider) - countMessageImages(context.messages);
 		if (budget <= 0) return context;
@@ -497,19 +530,24 @@ export class SnapcompactInlineTransformer {
 		for (const swap of plan.toolResults) {
 			const target = targets.get(swap.id);
 			if (!target) continue;
-			const frames = await this.#framesFor(this.#toolCache, swap.id, target.text, shape);
-			const content: (TextContent | ImageContent)[] = [{ type: "text", text: toolResultNote }, ...frames];
+			const cachedFrames = await this.#framesFor(this.#toolCache, swap.id, target.text, shape, shapeKey);
+			const frames = emittedFrames(cachedFrames, shape, "tool", swap.id);
+			const content: (TextContent | ImageContent)[] = [
+				inlineNote(toolResultNote, "tool", swap.id),
+				...frames,
+			];
 			let sourceImageIndex = 0;
 			for (const block of target.message.content) {
 				if (block.type !== "image") continue;
 				sourceImageIndex++;
-				content.push({
-					type: "text",
-					text: `[Original source image ${sourceImageIndex}; corresponds to its marker in the compacted text.]`,
-				});
+				content.push(inlineNote(
+					`[Original source image ${sourceImageIndex}; corresponds to its marker in the compacted text.]`,
+					"tool",
+					swap.id,
+				));
 				content.push(block);
 			}
-			messages[target.index] = { ...target.message, content };
+			messages[target.index] = setSourceOrigin({ ...target.message, content }, combineContentSourceOrigins(content));
 			changed = true;
 			savings.push({
 				toolCallId: swap.id,
@@ -529,9 +567,10 @@ export class SnapcompactInlineTransformer {
 		if (plan.systemPrompt && userIndex >= 0 && systemPromptTarget) {
 			const hash = Bun.hash(systemPromptTarget.text);
 			let cached = this.#systemCache;
-			if (!cached || cached.hash !== hash) {
+			if (!cached || cached.hash !== hash || cached.shapeKey !== shapeKey) {
 				cached = {
 					hash,
+					shapeKey,
 					frames:
 						(await this.frameSink?.framesFor(systemPromptTarget.text, shape, MAX_SYSTEM_PROMPT_FRAMES)) ??
 						(await snapcompact.renderMany(systemPromptTarget.text, {
@@ -541,14 +580,17 @@ export class SnapcompactInlineTransformer {
 				};
 				this.#systemCache = cached;
 			}
-			const frames = cached.frames;
+			const owner = systemPromptTarget.scope === "all" ? "system" : "context";
+			const frames = emittedFrames(cached.frames, shape, owner);
 			const original = messages[userIndex] as UserMessage;
 			const originalContent: (TextContent | ImageContent)[] =
-				typeof original.content === "string" ? [{ type: "text", text: original.content }] : original.content;
-			messages[userIndex] = {
-				...original,
-				content: [{ type: "text", text: systemPromptTarget.userNote }, ...frames, ...originalContent],
-			};
+				typeof original.content === "string" ? [transferSourceOrigin(original, { type: "text", text: original.content })] : original.content;
+			const content: (TextContent | ImageContent)[] = [
+				inlineNote(systemPromptTarget.userNote, owner),
+				...frames,
+				...originalContent,
+			];
+			messages[userIndex] = setSourceOrigin({ ...original, content }, combineContentSourceOrigins(content));
 			systemPrompt = systemPromptTarget.replacement;
 			changed = true;
 		}
@@ -562,14 +604,15 @@ export class SnapcompactInlineTransformer {
 		key: string,
 		text: string,
 		shape: snapcompact.Shape,
+		shapeKey: string,
 	): Promise<ImageContent[]> {
 		const hash = Bun.hash(text);
 		const cached = cache.get(key);
-		if (cached && cached.hash === hash) return cached.frames;
+		if (cached && cached.hash === hash && cached.shapeKey === shapeKey) return cached.frames;
 		// A frame sink defers rasterization until a provider actually fetches
 		// the frame URL — the cache then holds tiny placeholders, not pixels.
 		const frames = (await this.frameSink?.framesFor(text, shape)) ?? (await snapcompact.renderMany(text, { shape }));
-		cache.set(key, { hash, frames });
+		cache.set(key, { hash, shapeKey, frames });
 		return frames;
 	}
 }

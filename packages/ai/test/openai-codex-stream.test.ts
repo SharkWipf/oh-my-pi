@@ -21,6 +21,7 @@ import type {
 	ProviderSessionState,
 } from "@oh-my-pi/pi-ai/types";
 import { __resetProxyCache } from "@oh-my-pi/pi-ai/utils/proxy";
+import { bindMessageSource, getSourceOrigin } from "@oh-my-pi/pi-ai/utils/source-origin";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import * as piUtils from "@oh-my-pi/pi-utils";
@@ -893,6 +894,16 @@ describe("openai-codex streaming", () => {
 			actions: [{ type: "screenshot" }],
 			pendingSafetyChecks: [{ id: "safe_interleaved" }],
 		});
+		const payload = result.providerPayload;
+		if (payload?.type !== "openaiResponsesHistory") throw new Error("Expected native history");
+		bindMessageSource(result, "interleaved-turn", 0);
+		expect(payload.items.map(item => item.id)).toEqual([
+			"rs_interleaved", "msg_interleaved", "item_interleaved_computer",
+		]);
+		for (const [index, item] of payload.items.entries()) {
+			const origin = getSourceOrigin(item);
+			expect(origin).toMatchObject({ kind: "source", parts: [{ entryId: "interleaved-turn", blockIndex: index }] });
+		}
 	});
 
 	it("promotes a completed computer call on max-output truncation to tool use", async () => {

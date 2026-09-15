@@ -9,6 +9,7 @@
  */
 
 import type { Context, ImageContent, Message, Model, TextContent } from "@oh-my-pi/pi-ai";
+import { combineContentSourceOrigins, setSourceOrigin, transferSourceOrigin } from "@oh-my-pi/pi-ai/utils/source-origin";
 import { modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
 
 /** Responses/Chat APIs whose `image_url` accepts arbitrary https URLs. */
@@ -59,11 +60,11 @@ function mapContextImages(context: Context, mapBlock: (block: ImageContent) => I
 			if (block.type !== "image") return block;
 			const next = mapBlock(block);
 			if (next !== block) contentChanged = true;
-			return next;
+			return transferSourceOrigin(block, next);
 		});
 		if (!contentChanged) return message;
 		messagesChanged = true;
-		return { ...message, content } as Message;
+		return transferSourceOrigin(message, { ...message, content } as Message);
 	});
 	return messagesChanged ? { ...context, messages } : context;
 }
@@ -124,15 +125,15 @@ export async function inlineContextImages(
 					if (block.type !== "image" || (!block.url && !block.providerFile)) return block;
 					contentChanged = true;
 					const { url: _url, providerFile: _providerFile, ...rest } = block;
-					if (rest.data.length > 0) return rest;
+					if (rest.data.length > 0) return transferSourceOrigin(block, rest);
 					const data = await resolveData(block);
-					if (data) return { ...rest, data };
-					return { type: "text", text: "[image unavailable: render source expired]" };
+					if (data) return transferSourceOrigin(block, { ...rest, data });
+					return setSourceOrigin({ type: "text", text: "[image unavailable: render source expired]" }, { kind: "synthetic", reason: "image-omission" });
 				}),
 			);
 			if (!contentChanged) return message;
 			messagesChanged = true;
-			return { ...message, content } as Message;
+			return setSourceOrigin({ ...message, content } as Message, combineContentSourceOrigins(content));
 		}),
 	);
 	return messagesChanged ? { ...context, messages } : context;
