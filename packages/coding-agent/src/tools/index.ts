@@ -374,7 +374,10 @@ export interface ToolSession {
 	/** Goal runtime for the active agent session. */
 	getGoalRuntime?: () => GoalRuntime | undefined;
 	/** Send ordinary user input through the owning session queue. */
-	sendUserMessage?: (content: string, options: { deliverAs: "followUp"; producer?: UserMessageProducer }) => Promise<void>;
+	sendUserMessage?: (
+		content: string,
+		options: { deliverAs: "followUp"; producer?: UserMessageProducer },
+	) => Promise<void>;
 	/** Get cumulative session usage statistics (input/output tokens, cost). */
 	getUsageStatistics?: () => UsageStatistics;
 	/** Current per-turn token budget {total, spent, hard} for the eval `budget` helper. */

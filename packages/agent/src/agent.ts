@@ -1671,7 +1671,8 @@ export class Agent {
 			},
 			waitForSteeringMessages: signal => this.#waitForSteeringMessages(signal),
 			hasIrcInterrupts: this.hasIrcInterrupts,
-			getFollowUpMessages: (signal, messages) => this.#dequeueFollowUpMessagesAfterHooks(signal ?? loopSignal, messages),
+			getFollowUpMessages: (signal, messages) =>
+				this.#dequeueFollowUpMessagesAfterHooks(signal ?? loopSignal, messages),
 			getAsideMessages: async (messages, signal) => (await this.#asideMessageProvider?.(messages, signal)) ?? [],
 			onBeforeYield: () => this.#onBeforeYield?.(),
 			telemetry: this.#telemetry,

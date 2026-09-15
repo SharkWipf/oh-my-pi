@@ -5,6 +5,7 @@ import {
 	type Agent,
 	type AgentMessage,
 	type AgentTurnEndContext,
+	IMAGE_TOKEN_ESTIMATE,
 	type MessageCountOptions,
 	resolveTelemetry,
 	type StreamFn,
@@ -4163,6 +4164,19 @@ export class SessionMaintenance {
 					this.#tokenizer.countMessage(message, projectionOptions);
 			}
 		}
+		for (const message of rebuilt.messages) {
+			if (message.role !== "compactionSummary") continue;
+			if (message.blocks !== undefined) {
+				// Source-aware archive fragments emit summary + blocks without wrappers.
+				// Keep the tokenizer's distinction between archive frames and originals.
+				tokens +=
+					this.#tokenizer.countMessage(message, projectionOptions) -
+					this.#tokenizer.countMessages(convertToLlm([message]), projectionOptions);
+			} else if (message.images?.length) {
+				// Legacy archive images also retain their converted summary wrapper.
+				tokens += message.images.length * (snapcompact.FRAME_TOKEN_ESTIMATE - IMAGE_TOKEN_ESTIMATE);
+			}
+		}
 		return tokens;
 	}
 
@@ -4425,9 +4439,9 @@ export class SessionMaintenance {
 	 * entry falls through both and the session re-warns on every resume (the
 	 * shape issue #4786's rescue does not cover).
 	 *
-	 * Rebuilds the SAME archive locally — no LLM, no network — by re-running
-	 * `snapcompact.compact()` over the entry's carried-forward source text at
-	 * a maxFrames derived from the trigger threshold instead of the window.
+	 * Reframes the SAME mapped archive locally — no LLM, no network — at a
+	 * maxFrames derived from the trigger threshold instead of the window. Legacy
+	 * unmapped archives retain their explicit original-source migration pass.
 	 * The retained source stays fixed, so fewer frames may spill more text; the
 	 * prospective context must actually cost less before committing. The entry keeps
 	 * `firstKeptEntryId`, so the kept tail is untouched, and persisting
@@ -4458,10 +4472,8 @@ export class SessionMaintenance {
 		// shrinks the real culprit. Bail and let the elide/image tiers handle
 		// that tail instead.
 		let keptTailTokens = 0;
-		const recentSources: NonNullable<CompactionPreparation["recentSources"]> = [];
 		let inKeptRegion = false;
-		for (let order = 0; order < branchEntries.length; order++) {
-			const entry = branchEntries[order]!;
+		for (const entry of branchEntries) {
 			if (entry.id === staleEntry.firstKeptEntryId) inKeptRegion = true;
 			if (entry.id === staleEntry.id) {
 				// Everything after the archive is always kept.
@@ -4471,7 +4483,6 @@ export class SessionMaintenance {
 			if (!inKeptRegion) continue;
 			if (entry.type === "message") {
 				keptTailTokens += this.#tokenizer.countMessage(entry.message);
-				recentSources.push({ entryId: entry.id, order, message: entry.message });
 			} else if (entry.type === "custom_message" && isCustomMessageContent(entry.content)) {
 				const normalized = normalizeCustomMessagePayload(entry);
 				const message = createCustomMessage(
@@ -4483,7 +4494,6 @@ export class SessionMaintenance {
 					entry.attribution === undefined ? undefined : normalized.attribution,
 				);
 				keptTailTokens += this.#tokenizer.countMessage(message);
-				recentSources.push({ entryId: entry.id, order, message });
 			}
 		}
 		const archive = snapcompact.getPreservedArchive(staleEntry.preserveData);
@@ -4491,10 +4501,6 @@ export class SessionMaintenance {
 		const archiveText = snapcompact.archiveSourceText(archive);
 		if (!archiveText) return undefined;
 
-		const staleDetails = staleEntry.details as snapcompact.CompactionDetails | undefined;
-		const fileOps = snapcompact.createFileOps();
-		for (const file of staleDetails?.readFiles ?? []) fileOps.read.add(file);
-		for (const file of staleDetails?.modifiedFiles ?? []) fileOps.edited.add(file);
 		const operation = this.#captureCompactionOperation(signal);
 		await this.#preflightCompactionOperation(operation);
 		const legacyArchive = !getCompactionSourceRepresentation(staleEntry.preserveData);
@@ -4519,31 +4525,24 @@ export class SessionMaintenance {
 		const shape = snapcompact.resolveShapeForText(sourceText, this.#model, shapeSetting);
 		let result: snapcompact.CompactionResult;
 		try {
-			result = await snapcompact.compact(
-				legacyPreparation ?? {
-					firstKeptEntryId: staleEntry.firstKeptEntryId,
-					messagesToSummarize: [],
-					turnPrefixMessages: [],
-					sourcesToSummarize: [],
-					turnPrefixSources: [],
-					recentSources,
-					selectedSources: [
-						...(operation.selection.selectedSources ?? []),
-						...(operation.selection.admittedNonUserSources ?? []),
-					],
-					tokensBefore: staleEntry.tokensBefore,
-					previousSummary: staleEntry.summary,
-					previousPreserveData: staleEntry.preserveData,
-					fileOps,
-				},
-				{
-					convertToLlm,
-					model: this.#model,
-					...(shapeSetting === "auto" ? {} : { shape }),
-					maxFrames,
-					includeThinking,
-				},
-			);
+			const frameOptions = {
+				model: this.#model,
+				...(shapeSetting === "auto" ? {} : { shape }),
+				maxFrames,
+			};
+			result = legacyPreparation
+				? await snapcompact.compact(legacyPreparation, { ...frameOptions, convertToLlm, includeThinking })
+				: await snapcompact.reframe(
+						{
+							summary: staleEntry.summary,
+							shortSummary: staleEntry.shortSummary,
+							firstKeptEntryId: staleEntry.firstKeptEntryId,
+							tokensBefore: staleEntry.tokensBefore,
+							details: staleEntry.details as snapcompact.CompactionDetails | undefined,
+							preserveData: staleEntry.preserveData,
+						},
+						frameOptions,
+					);
 		} catch (error) {
 			logger.warn("Dead-end snapcompact frame rescue failed", {
 				error: error instanceof Error ? error.message : String(error),

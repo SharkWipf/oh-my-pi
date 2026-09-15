@@ -269,7 +269,12 @@ describe("IRC", () => {
 		it("send cannot outlive its sender while awaiting recipient revival", async () => {
 			const sender = makeFakeSession();
 			const recipient = makeFakeSession();
-			const senderRef = registry.register({ id: "0-Sender", displayName: "task", kind: "sub", session: sender.session });
+			const senderRef = registry.register({
+				id: "0-Sender",
+				displayName: "task",
+				kind: "sub",
+				session: sender.session,
+			});
 			registry.register({ id: "0-Parked", displayName: "task", kind: "sub", session: null, status: "parked" });
 			const started = Promise.withResolvers<void>();
 			const revived = Promise.withResolvers<AgentSession>();

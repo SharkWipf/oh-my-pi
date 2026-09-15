@@ -1309,7 +1309,8 @@ export class EventController {
 			for (let contentIndex = 0; contentIndex < this.ctx.streamingMessage.content.length; contentIndex++) {
 				const content = this.ctx.streamingMessage.content[contentIndex]!;
 				if (content.type !== "toolCall") continue;
-				const separatedFromPreviousTool = previousToolContentIndex >= 0 && contentIndex > previousToolContentIndex + 1;
+				const separatedFromPreviousTool =
+					previousToolContentIndex >= 0 && contentIndex > previousToolContentIndex + 1;
 				previousToolContentIndex = contentIndex;
 				// Re-key the live card when a provider rewrites this block's id
 				// across deltas, so the changed id reuses the existing card

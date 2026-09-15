@@ -5893,7 +5893,9 @@ describe("advisor", () => {
 					expect(requests[1]).not.toContain("old-conversation");
 					expect(requests[1]).not.toContain("advisor reset");
 					expect(
-						agent.state.messages.some(message => message.role === "assistant" && message.stopReason === "aborted"),
+						agent.state.messages.some(
+							message => message.role === "assistant" && message.stopReason === "aborted",
+						),
 					).toBe(false);
 					expect(runtime.yielded).toBe(true);
 				} finally {
@@ -5905,7 +5907,9 @@ describe("advisor", () => {
 		it.each(["error", "abort"] as const)(
 			"keeps genuine provider %s recovery and prior advisor history without an epoch change",
 			async failure => {
-				const mock = createMockModel({ responses: [{ content: ["prior review"] }, { content: ["recovered review"] }] });
+				const mock = createMockModel({
+					responses: [{ content: ["prior review"] }, { content: ["recovered review"] }],
+				});
 				const failedRequestStarted = Promise.withResolvers<AssistantMessageEventStream>();
 				const requests: string[] = [];
 				const observedFailures: AgentMessage[][] = [];
@@ -5944,7 +5948,9 @@ describe("advisor", () => {
 					expect(terminal?.role).toBe("assistant");
 					if (terminal?.role !== "assistant") throw new Error("Missing provider failure");
 					expect(terminal.stopReason).toBe(failure === "abort" ? "aborted" : "error");
-					expect(terminal.errorMessage).toBe(failure === "abort" ? "genuine advisor interruption" : "connection reset");
+					expect(terminal.errorMessage).toBe(
+						failure === "abort" ? "genuine advisor interruption" : "connection reset",
+					);
 					expect(requests[2]).toContain("prior review");
 					expect(requests[2]).toContain("prior conversation");
 					expect(requests[2].split("retry this update")).toHaveLength(2);

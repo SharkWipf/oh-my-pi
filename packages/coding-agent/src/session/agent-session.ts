@@ -374,7 +374,6 @@ import {
 	isTranscriptEntry,
 	isUserRequestEntry,
 	transcriptEntryMessage,
-	userTurnDraft,
 } from "./session-context";
 import { formatSessionDumpText } from "./session-dump-format";
 import type { BranchSummaryEntry, NewSessionOptions, SessionEntry, SessionMessageEntry } from "./session-entries";
@@ -11354,14 +11353,6 @@ export class AgentSession {
 				.join("");
 		}
 		return "";
-	}
-
-	/** Image parts of a stored user request, in submission order — index N-1 backs the
-	 *  `[Image #N]` marker in the message text, so restoring them alongside the text keeps
-	 *  positional markers resolvable on resubmit. */
-	#extractUserMessageImages(content: UserMessage["content"] | CustomMessage["content"]): ImageContent[] {
-		if (!Array.isArray(content)) return [];
-		return content.filter((c): c is ImageContent => c.type === "image");
 	}
 
 	/**

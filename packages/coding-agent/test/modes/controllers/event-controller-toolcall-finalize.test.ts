@@ -62,69 +62,101 @@ describe("EventController finalizes assistant block when tool-call args stream",
 		vi.restoreAllMocks();
 	});
 
-	it.each(["thinking", "text"] as const)("keeps late %s growth visible and releases closed prose to scrollback", async kind => {
-		await Settings.init({ inMemory: true, overrides: { "display.smoothStreaming": false } });
-		vi.useFakeTimers();
-		const terminal = new VirtualTerminal(100, kind === "text" ? 8 : 24);
-		const scheduler = new VirtualRenderScheduler();
-		const composer = new Composer({ terminal, tuiOptions: { renderScheduler: scheduler } });
-		let listener: ((event: AgentSessionEvent) => void) | undefined;
-		const ctx = createInteractiveModeContext({
-			ui: composer.ui,
-			hideThinkingBlock: false,
-			proseOnlyThinking: false,
-			session: { isStreaming: true, subscribe: callback => { listener = callback; return () => {}; } },
-		});
-		const controller = new EventController(ctx);
-		controller.subscribeToAgent();
-		composer.setRuntimeChildren([ctx.chatContainer, composer.editor]);
-		composer.start({ playWelcomeIntro: false });
-		const flush = async () => {
-			vi.advanceTimersByTime(34);
-			for (let i = 0; i < 12; i++) await Promise.resolve();
-			await scheduler.settle(terminal);
-		};
-		const send = (event: AssistantMessageEvent & { partial: AssistantMessage }) => {
-			listener?.({ type: "message_update", message: event.partial, assistantMessageEvent: event });
-		};
-		const tool = { type: "toolCall", id: "interleaved", name: "write", arguments: { path: "/fixture.ts", content: Array.from({ length: 40 }, (_, i) => `const row${i} = ${i};`).join("\n") } } as const;
-		const message = (text: string, later: boolean) => makeStreamingMessage([
-			kind === "thinking" ? { type: "thinking", thinking: text } : { type: "text", text },
-			...(later ? [kind === "thinking" ? { type: "text" as const, text: "VISIBLE_ANSWER" } : tool] : []),
-		]);
-		try {
-			listener?.({ type: "message_start", message: makeStreamingMessage([]) });
-			await flush();
-			for (const [text, later] of [["Planning", false], ["Planning", true], ["Planning next step", true]] as const) {
-				send({ type: kind === "thinking" ? "thinking_delta" : "text_delta", contentIndex: 0, delta: text, partial: message(text, later) });
+	it.each(["thinking", "text"] as const)(
+		"keeps late %s growth visible and releases closed prose to scrollback",
+		async kind => {
+			await Settings.init({ inMemory: true, overrides: { "display.smoothStreaming": false } });
+			vi.useFakeTimers();
+			const terminal = new VirtualTerminal(100, kind === "text" ? 8 : 24);
+			const scheduler = new VirtualRenderScheduler();
+			const composer = new Composer({ terminal, tuiOptions: { renderScheduler: scheduler } });
+			let listener: ((event: AgentSessionEvent) => void) | undefined;
+			const ctx = createInteractiveModeContext({
+				ui: composer.ui,
+				hideThinkingBlock: false,
+				proseOnlyThinking: false,
+				session: {
+					isStreaming: true,
+					subscribe: callback => {
+						listener = callback;
+						return () => {};
+					},
+				},
+			});
+			const controller = new EventController(ctx);
+			controller.subscribeToAgent();
+			composer.setRuntimeChildren([ctx.chatContainer, composer.editor]);
+			composer.start({ playWelcomeIntro: false });
+			const flush = async () => {
+				vi.advanceTimersByTime(34);
+				for (let i = 0; i < 12; i++) await Promise.resolve();
+				await scheduler.settle(terminal);
+			};
+			const send = (event: AssistantMessageEvent & { partial: AssistantMessage }) => {
+				listener?.({ type: "message_update", message: event.partial, assistantMessageEvent: event });
+			};
+			const tool = {
+				type: "toolCall",
+				id: "interleaved",
+				name: "write",
+				arguments: {
+					path: "/fixture.ts",
+					content: Array.from({ length: 40 }, (_, i) => `const row${i} = ${i};`).join("\n"),
+				},
+			} as const;
+			const message = (text: string, later: boolean) =>
+				makeStreamingMessage([
+					kind === "thinking" ? { type: "thinking", thinking: text } : { type: "text", text },
+					...(later ? [kind === "thinking" ? { type: "text" as const, text: "VISIBLE_ANSWER" } : tool] : []),
+				]);
+			try {
+				listener?.({ type: "message_start", message: makeStreamingMessage([]) });
 				await flush();
+				for (const [text, later] of [
+					["Planning", false],
+					["Planning", true],
+					["Planning next step", true],
+				] as const) {
+					send({
+						type: kind === "thinking" ? "thinking_delta" : "text_delta",
+						contentIndex: 0,
+						delta: text,
+						partial: message(text, later),
+					});
+					await flush();
+				}
+				const prose = `Planning next step\n\n${Array.from({ length: 45 }, (_, i) => `RETAINED_PROSE_${i}\n\n`).join("")}Still growing`;
+				const partial = message(prose, true);
+				send({
+					type: kind === "thinking" ? "thinking_delta" : "text_delta",
+					contentIndex: 0,
+					delta: prose,
+					partial,
+				});
+				await flush();
+				if (kind === "thinking") {
+					// The early paragraph must already be reachable in native history,
+					// not lost above a clipped live tail after a stale publication froze.
+					expect(terminal.getScrollBuffer().join("\n")).toContain("RETAINED_PROSE_0");
+				}
+				send({ type: kind === "thinking" ? "thinking_end" : "text_end", contentIndex: 0, content: prose, partial });
+				// A later delta in the same coalescing window must not erase the end.
+				const withTool = kind === "thinking" ? { ...partial, content: [...partial.content, tool] } : partial;
+				if (kind === "thinking") send({ type: "text_end", contentIndex: 1, content: "VISIBLE_ANSWER", partial });
+				send({ type: "toolcall_delta", contentIndex: withTool.content.length - 1, delta: "", partial: withTool });
+				await flush();
+				const screen = terminal.getScrollBuffer().join("\n");
+				expect(screen).toContain("RETAINED_PROSE_0");
+				expect(screen).toContain("RETAINED_PROSE_44");
+				expect(screen.indexOf("RETAINED_PROSE_0")).toBeLessThan(screen.indexOf("RETAINED_PROSE_44"));
+			} finally {
+				controller.dispose();
+				composer.stop();
+				ctx.chatContainer.dispose();
+				vi.useRealTimers();
 			}
-			const prose = `Planning next step\n\n${Array.from({ length: 45 }, (_, i) => `RETAINED_PROSE_${i}\n\n`).join("")}Still growing`;
-			const partial = message(prose, true);
-			send({ type: kind === "thinking" ? "thinking_delta" : "text_delta", contentIndex: 0, delta: prose, partial });
-			await flush();
-			if (kind === "thinking") {
-				// The early paragraph must already be reachable in native history,
-				// not lost above a clipped live tail after a stale publication froze.
-				expect(terminal.getScrollBuffer().join("\n")).toContain("RETAINED_PROSE_0");
-			}
-			send({ type: kind === "thinking" ? "thinking_end" : "text_end", contentIndex: 0, content: prose, partial });
-			// A later delta in the same coalescing window must not erase the end.
-			const withTool = kind === "thinking" ? { ...partial, content: [...partial.content, tool] } : partial;
-			if (kind === "thinking") send({ type: "text_end", contentIndex: 1, content: "VISIBLE_ANSWER", partial });
-			send({ type: "toolcall_delta", contentIndex: withTool.content.length - 1, delta: "", partial: withTool });
-			await flush();
-			const screen = terminal.getScrollBuffer().join("\n");
-			expect(screen).toContain("RETAINED_PROSE_0");
-			expect(screen).toContain("RETAINED_PROSE_44");
-			expect(screen.indexOf("RETAINED_PROSE_0")).toBeLessThan(screen.indexOf("RETAINED_PROSE_44"));
-		} finally {
-			controller.dispose();
-			composer.stop();
-			ctx.chatContainer.dispose();
-			vi.useRealTimers();
-		}
-	});
+		},
+	);
 
 	it("emits the per-turn usage row with the turn's local timestamp at message_end", async () => {
 		await Settings.init({ inMemory: true, cwd: process.cwd() });
@@ -185,7 +217,9 @@ describe("EventController retains local tool and post-tool bodies in native hist
 			await flush();
 		};
 		return {
-			terminal, flush, send,
+			terminal,
+			flush,
+			send,
 			update: (event: AssistantMessageEvent & { partial: AssistantMessage }) =>
 				send({ type: "message_update", message: event.partial, assistantMessageEvent: event }),
 			history: () => terminal.getScrollBuffer().slice(0, -terminal.rows).join("\n"),
@@ -218,8 +252,11 @@ describe("EventController retains local tool and post-tool bodies in native hist
 			const result = ["RESULT_FIRST", "RESULT_MIDDLE", "RESULT_LAST"].map(suffix => prefix + suffix);
 			const postTool = index === 0 ? ["TURN_0_POST_TOOL"] : [];
 			const tool = {
-				type: "toolCall" as const, id: "canonical-" + index, name: index % 2 ? "todo" : "eval",
-				arguments: index % 2 ? { op: "view" } : { language: "js", title: "Local cell " + index, code: "display(42)" },
+				type: "toolCall" as const,
+				id: "canonical-" + index,
+				name: index % 2 ? "todo" : "eval",
+				arguments:
+					index % 2 ? { op: "view" } : { language: "js", title: "Local cell " + index, code: "display(42)" },
 			};
 			await send({ type: "message_start", message: makeStreamingMessage([]) });
 			const preview = makeStreamingMessage([
@@ -235,7 +272,10 @@ describe("EventController retains local tool and post-tool bodies in native hist
 			});
 			await send({ type: "tool_execution_start", toolCallId: tool.id, toolName: tool.name, args: tool.arguments });
 			await send({
-				type: "tool_execution_end", toolCallId: tool.id, toolName: tool.name, isError: false,
+				type: "tool_execution_end",
+				toolCallId: tool.id,
+				toolName: tool.name,
+				isError: false,
 				result: { content: [{ type: "text", text: result.join("\n") }] },
 			});
 			retained.push(...prose, ...result, ...postTool);
@@ -248,19 +288,47 @@ describe("EventController retains local tool and post-tool bodies in native hist
 			expectOrderedOnce(terminal.getScrollBuffer().join("\n"), retained);
 			const initialTurns = retained.slice();
 
-			const running = { type: "toolCall" as const, id: "still-running", name: "eval", arguments: { language: "js", title: "Long local cell", code: "await work()" } };
+			const running = {
+				type: "toolCall" as const,
+				id: "still-running",
+				name: "eval",
+				arguments: { language: "js", title: "Long local cell", code: "await work()" },
+			};
 			await send({ type: "message_start", message: makeStreamingMessage([]) });
 			await send({ type: "message_end", message: makeStreamingMessage([running]) });
-			await send({ type: "tool_execution_start", toolCallId: running.id, toolName: running.name, args: running.arguments });
-			await send({ type: "tool_execution_update", toolCallId: running.id, toolName: running.name, args: running.arguments, partialResult: { content: [{ type: "text", text: "LIVE_BEFORE_RESIZE" }] } });
+			await send({
+				type: "tool_execution_start",
+				toolCallId: running.id,
+				toolName: running.name,
+				args: running.arguments,
+			});
+			await send({
+				type: "tool_execution_update",
+				toolCallId: running.id,
+				toolName: running.name,
+				args: running.arguments,
+				partialResult: { content: [{ type: "text", text: "LIVE_BEFORE_RESIZE" }] },
+			});
 			terminal.resize(76, 20);
 			await fixture.flush();
-			await send({ type: "tool_execution_update", toolCallId: running.id, toolName: running.name, args: running.arguments, partialResult: { content: [{ type: "text", text: "LIVE_AFTER_RESIZE" }] } });
+			await send({
+				type: "tool_execution_update",
+				toolCallId: running.id,
+				toolName: running.name,
+				args: running.arguments,
+				partialResult: { content: [{ type: "text", text: "LIVE_AFTER_RESIZE" }] },
+			});
 			expect(terminal.getViewport().join("\n")).toContain("LIVE_AFTER_RESIZE");
 			expect(fixture.history()).not.toContain("LIVE_AFTER_RESIZE");
 			expect(terminal.getScrollBuffer().join("\n")).not.toContain("LIVE_BEFORE_RESIZE");
 			const completed = ["COMPLETED_FIRST", "COMPLETED_MIDDLE", "COMPLETED_LAST"];
-			await send({ type: "tool_execution_end", toolCallId: running.id, toolName: running.name, isError: false, result: { content: [{ type: "text", text: completed.join("\n") }] } });
+			await send({
+				type: "tool_execution_end",
+				toolCallId: running.id,
+				toolName: running.name,
+				isError: false,
+				result: { content: [{ type: "text", text: completed.join("\n") }] },
+			});
 			await completeMessage(13);
 			await completeMessage(14);
 			expectOrderedOnce(fixture.history(), [...initialTurns, ...completed]);
@@ -270,39 +338,111 @@ describe("EventController retains local tool and post-tool bodies in native hist
 		}
 	});
 
-	it.each(["text", "thinking"] as const)("keeps indexed post-tool %s revisable until explicit ends release complete native history", async kind => {
-		const fixture = await createTerminalFixture();
-		const { send, update, terminal } = fixture;
-		const toolA = { type: "toolCall" as const, id: "tool-a", name: "eval", arguments: { language: "js", code: "display(1)" } };
-		const toolB = { ...toolA, id: "tool-b", arguments: { language: "js", code: "display(2)" } };
-		const proseBlock = (text: string): AssistantMessage["content"][number] => kind === "text" ? { type: "text", text } : { type: "thinking", thinking: text };
-		const child = kind === "text" ? { type: "thinking" as const, thinking: "CHILD_INITIAL" } : { type: "text" as const, text: "CHILD_INITIAL" };
-		const partial = (text: string, later: boolean) => makeStreamingMessage([toolA, proseBlock(text), ...(later ? [child, toolB] : [])]);
-		const delta = (text: string, later: boolean) => update({ type: kind === "text" ? "text_delta" : "thinking_delta", contentIndex: 1, delta: text, partial: partial(text, later) });
-		try {
-			await send({ type: "message_start", message: makeStreamingMessage([]) });
-			await update({ type: "toolcall_delta", contentIndex: 0, delta: "", partial: makeStreamingMessage([toolA]) });
-			await send({ type: "tool_execution_start", toolCallId: toolA.id, toolName: toolA.name, args: toolA.arguments });
-			await send({ type: "tool_execution_end", toolCallId: toolA.id, toolName: toolA.name, isError: false, result: { content: [{ type: "text", text: "TOOL_A_RESULT" }] } });
-			await delta("SEGMENT_INITIAL", false);
-			await delta("SEGMENT_INITIAL", true);
-			await delta("SEGMENT_INITIAL REVISED_AFTER_CHILD", true);
-			expect(terminal.getScrollBuffer().join("\n")).toContain("REVISED_AFTER_CHILD");
-			const rows = Array.from({ length: 36 }, (_, i) => "SEGMENT_ROW_" + String(i).padStart(2, "0"));
-			const prose = ["SEGMENT_INITIAL REVISED_AFTER_CHILD", ...rows, "SEGMENT_FINAL"].join("\n\n");
-			await delta(prose, true);
-			const final = partial(prose, true);
-			final.content[2] = kind === "text" ? { type: "thinking", thinking: "CHILD_INITIAL CHILD_FINAL" } : { type: "text", text: "CHILD_INITIAL CHILD_FINAL" };
-			await update({ type: kind === "text" ? "thinking_delta" : "text_delta", contentIndex: 2, delta: " CHILD_FINAL", partial: final });
-			// Full-message indices 1 and 2 must close local segment children 0 and 1.
-			await update({ type: kind === "text" ? "text_end" : "thinking_end", contentIndex: 1, content: prose, partial: final });
-			await update({ type: kind === "text" ? "thinking_end" : "text_end", contentIndex: 2, content: "CHILD_INITIAL CHILD_FINAL", partial: final });
-			await send({ type: "tool_execution_start", toolCallId: toolB.id, toolName: toolB.name, args: toolB.arguments });
-			await send({ type: "tool_execution_end", toolCallId: toolB.id, toolName: toolB.name, isError: false, result: { content: [{ type: "text", text: Array.from({ length: 30 }, (_, i) => "TOOL_B_ROW_" + i).join("\n") }] } });
-			// No message_end: explicit child ends and the later tool must release prose now.
-			expectOrderedOnce(fixture.history(), ["TOOL_A_RESULT", "REVISED_AFTER_CHILD", ...rows, "SEGMENT_FINAL", "CHILD_FINAL"]);
-		} finally {
-			fixture.close();
-		}
-	});
+	it.each(["text", "thinking"] as const)(
+		"keeps indexed post-tool %s revisable until explicit ends release complete native history",
+		async kind => {
+			const fixture = await createTerminalFixture();
+			const { send, update, terminal } = fixture;
+			const toolA = {
+				type: "toolCall" as const,
+				id: "tool-a",
+				name: "eval",
+				arguments: { language: "js", code: "display(1)" },
+			};
+			const toolB = { ...toolA, id: "tool-b", arguments: { language: "js", code: "display(2)" } };
+			const proseBlock = (text: string): AssistantMessage["content"][number] =>
+				kind === "text" ? { type: "text", text } : { type: "thinking", thinking: text };
+			const child =
+				kind === "text"
+					? { type: "thinking" as const, thinking: "CHILD_INITIAL" }
+					: { type: "text" as const, text: "CHILD_INITIAL" };
+			const partial = (text: string, later: boolean) =>
+				makeStreamingMessage([toolA, proseBlock(text), ...(later ? [child, toolB] : [])]);
+			const delta = (text: string, later: boolean) =>
+				update({
+					type: kind === "text" ? "text_delta" : "thinking_delta",
+					contentIndex: 1,
+					delta: text,
+					partial: partial(text, later),
+				});
+			try {
+				await send({ type: "message_start", message: makeStreamingMessage([]) });
+				await update({
+					type: "toolcall_delta",
+					contentIndex: 0,
+					delta: "",
+					partial: makeStreamingMessage([toolA]),
+				});
+				await send({
+					type: "tool_execution_start",
+					toolCallId: toolA.id,
+					toolName: toolA.name,
+					args: toolA.arguments,
+				});
+				await send({
+					type: "tool_execution_end",
+					toolCallId: toolA.id,
+					toolName: toolA.name,
+					isError: false,
+					result: { content: [{ type: "text", text: "TOOL_A_RESULT" }] },
+				});
+				await delta("SEGMENT_INITIAL", false);
+				await delta("SEGMENT_INITIAL", true);
+				await delta("SEGMENT_INITIAL REVISED_AFTER_CHILD", true);
+				expect(terminal.getScrollBuffer().join("\n")).toContain("REVISED_AFTER_CHILD");
+				const rows = Array.from({ length: 36 }, (_, i) => "SEGMENT_ROW_" + String(i).padStart(2, "0"));
+				const prose = ["SEGMENT_INITIAL REVISED_AFTER_CHILD", ...rows, "SEGMENT_FINAL"].join("\n\n");
+				await delta(prose, true);
+				const final = partial(prose, true);
+				final.content[2] =
+					kind === "text"
+						? { type: "thinking", thinking: "CHILD_INITIAL CHILD_FINAL" }
+						: { type: "text", text: "CHILD_INITIAL CHILD_FINAL" };
+				await update({
+					type: kind === "text" ? "thinking_delta" : "text_delta",
+					contentIndex: 2,
+					delta: " CHILD_FINAL",
+					partial: final,
+				});
+				// Full-message indices 1 and 2 must close local segment children 0 and 1.
+				await update({
+					type: kind === "text" ? "text_end" : "thinking_end",
+					contentIndex: 1,
+					content: prose,
+					partial: final,
+				});
+				await update({
+					type: kind === "text" ? "thinking_end" : "text_end",
+					contentIndex: 2,
+					content: "CHILD_INITIAL CHILD_FINAL",
+					partial: final,
+				});
+				await send({
+					type: "tool_execution_start",
+					toolCallId: toolB.id,
+					toolName: toolB.name,
+					args: toolB.arguments,
+				});
+				await send({
+					type: "tool_execution_end",
+					toolCallId: toolB.id,
+					toolName: toolB.name,
+					isError: false,
+					result: {
+						content: [{ type: "text", text: Array.from({ length: 30 }, (_, i) => "TOOL_B_ROW_" + i).join("\n") }],
+					},
+				});
+				// No message_end: explicit child ends and the later tool must release prose now.
+				expectOrderedOnce(fixture.history(), [
+					"TOOL_A_RESULT",
+					"REVISED_AFTER_CHILD",
+					...rows,
+					"SEGMENT_FINAL",
+					"CHILD_FINAL",
+				]);
+			} finally {
+				fixture.close();
+			}
+		},
+	);
 });

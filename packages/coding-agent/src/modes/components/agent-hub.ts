@@ -1535,8 +1535,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		}
 		void (async () => {
 			try {
-				const abort =
-					ref.status === "running" ? ref.session?.abort({ reason: USER_INTERRUPT_LABEL }) : undefined;
+				const abort = ref.status === "running" ? ref.session?.abort({ reason: USER_INTERRUPT_LABEL }) : undefined;
 				// Publish the terminal kill before awaiting the recoverable turn abort.
 				await Promise.all([abort, this.#lifecycle().release(ref.id, ref, { tombstone: true })]);
 			} catch (error) {

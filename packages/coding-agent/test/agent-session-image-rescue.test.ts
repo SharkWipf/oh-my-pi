@@ -56,7 +56,6 @@ async function createRescueFixture(tailImage: boolean, middleCharacters = 1_000_
 	const auth = createInMemoryAuthStorage();
 	auth.setRuntimeApiKey("openai", "isolated-no-provider");
 	const settings = Settings.isolated({
-		"requirements.enabled": false,
 		"snapcompact.shape": "8x13-bw",
 		"compaction.methodOrder": ["snapcompact"],
 		"compaction.keepUserMessages": true,
@@ -187,6 +186,9 @@ test("automatic frame rescue accepts a genuine reduction above the headroom band
 		settings.set("snapcompact.shape", "silver16-bw");
 		await session.compact(undefined, { mode: "snapcompact" });
 		settings.set("snapcompact.shape", "8x13-bw");
+		// The initial ordinary archive has already bounded the unselected middle.
+		// Exercise a smaller reframe that still exceeds the recovery band.
+		settings.set("compaction.thresholdTokens", 40_000);
 		await runAutomaticCompaction(fixture);
 		const entries = manager.getBranch().filter(entry => entry.type === "compaction");
 		const before = entries.at(-2);

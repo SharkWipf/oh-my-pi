@@ -57,7 +57,6 @@ function createRuntimeHarness(initialState?: GoalModeState) {
 }
 
 describe("GoalTool", () => {
-
 	it("rejects create when a goal already exists", async () => {
 		const harness = createRuntimeHarness({
 			enabled: true,

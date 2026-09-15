@@ -109,7 +109,11 @@ export function appendOutlineEntries(builder: ChatTranscriptBuilder, entries: Tr
 }
 
 /** Append one source while retaining target folding across cooperative yields. */
-export function appendOutlineEntry(builder: ChatTranscriptBuilder, entry: TranscriptEntry, targets: OutlineTarget[]): void {
+export function appendOutlineEntry(
+	builder: ChatTranscriptBuilder,
+	entry: TranscriptEntry,
+	targets: OutlineTarget[],
+): void {
 	const children = builder.container.children;
 	const before = children.length;
 	builder.append([entry]);
@@ -245,8 +249,10 @@ export function positionRail(
  */
 export function isUserTurnEntry(entry: TranscriptEntry): boolean {
 	if (entry.type === "message" && entry.message.role === "user") {
-		return userMessageHasText(entry.message) ||
-			(Array.isArray(entry.message.content) && entry.message.content.some(block => block.type === "image"));
+		return (
+			userMessageHasText(entry.message) ||
+			(Array.isArray(entry.message.content) && entry.message.content.some(block => block.type === "image"))
+		);
 	}
 	return isUserRequestEntry(entry);
 }
@@ -302,8 +308,14 @@ export class OutlineViewport {
 	moreAbove = false;
 	moreBelow = false;
 
-	configure(children: readonly Component[], target: OutlineTarget | undefined, width: number, height: number,
-		from = 0, to = children.length): void {
+	configure(
+		children: readonly Component[],
+		target: OutlineTarget | undefined,
+		width: number,
+		height: number,
+		from = 0,
+		to = children.length,
+	): void {
 		this.#children = children;
 		this.#target = target;
 		this.#width = width;
@@ -354,7 +366,7 @@ export class OutlineViewport {
 			if (head < tail) rows.push(...outlineRows(source.slice(head, tail), Math.max(10, this.#width - 4)));
 			rows.push(...source.slice(tail));
 		} else {
-			rows = this.#raw(index).map(row => row ? `  ${row}` : row);
+			rows = this.#raw(index).map(row => (row ? `  ${row}` : row));
 		}
 		this.#rows.set(index, rows);
 		return rows;
@@ -365,7 +377,10 @@ export class OutlineViewport {
 			this.#child = this.#unit(this.#child);
 			const length = this.#block(this.#child).length;
 			const remaining = Math.max(0, length - this.#row);
-			if (amount < remaining) { this.#row += amount; return; }
+			if (amount < remaining) {
+				this.#row += amount;
+				return;
+			}
 			amount -= remaining;
 			this.#child = this.#next(this.#child);
 			this.#row = 0;
@@ -462,4 +477,3 @@ export class OutlineViewport {
 		return this.#retained;
 	}
 }
-

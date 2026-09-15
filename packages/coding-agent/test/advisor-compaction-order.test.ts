@@ -136,7 +136,9 @@ describe("compaction before accepted advisor guidance", () => {
 			await h.run();
 			if (severity !== "blocker") {
 				expect(h.primary.calls).toHaveLength(1);
-				expect(h.agent.state.messages.filter(message => message.role === "custom" && message.customType === "advisor")).toHaveLength(1);
+				expect(
+					h.agent.state.messages.filter(message => message.role === "custom" && message.customType === "advisor"),
+				).toHaveLength(1);
 				await h.session.prompt("Continue with the preserved guidance");
 				await h.session.waitForIdle();
 			}
@@ -166,13 +168,17 @@ describe("compaction before accepted advisor guidance", () => {
 			advise: () => {
 				if (reviewed) return { content: ["review complete"] };
 				reviewed = true;
-				return { content: [{ type: "toolCall", name: "advise", arguments: { note: "done", severity: "blocker" } }] };
+				return {
+					content: [{ type: "toolCall", name: "advise", arguments: { note: "done", severity: "blocker" } }],
+				};
 			},
 		});
 		await h.run();
 		expect(h.summary.calls).toHaveLength(0);
 		expect(h.primary.calls).toHaveLength(1);
-		expect(h.agent.state.messages.some(message => message.role === "custom" && message.customType === "advisor")).toBe(false);
+		expect(
+			h.agent.state.messages.some(message => message.role === "custom" && message.customType === "advisor"),
+		).toBe(false);
 	});
 
 	it("forces requested guidance recovery even with automatic pressure maintenance disabled", async () => {
@@ -223,59 +229,67 @@ describe("compaction before accepted advisor guidance", () => {
 		expect(h.manager.getBranch().some(entry => entry.type === "compaction")).toBe(false);
 	});
 
-	it.each(["nit", "concern", "blocker"] as const)("compacts paired live tool history before accepted %s delivery", async severity => {
-		const started = Promise.withResolvers<void>();
-		const interrupted = Promise.withResolvers<void>();
-		let primaryCalls = 0;
-		let toolAborted = false;
-		const h = harness({
-			severity,
-			primary: () =>
-				++primaryCalls === 1
-					? { content: [{ type: "toolCall", id: "waiting", name: "wait", arguments: {} }] }
-					: { content: ["recovered"] },
-			tools: [
-				{
-					name: "wait",
-					label: "Wait",
-					description: "Wait for interrupt",
-					parameters: type({}),
-					intent: "omit",
-					interruptible: true,
-					execute: async (_id, _args, signal) => {
-						started.resolve();
-						if (signal?.aborted) interrupted.resolve();
-						else signal?.addEventListener("abort", () => interrupted.resolve(), { once: true });
-						await interrupted.promise;
-						toolAborted = signal?.aborted ?? false;
-						return { content: [{ type: "text", text: "WAIT_FINISHED" }] };
+	it.each(["nit", "concern", "blocker"] as const)(
+		"compacts paired live tool history before accepted %s delivery",
+		async severity => {
+			const started = Promise.withResolvers<void>();
+			const interrupted = Promise.withResolvers<void>();
+			let primaryCalls = 0;
+			let toolAborted = false;
+			const h = harness({
+				severity,
+				primary: () =>
+					++primaryCalls === 1
+						? { content: [{ type: "toolCall", id: "waiting", name: "wait", arguments: {} }] }
+						: { content: ["recovered"] },
+				tools: [
+					{
+						name: "wait",
+						label: "Wait",
+						description: "Wait for interrupt",
+						parameters: type({}),
+						intent: "omit",
+						interruptible: true,
+						execute: async (_id, _args, signal) => {
+							started.resolve();
+							if (signal?.aborted) interrupted.resolve();
+							else signal?.addEventListener("abort", () => interrupted.resolve(), { once: true });
+							await interrupted.promise;
+							toolAborted = signal?.aborted ?? false;
+							return { content: [{ type: "text", text: "WAIT_FINISHED" }] };
+						},
 					},
-				},
-			],
-		});
-		h.session.setInterruptMode("immediate");
-		const running = h.run();
-		try {
-			await started.promise;
-			await h.session.getAdvisorAgent()!.prompt("Inspect the stalled wait and advise the primary.");
-			if (severity === "nit") interrupted.resolve();
-			await running;
-			expect(toolAborted).toBe(severity !== "nit");
-			expect(h.primary.calls).toHaveLength(2);
-			const delivered = h.primary.calls.find(call => JSON.stringify(call.context.messages).includes(NOTE));
-			expect(JSON.stringify(delivered?.context.messages)).toContain("COMPACTED HISTORY");
-			expect(JSON.stringify(delivered?.context.messages)).toContain("WAIT_FINISHED");
-			const history = delivered!.context.messages;
-			const resultIndex = history.findIndex(message => message.role === "toolResult" && message.toolCallId === "waiting");
-			expect(resultIndex).toBeGreaterThan(0);
-			const call = history[resultIndex - 1];
-			expect(call?.role === "assistant" && call.content.some(block => block.type === "toolCall" && block.id === "waiting")).toBe(true);
-			expect(JSON.stringify(h.summary.calls[0].context.messages)).not.toContain(NOTE);
-			expect(h.manager.getBranch().filter(entry => entry.type === "compaction")).toHaveLength(1);
-		} finally {
-			interrupted.resolve();
-		}
-	});
+				],
+			});
+			h.session.setInterruptMode("immediate");
+			const running = h.run();
+			try {
+				await started.promise;
+				await h.session.getAdvisorAgent()!.prompt("Inspect the stalled wait and advise the primary.");
+				if (severity === "nit") interrupted.resolve();
+				await running;
+				expect(toolAborted).toBe(severity !== "nit");
+				expect(h.primary.calls).toHaveLength(2);
+				const delivered = h.primary.calls.find(call => JSON.stringify(call.context.messages).includes(NOTE));
+				expect(JSON.stringify(delivered?.context.messages)).toContain("COMPACTED HISTORY");
+				expect(JSON.stringify(delivered?.context.messages)).toContain("WAIT_FINISHED");
+				const history = delivered!.context.messages;
+				const resultIndex = history.findIndex(
+					message => message.role === "toolResult" && message.toolCallId === "waiting",
+				);
+				expect(resultIndex).toBeGreaterThan(0);
+				const call = history[resultIndex - 1];
+				expect(
+					call?.role === "assistant" &&
+						call.content.some(block => block.type === "toolCall" && block.id === "waiting"),
+				).toBe(true);
+				expect(JSON.stringify(h.summary.calls[0].context.messages)).not.toContain(NOTE);
+				expect(h.manager.getBranch().filter(entry => entry.type === "compaction")).toHaveLength(1);
+			} finally {
+				interrupted.resolve();
+			}
+		},
+	);
 
 	it("compacts before guidance accepted after the primary has gone idle", async () => {
 		const h = harness({ noAdvice: true });
@@ -342,7 +356,9 @@ describe("compaction before accepted advisor guidance", () => {
 		expect(aborted).toBe(false);
 		expect(h.primary.calls).toHaveLength(2);
 		expect(JSON.stringify(h.primary.calls[1].context.messages)).not.toContain(NOTE);
-		expect(h.agent.state.messages.filter(message => message.role === "custom" && message.customType === "advisor")).toHaveLength(1);
+		expect(
+			h.agent.state.messages.filter(message => message.role === "custom" && message.customType === "advisor"),
+		).toHaveLength(1);
 		expect(h.manager.getBranch().filter(entry => entry.type === "compaction")).toHaveLength(1);
 		expect(JSON.stringify(h.summary.calls[0].context.messages)).not.toContain(NOTE);
 		await h.session.prompt("Resume with the preserved guidance");

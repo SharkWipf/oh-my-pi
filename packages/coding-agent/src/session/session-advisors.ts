@@ -1413,7 +1413,8 @@ export class SessionAdvisors {
 				autoResumeSuppressed: this.#advisorAutoResumeSuppressed,
 				preserveOnly: this.#preserveAdvisorAdvice || terminalUnwindPreserve,
 				// Only a running loop consumes a steer at its next boundary.
-				streaming: this.#host.agent.state.isStreaming && !this.#preserveTerminalYieldAdvice && !terminalUnwindPreserve,
+				streaming:
+					this.#host.agent.state.isStreaming && !this.#preserveTerminalYieldAdvice && !terminalUnwindPreserve,
 				aborting: this.#host.abortInProgress(),
 				terminalAnswerNoQueuedWork,
 				interruptImmuneTurnActive: interrupting && this.#isAdvisorInterruptImmuneTurnActive(),

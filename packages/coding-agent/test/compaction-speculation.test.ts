@@ -87,7 +87,6 @@ describe("async speculative compaction", () => {
 			"compaction.thresholdPercent": 50,
 			"compaction.keepRecentTokens": 1,
 			"compaction.autoContinue": false,
-			"requirements.enabled": false,
 			"compaction.experimentalContextManagement": options.experimental ?? false,
 		});
 		maintenanceSettings = settings;

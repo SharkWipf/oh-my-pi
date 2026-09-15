@@ -41,7 +41,11 @@ it("reopens at the current source tail after navigation, append, branch and same
 				if (!(component instanceof RewindSelectorComponent)) throw new Error("Expected actual rewind selector");
 				mounted = component;
 				displayed.add(component);
-				return { hide() { mounted = undefined; } };
+				return {
+					hide() {
+						mounted = undefined;
+					},
+				};
 			},
 			setFocus() {},
 			requestRender() {},
@@ -53,7 +57,9 @@ it("reopens at the current source tail after navigation, append, branch and same
 		},
 		editor: {},
 		editorContainer: { children: [] },
-		showStatus(message: string) { throw new Error(message); },
+		showStatus(message: string) {
+			throw new Error(message);
+		},
 	} as unknown as InteractiveModeContext);
 	const open = async () => {
 		controller.showUserMessageSelector();
@@ -62,10 +68,12 @@ it("reopens at the current source tail after navigation, append, branch and same
 		await selector.ready;
 		return selector;
 	};
-	const outlined = (selector: RewindSelectorComponent) => selector.render(100)
-		.map(row => Bun.stripANSI(row))
-		.filter(row => row.includes(theme.boxDotted.vertical))
-		.join("\n");
+	const outlined = (selector: RewindSelectorComponent) =>
+		selector
+			.render(100)
+			.map(row => Bun.stripANSI(row))
+			.filter(row => row.includes(theme.boxDotted.vertical))
+			.join("\n");
 	try {
 		controller.showUserMessageSelector();
 		if (!mounted) throw new Error("Rewind overlay did not mount");

@@ -12,7 +12,12 @@ import {
 import type { MessageRenderer } from "../../extensibility/extensions/types";
 import type { TranscriptEntry } from "../../session/session-context";
 import { theme } from "../theme/theme";
-import { matchesAppToolsExpand, matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../utils/keybinding-matchers";
+import {
+	matchesAppToolsExpand,
+	matchesSelectCancel,
+	matchesSelectDown,
+	matchesSelectUp,
+} from "../utils/keybinding-matchers";
 import { ChatTranscriptBuilder } from "./chat-transcript-builder";
 import { DynamicBorder } from "./dynamic-border";
 import { fit } from "./overlay-box";
@@ -96,7 +101,9 @@ export class RewindSelectorComponent implements Component {
 		this.ready = typeof entries === "function" ? this.#loadSource(entries) : this.#buildIndex(entries);
 	}
 
-	get isLoading(): boolean { return this.#loading; }
+	get isLoading(): boolean {
+		return this.#loading;
+	}
 
 	async #loadSource(load: (signal: AbortSignal) => Promise<TranscriptEntry[]>): Promise<void> {
 		// The owner paints the cancellable overlay before acquisition starts.
@@ -131,7 +138,10 @@ export class RewindSelectorComponent implements Component {
 		this.#stopSlide();
 		this.#branchWork?.abort();
 		if (this.#branchesLoading || this.#columns.some(column => column.loading)) {
-			for (const column of this.#columns) { column.cancelled = true; column.builder?.dispose(); }
+			for (const column of this.#columns) {
+				column.cancelled = true;
+				column.builder?.dispose();
+			}
 			this.#columns = [];
 			this.#stripRoot = undefined;
 			this.#branchesLoading = false;
@@ -153,7 +163,9 @@ export class RewindSelectorComponent implements Component {
 		this.#scrollToSelection = true;
 	}
 
-	get targetCount(): number { return this.#targets.length; }
+	get targetCount(): number {
+		return this.#targets.length;
+	}
 
 	#newBuilder(): ChatTranscriptBuilder {
 		return new ChatTranscriptBuilder({
@@ -181,7 +193,10 @@ export class RewindSelectorComponent implements Component {
 		this.#sourceWork.abort();
 		this.#stopSlide();
 		this.#branchWork?.abort();
-		for (const column of this.#columns) { column.cancelled = true; column.builder?.dispose(); }
+		for (const column of this.#columns) {
+			column.cancelled = true;
+			column.builder?.dispose();
+		}
 		this.#builder.dispose();
 		this.#columns = [];
 	}
@@ -191,7 +206,10 @@ export class RewindSelectorComponent implements Component {
 		if (!target || !this.deps.siblingPaths) return [];
 		if (this.#stripRoot === target.turnId) return this.#columns;
 		this.#branchWork?.abort();
-		for (const column of this.#columns) { column.cancelled = true; column.builder?.dispose(); }
+		for (const column of this.#columns) {
+			column.cancelled = true;
+			column.builder?.dispose();
+		}
 		this.#stripRoot = target.turnId;
 		this.#columns = [];
 		this.#stripViewport = new OutlineViewport();
@@ -308,7 +326,10 @@ export class RewindSelectorComponent implements Component {
 			});
 			return;
 		}
-		if (matchesSelectCancel(data) || matchesKey(data, "escape")) { this.deps.onCancel(); return; }
+		if (matchesSelectCancel(data) || matchesKey(data, "escape")) {
+			this.deps.onCancel();
+			return;
+		}
 		if (matchesAppToolsExpand(data)) {
 			this.#expanded = !this.#expanded;
 			this.#builder.setExpanded(this.#expanded);
@@ -317,8 +338,14 @@ export class RewindSelectorComponent implements Component {
 			this.deps.requestRender();
 			return;
 		}
-		if (matchesSelectUp(data)) { this.#moveVertical(-1); return; }
-		if (matchesSelectDown(data)) { this.#moveVertical(1); return; }
+		if (matchesSelectUp(data)) {
+			this.#moveVertical(-1);
+			return;
+		}
+		if (matchesSelectDown(data)) {
+			this.#moveVertical(1);
+			return;
+		}
 		if (matchesKey(data, "left")) {
 			if (this.#activeVariant > 0) this.#slideTo(this.#activeVariant - 1);
 			else this.#move(-1, target => target.isUserTurn);
@@ -350,11 +377,19 @@ export class RewindSelectorComponent implements Component {
 	}
 
 	#moveVertical(delta: -1 | 1): void {
-		if (this.#activeVariant === 0) { this.#move(delta, () => true); return; }
+		if (this.#activeVariant === 0) {
+			this.#move(delta, () => true);
+			return;
+		}
 		const column = this.#stripColumns()[this.#activeVariant - 1]!;
 		const { builder, targets } = this.#materialize(column);
 		if (column.loading || column.error) return;
-		column.viewport.configure(builder.container.children, targets[this.#siblingSelected], this.#columnWidth(), this.#height);
+		column.viewport.configure(
+			builder.container.children,
+			targets[this.#siblingSelected],
+			this.#columnWidth(),
+			this.#height,
+		);
 		let index = this.#siblingSelected + delta;
 		while (index >= 0 && index < targets.length && !column.viewport.visible(targets[index]!)) index += delta;
 		if (index >= 0 && index < targets.length) {
@@ -370,7 +405,12 @@ export class RewindSelectorComponent implements Component {
 	}
 
 	#move(delta: -1 | 1, accept: (target: OutlineTarget) => boolean): void {
-		this.#viewport.configure(this.#builder.container.children, this.#targets[this.#selected], this.#width - 1, this.#height);
+		this.#viewport.configure(
+			this.#builder.container.children,
+			this.#targets[this.#selected],
+			this.#width - 1,
+			this.#height,
+		);
 		let index = this.#selected + delta;
 		while (index >= 0 && index < this.#targets.length) {
 			const target = this.#targets[index]!;
@@ -394,12 +434,18 @@ export class RewindSelectorComponent implements Component {
 				...this.#border.render(width),
 				" Rewind — indexing source messages",
 				...this.#border.render(width),
-				fit(this.#sourceCount === 0 ? " Collecting source messages; Esc cancels" : " " + this.#indexed + "/" + this.#sourceCount + " sources indexed; Esc cancels", width),
+				fit(
+					this.#sourceCount === 0
+						? " Collecting source messages; Esc cancels"
+						: " " + this.#indexed + "/" + this.#sourceCount + " sources indexed; Esc cancels",
+					width,
+				),
 				...Array.from({ length: Math.max(0, height - 5) }, () => ""),
 				...this.#border.render(width),
 			];
 		}
-		if (width !== this.#width || this.#height !== Math.max(3, (process.stdout.rows || 40) - CHROME_ROWS)) this.#scrollToSelection = true;
+		if (width !== this.#width || this.#height !== Math.max(3, (process.stdout.rows || 40) - CHROME_ROWS))
+			this.#scrollToSelection = true;
 		this.#width = width;
 		this.#height = Math.max(3, (process.stdout.rows || 40) - CHROME_ROWS);
 		const contentWidth = Math.max(1, width - 1);
@@ -425,20 +471,31 @@ export class RewindSelectorComponent implements Component {
 		this.#scrollToSelection = false;
 		const viewport = this.#activeViewport();
 		const output: string[] = [...this.#border.render(width)];
-		output.push(` ${theme.icon.rewind} ${theme.bold("Rewind")}${theme.sep.dot}${theme.fg("dim", "pick the point to continue from")}`);
+		output.push(
+			` ${theme.icon.rewind} ${theme.bold("Rewind")}${theme.sep.dot}${theme.fg("dim", "pick the point to continue from")}`,
+		);
 		output.push(...this.#border.render(width));
 		for (let row = 0; row < this.#height; row++) {
-			const rail = row === 0 && viewport.moreAbove ? "↑" : row === this.#height - 1 && viewport.moreBelow ? "↓" : " ";
+			const rail =
+				row === 0 && viewport.moreAbove ? "↑" : row === this.#height - 1 && viewport.moreBelow ? "↓" : " ";
 			output.push(fit(lines[row] ?? "", contentWidth) + theme.fg("dim", rail));
 		}
 		const position = this.#targets.length > 0 ? `${this.#selected + 1}/${this.#targets.length}  ` : "";
-		const lateral = this.#branchesLoading ? "loading branches" : this.#branchError ? "branch error: " + this.#branchError : columns.length > 0 ? "←/→ branches" : "←/→ user turns";
+		const lateral = this.#branchesLoading
+			? "loading branches"
+			: this.#branchError
+				? "branch error: " + this.#branchError
+				: columns.length > 0
+					? "←/→ branches"
+					: "←/→ user turns";
 		output.push(` ${theme.fg("dim", `${position}↑/↓ step  ${lateral}  enter rewind  ctrl+o expand  esc cancel`)}`);
 		output.push(...this.#border.render(width));
 		return output;
 	}
 
-	#columnWidth(): number { return Math.max(24, Math.floor((this.#width - 1 - STRIP_GAP) / 2)); }
+	#columnWidth(): number {
+		return Math.max(24, Math.floor((this.#width - 1 - STRIP_GAP) / 2));
+	}
 
 	#renderStrip(columns: SiblingColumn[], contentWidth: number): string[] {
 		const anchor = this.#targets[this.#selected]!;
@@ -446,7 +503,11 @@ export class RewindSelectorComponent implements Component {
 		const count = columns.length + 1;
 		const stride = colWidth + STRIP_GAP;
 		const totalWidth = count * stride - STRIP_GAP;
-		const cameraAt = (position: number) => Math.max(0, Math.min(position * stride - (contentWidth - colWidth) / 2, Math.max(0, totalWidth - contentWidth)));
+		const cameraAt = (position: number) =>
+			Math.max(
+				0,
+				Math.min(position * stride - (contentWidth - colWidth) / 2, Math.max(0, totalWidth - contentWidth)),
+			);
 		const camera = cameraAt(this.#slidePosition(Date.now()));
 		const railRows = count > 2 ? 2 : 0;
 		const capacity = Math.max(1, this.#height - railRows - 2);
@@ -469,7 +530,10 @@ export class RewindSelectorComponent implements Component {
 				const column = columns[index - 1]!;
 				const materialized = this.#materialize(column);
 				if (column.loading || column.error) {
-					const rows = [...this.#columnHeader(index, count, column.label, colWidth), fit(column.error ?? "Indexing branch sources…", colWidth)];
+					const rows = [
+						...this.#columnHeader(index, count, column.label, colWidth),
+						fit(column.error ?? "Indexing branch sources…", colWidth),
+					];
 					rendered.set(index, rows);
 					height = Math.max(height, rows.length);
 					continue;
@@ -491,14 +555,30 @@ export class RewindSelectorComponent implements Component {
 		for (let index = 0; index < columns.length; index++) {
 			if (!rendered.has(index + 1)) columns[index]!.builder?.releaseOutside(NO_COMPONENTS);
 		}
-		this.#prefixViewport.configure(this.#builder.container.children, undefined, contentWidth, Math.max(0, this.#height - railRows - height), 0, anchor.start);
+		this.#prefixViewport.configure(
+			this.#builder.container.children,
+			undefined,
+			contentWidth,
+			Math.max(0, this.#height - railRows - height),
+			0,
+			anchor.start,
+		);
 		this.#prefixViewport.end();
 		const lines = this.#prefixViewport.render();
 		for (const child of this.#prefixViewport.finish()) retained.add(child);
 		this.#builder.releaseOutside(retained);
 		if (count > 2) {
 			const settled = cameraAt(this.#activeVariant);
-			lines.push(positionRail(count, this.#activeVariant, settled > 0.5, settled + contentWidth < totalWidth - 0.5, contentWidth), "");
+			lines.push(
+				positionRail(
+					count,
+					this.#activeVariant,
+					settled > 0.5,
+					settled + contentWidth < totalWidth - 0.5,
+					contentWidth,
+				),
+				"",
+			);
 		}
 		for (let row = 0; row < height; row++) {
 			let line = "";
@@ -518,7 +598,10 @@ export class RewindSelectorComponent implements Component {
 	}
 
 	#columnHeader(index: number, count: number, label: string, columnWidth: number): string[] {
-		const caption = truncateToWidth(`${theme.icon.branch} ${index + 1}/${count} ${theme.sep.dot} ${label}`, columnWidth - 2);
+		const caption = truncateToWidth(
+			`${theme.icon.branch} ${index + 1}/${count} ${theme.sep.dot} ${label}`,
+			columnWidth - 2,
+		);
 		return [` ${theme.fg(index === this.#activeVariant ? "accent" : "dim", caption)}`, ""];
 	}
 }
