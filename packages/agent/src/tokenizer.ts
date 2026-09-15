@@ -221,9 +221,10 @@ export class Tokenizer {
 		}
 
 		switch (message.role) {
-			case "developer":
-			case "user": {
-				const content: string | Array<{ type: string; text?: string }> = message.content;
+			case "user":
+			case "developer": {
+				// Both roles carry text and images sent to the provider.
+				const content = message.content;
 				if (typeof content === "string") {
 					fragments.push(content);
 				} else if (Array.isArray(content)) {
@@ -271,6 +272,7 @@ export class Tokenizer {
 				}
 				break;
 			}
+			case "custom":
 			case "hookMessage":
 			case "toolResult": {
 				if (typeof message.content === "string") {

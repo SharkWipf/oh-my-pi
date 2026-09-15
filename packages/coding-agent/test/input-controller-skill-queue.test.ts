@@ -8,7 +8,7 @@
 import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { ImageContent, OriginalSubmission, TextContent } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -62,6 +62,7 @@ function createStubInputControllerContext(opts: {
 	skillCommands: Map<string, Skill>;
 	isStreaming: boolean;
 	isCompacting?: boolean;
+	loopModeEnabled?: boolean;
 }) {
 	let editorText = "";
 	const editor: StubEditor = {
@@ -99,12 +100,14 @@ function createStubInputControllerContext(opts: {
 	const reconcileOptimisticSkillMessage = vi.fn();
 	const clearOptimisticSkillMessage = vi.fn();
 	const queueCompactionMessage = vi.fn(
-		(text: string, mode: "steer" | "followUp", images?: ImageContent[], sourceCaptureId?: string) => {
-			compactionQueuedMessages.push({ text, mode, images, sourceCaptureId });
+		(text: string, mode: "steer" | "followUp", images?: ImageContent[], originalSubmission?: OriginalSubmission) => {
+			compactionQueuedMessages.push({ text, mode, images, originalSubmission });
 		},
 	);
 	const sessionManager = SessionManager.inMemory();
 	const compactionQueuedMessages: CompactionQueuedMessage[] = [];
+	const setLoopPrompt = vi.fn((_prompt: string) => {});
+	const armLoopAutoSubmit = vi.fn();
 	const ctx = {
 		sessionManager,
 		editor,
@@ -129,8 +132,10 @@ function createStubInputControllerContext(opts: {
 		updatePendingMessagesDisplay,
 		isBashMode: false,
 		isPythonMode: false,
-		loopModeEnabled: false,
 		compactionQueuedMessages,
+		loopModeEnabled: opts.loopModeEnabled ?? false,
+		setLoopPrompt,
+		armLoopAutoSubmit,
 		locallySubmittedUserSignatures: new Set<string>(),
 		withLocalSubmission: async (_text: string, fn: () => unknown) => fn(),
 		queueCompactionMessage,
@@ -153,6 +158,8 @@ function createStubInputControllerContext(opts: {
 		renderOptimisticSkillMessage,
 		reconcileOptimisticSkillMessage,
 		clearOptimisticSkillMessage,
+		setLoopPrompt,
+		armLoopAutoSubmit,
 	};
 }
 
@@ -185,6 +192,40 @@ describe("InputController skill queue chip metadata", () => {
 
 		expect(ctx.compactionQueuedMessages.map(message => message.text)).toEqual(["/skill:test-skill arg1 arg2"]);
 		expect(promptCustomMessage).not.toHaveBeenCalled();
+	});
+
+	it("captures the loop prompt for a /skill: submission (regression: /loop never resubmitted a skill prompt)", async () => {
+		const { ctx, editor, promptCustomMessage, setLoopPrompt, armLoopAutoSubmit } = createStubInputControllerContext({
+			skillCommands,
+			isStreaming: false,
+			loopModeEnabled: true,
+		});
+		const controller = new InputController(ctx);
+
+		controller.setupEditorSubmitHandler();
+		editor.setText("/skill:test-skill arg1 arg2");
+		await editor.onSubmit?.("/skill:test-skill arg1 arg2");
+
+		expect(setLoopPrompt).toHaveBeenCalledWith("/skill:test-skill arg1 arg2");
+		expect(promptCustomMessage).toHaveBeenCalledTimes(1);
+		expect(armLoopAutoSubmit).toHaveBeenCalledTimes(1);
+	});
+
+	it("captures the loop prompt for a /skill: submission queued during compaction", async () => {
+		const { ctx, editor, setLoopPrompt } = createStubInputControllerContext({
+			skillCommands,
+			isStreaming: false,
+			isCompacting: true,
+			loopModeEnabled: true,
+		});
+		const controller = new InputController(ctx);
+
+		controller.setupEditorSubmitHandler();
+		editor.setText("/skill:test-skill arg1 arg2");
+		await editor.onSubmit?.("/skill:test-skill arg1 arg2");
+
+		expect(setLoopPrompt).toHaveBeenCalledWith("/skill:test-skill arg1 arg2");
+		expect(ctx.compactionQueuedMessages).toMatchObject([{ text: "/skill:test-skill arg1 arg2", mode: "steer" }]);
 	});
 
 	it("streaming follow-up applies builtin slash commands instead of queueing them", async () => {
@@ -320,7 +361,7 @@ describe("compaction skill re-invocation", () => {
 		return call;
 	}
 
-	function createCompactionDrainContext(queuedMessages: CompactionQueuedMessage[]) {
+	function createCompactionDrainContext(queuedMessages: CompactionQueuedMessage[], loopModeEnabled = false) {
 		const promptCustomMessageCalled = Promise.withResolvers<void>();
 		const promptCustomMessage: PromptCustomMessage = vi.fn(async () => {
 			promptCustomMessageCalled.resolve();
@@ -329,10 +370,13 @@ describe("compaction skill re-invocation", () => {
 		const steer = vi.fn(async (_text: string, _images?: ImageContent[]) => {});
 		const followUp = vi.fn(async (_text: string, _images?: ImageContent[]) => {});
 		const sessionManager = SessionManager.inMemory();
+		const armLoopAutoSubmit = vi.fn();
 		const ctx = {
 			sessionManager,
 			skillCommands,
 			compactionQueuedMessages: queuedMessages,
+			loopModeEnabled,
+			armLoopAutoSubmit,
 			updatePendingMessagesDisplay: vi.fn(),
 			showError: vi.fn(),
 			isKnownSlashCommand: vi.fn(() => false),
@@ -347,7 +391,7 @@ describe("compaction skill re-invocation", () => {
 				clearQueue: vi.fn(),
 			},
 		} as unknown as InteractiveModeContext;
-		return { ctx, promptCustomMessage, promptCustomMessageCalled, prompt, steer, followUp };
+		return { ctx, promptCustomMessage, promptCustomMessageCalled, prompt, steer, followUp, armLoopAutoSubmit };
 	}
 
 	beforeEach(async () => {
@@ -359,6 +403,19 @@ describe("compaction skill re-invocation", () => {
 	afterEach(() => {
 		tempDir.removeSync();
 		vi.restoreAllMocks();
+	});
+
+	it("arms the loop after re-invoking a queued skill (regression: /loop never resubmitted after compaction)", async () => {
+		const { ctx, promptCustomMessageCalled, armLoopAutoSubmit } = createCompactionDrainContext(
+			[{ text: "/skill:test-skill arg1 arg2", mode: "steer" }],
+			true,
+		);
+		const uiHelpers = new UiHelpers(ctx);
+
+		await uiHelpers.flushCompactionQueue({ willRetry: false });
+		await promptCustomMessageCalled;
+
+		expect(armLoopAutoSubmit).toHaveBeenCalledTimes(1);
 	});
 
 	it("re-invokes a queued skill as a user-attributed skill prompt", async () => {

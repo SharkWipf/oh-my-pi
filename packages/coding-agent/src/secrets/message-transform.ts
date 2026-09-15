@@ -1,5 +1,15 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ComputerToolCallMetadata, ComputerToolResultMetadata, Context, ImageContent, Message, TextContent } from "@oh-my-pi/pi-ai";
+import type {
+	AnthropicCompactionPayload,
+	AssistantMessage,
+	ComputerToolCallMetadata,
+	ComputerToolResultMetadata,
+	Context,
+	ImageContent,
+	Message,
+	ProviderPayload,
+	TextContent,
+} from "@oh-my-pi/pi-ai";
 import { combineContentSourceOrigins, exportItemOrigins, getSourceOrigin, importItemOrigins, setSourceOrigin, transferTransformedSourceOrigin, validateNativeItemOrigins } from "@oh-my-pi/pi-ai/utils/source-origin";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { SessionContext } from "../session/session-context";
@@ -94,9 +104,8 @@ export function deobfuscateAssistantContent(
 }
 
 /**
- * Restore placeholders inside a tool call's arguments. Arguments are arbitrary
- * model-authored JSON, so tool-call arguments are the ONLY place a recursive
- * JSON walk runs.
+ * Restore placeholders in model-authored argument values. Argument keys name
+ * tool parameters and must remain unchanged.
  */
 export function deobfuscateToolArguments(
 	obfuscator: SecretObfuscator,
@@ -115,6 +124,383 @@ export function obfuscateToolArguments(
 	if (!obfuscator.hasSecrets()) return args;
 	const regexSecretValues = sharedRegexSecretValues ?? collectJsonRegexSecretValues(obfuscator, args as JsonValue);
 	return mapJsonStrings(args as JsonValue, s => obfuscator.obfuscate(s, regexSecretValues)) as Record<string, unknown>;
+}
+
+/** Copy native replay containers only when a provider-visible plaintext field changes. */
+function mapNativeArray(value: unknown, transform: (value: unknown) => unknown): unknown {
+	if (!Array.isArray(value)) return value;
+	let result: unknown[] | undefined;
+	for (let index = 0; index < value.length; index++) {
+		const next = transform(value[index]);
+		if (next !== value[index]) {
+			result ??= value.slice();
+			result![index] = next;
+		}
+	}
+	return result ?? value;
+}
+
+function mapNativeField(
+	item: Record<string, unknown>,
+	key: string,
+	transform: (value: unknown) => unknown,
+): Record<string, unknown> {
+	const next = transform(item[key]);
+	return next === item[key] ? item : transferTransformedSourceOrigin(item, { ...item, [key]: next });
+}
+
+/** Schema maps name properties/definitions; their keys are identifiers, not annotations. */
+function mapNativeSchemaMap(value: unknown, transform: (text: string) => string): unknown {
+	if (!isRecord(value)) return value;
+	let mapped: Record<string, unknown> | undefined;
+	for (const key in value) {
+		if (!Object.hasOwn(value, key)) continue;
+		// Legacy dependencies can contain property-name arrays instead of schemas.
+		const next = Array.isArray(value[key]) ? value[key] : mapNativeSchema(value[key], transform);
+		if (next !== value[key]) {
+			mapped ??= { ...value };
+			mapped[key] = next;
+		}
+	}
+	return mapped ?? value;
+}
+
+/** Walk schema-valued positions, rewriting only descriptive annotations and examples. */
+function mapNativeSchema(value: unknown, transform: (text: string) => string): unknown {
+	if (!isRecord(value)) return value;
+	let mapped: Record<string, unknown> | undefined;
+	for (const key in value) {
+		if (!Object.hasOwn(value, key)) continue;
+		const child = value[key];
+		let next: unknown;
+		switch (key) {
+			case "title":
+			case "description":
+			case "$comment":
+			case "example":
+			case "examples":
+				next = mapJsonStrings(child as JsonValue, transform);
+				break;
+			case "properties":
+			case "patternProperties":
+			case "$defs":
+			case "definitions":
+			case "dependentSchemas":
+			case "dependencies":
+				next = mapNativeSchemaMap(child, transform);
+				break;
+			case "items":
+			case "additionalItems":
+			case "additionalProperties":
+			case "unevaluatedItems":
+			case "unevaluatedProperties":
+			case "contains":
+			case "propertyNames":
+			case "not":
+			case "if":
+			case "then":
+			case "else":
+			case "contentSchema":
+			case "allOf":
+			case "anyOf":
+			case "oneOf":
+			case "prefixItems":
+				next = Array.isArray(child)
+					? mapNativeArray(child, schema => mapNativeSchema(schema, transform))
+					: mapNativeSchema(child, transform);
+				break;
+			default:
+				// Constraints (including enum/const), execution defaults and unknown
+				// extensions are not prose. Rewriting them can invalidate tool inputs.
+				continue;
+		}
+		if (next !== child) {
+			mapped ??= { ...value };
+			mapped[key] = next;
+		}
+	}
+	return mapped ?? value;
+}
+
+/** Dynamic history definitions only; static request tools are intentionally outside this visitor. */
+function mapNativeToolDefinition(value: unknown, transform: (text: string) => string): unknown {
+	if (!isRecord(value)) return value;
+	const text = (value: unknown): unknown => (typeof value === "string" ? transform(value) : value);
+	switch (value.type) {
+		case "function":
+		case "tool_search":
+			return mapNativeField(mapNativeField(value, "description", text), "parameters", schema =>
+				mapNativeSchema(schema, transform),
+			);
+		case "namespace":
+			return mapNativeField(mapNativeField(value, "description", text), "tools", tools =>
+				mapNativeArray(tools, tool => mapNativeToolDefinition(tool, transform)),
+			);
+		case "custom":
+			// Grammar definitions are executable validation controls, not prose.
+			return mapNativeField(value, "description", text);
+		case "mcp":
+			// Connection credentials, endpoints and tool/approval selectors are transport controls.
+			return mapNativeField(value, "server_description", text);
+		case "shell":
+			return mapNativeField(value, "environment", environment => {
+				if (!isRecord(environment) || (environment.type !== "local" && environment.type !== "container_auto"))
+					return environment;
+				return mapNativeField(environment, "skills", skills =>
+					mapNativeArray(skills, skill => {
+						// Only descriptions are prose; references, paths and bundled bytes stay opaque.
+						if (!isRecord(skill) || (environment.type === "container_auto" && skill.type !== "inline"))
+							return skill;
+						return mapNativeField(skill, "description", text);
+					}),
+				);
+			});
+		default:
+			return value;
+	}
+}
+
+/**
+ * Responses history is a protocol, not arbitrary JSON. Only its plaintext slots
+ * are walked; encrypted reasoning, IDs, tool names, images and file bytes stay
+ * opaque. The same walk collects collisions and rewrites replay/preserve data.
+ */
+function mapNativeReplayItem(value: unknown, transform: (text: string) => string): unknown {
+	if (!isRecord(value)) return value;
+	const text = (value: unknown): unknown => (typeof value === "string" ? transform(value) : value);
+	const content = (value: unknown): unknown =>
+		typeof value === "string"
+			? transform(value)
+			: mapNativeArray(value, part => mapNativeReplayItem(part, transform));
+	const args = (value: unknown): unknown => {
+		if (typeof value !== "string") return mapJsonStrings(value as JsonValue, transform);
+		let parsed: JsonValue;
+		try {
+			parsed = JSON.parse(value) as JsonValue;
+		} catch {
+			return transform(value);
+		}
+		const next = mapJsonStrings(parsed, transform);
+		return next === parsed ? value : JSON.stringify(next);
+	};
+	switch (value.type) {
+		case undefined:
+			if (
+				value.role !== "user" &&
+				value.role !== "assistant" &&
+				value.role !== "developer" &&
+				value.role !== "system"
+			)
+				return value;
+			return mapNativeField(value, "content", content);
+		case "message":
+			return mapNativeField(value, "content", content);
+		case "input_text":
+		case "output_text":
+		case "summary_text":
+		case "reasoning_text":
+			return mapNativeField(value, "text", text);
+		case "refusal":
+			return mapNativeField(value, "refusal", text);
+		case "reasoning":
+			return mapNativeField(mapNativeField(value, "summary", content), "content", content);
+		case "compaction":
+		case "compaction_summary":
+			return mapNativeField(value, "summary", content);
+		case "function_call":
+			// Nonempty encrypted argument metadata denotes opaque collaboration data.
+			if (Array.isArray(value.encrypted_function_args) && value.encrypted_function_args.length > 0) return value;
+			return mapNativeField(value, "arguments", args);
+		case "file_search_call":
+			return mapNativeField(
+				mapNativeField(value, "queries", queries => mapNativeArray(queries, text)),
+				"results",
+				results =>
+					mapNativeArray(results, result => {
+						if (!isRecord(result)) return result;
+						return mapNativeField(
+							mapNativeField(mapNativeField(result, "text", text), "filename", text),
+							"attributes",
+							attributes => {
+								if (!isRecord(attributes)) return attributes;
+								// File-search attributes are a flat string/number/boolean map, not arbitrary JSON.
+								let mapped: Record<string, unknown> | undefined;
+								for (const key of Object.keys(attributes)) {
+									const next = text(attributes[key]);
+									if (next !== attributes[key]) {
+										mapped ??= { ...attributes };
+										mapped[key] = next;
+									}
+								}
+								return mapped ?? attributes;
+							},
+						);
+					}),
+			);
+		case "web_search_call":
+			return mapNativeField(value, "action", action => {
+				if (!isRecord(action)) return action;
+				switch (action.type) {
+					case "search":
+						return mapNativeField(
+							mapNativeField(
+								mapNativeField(action, "queries", queries => mapNativeArray(queries, text)),
+								"query",
+								text,
+							),
+							"sources",
+							sources =>
+								mapNativeArray(sources, source =>
+									isRecord(source) && source.type === "url" ? mapNativeField(source, "url", text) : source,
+								),
+						);
+					case "open_page":
+						return mapNativeField(action, "url", text);
+					case "find_in_page":
+						return mapNativeField(mapNativeField(action, "pattern", text), "url", text);
+					default:
+						return action;
+				}
+			});
+		case "tool_search_call":
+		case "mcp_approval_request":
+			return mapNativeField(value, "arguments", args);
+		case "tool_search_output":
+		case "additional_tools":
+			return mapNativeField(value, "tools", tools =>
+				mapNativeArray(tools, tool => mapNativeToolDefinition(tool, transform)),
+			);
+		case "mcp_call":
+			return mapNativeField(mapNativeField(mapNativeField(value, "arguments", args), "output", text), "error", text);
+		case "custom_tool_call":
+			return mapNativeField(value, "input", text);
+		case "function_call_output":
+		case "custom_tool_call_output":
+		case "local_shell_call_output":
+		case "apply_patch_call_output":
+			return mapNativeField(value, "output", content);
+		case "code_interpreter_call":
+			return mapNativeField(mapNativeField(value, "code", text), "outputs", content);
+		case "logs":
+			return mapNativeField(value, "logs", text);
+		case "computer_call":
+			return mapNativeField(
+				mapNativeField(value, "action", action => mapNativeReplayItem(action, transform)),
+				"actions",
+				content,
+			);
+		case "type":
+			return mapNativeField(value, "text", text);
+		case "shell_call":
+		case "local_shell_call":
+			return mapNativeField(value, "action", action => {
+				if (!isRecord(action)) return action;
+				let result = mapNativeField(action, "commands", commands => mapNativeArray(commands, text));
+				result = mapNativeField(result, "command", command => mapNativeArray(command, text));
+				result = mapNativeField(result, "env", env => mapJsonStrings(env as JsonValue, transform));
+				return mapNativeField(result, "working_directory", text);
+			});
+		case "shell_call_output":
+			return mapNativeField(value, "output", output =>
+				mapNativeArray(output, part =>
+					isRecord(part) ? mapNativeField(mapNativeField(part, "stdout", text), "stderr", text) : part,
+				),
+			);
+		case "apply_patch_call":
+			return mapNativeField(value, "operation", operation =>
+				isRecord(operation) ? mapNativeField(mapNativeField(operation, "path", text), "diff", text) : operation,
+			);
+		case "mcp_list_tools":
+			return mapNativeField(mapNativeField(value, "error", text), "tools", tools =>
+				mapNativeArray(tools, tool => {
+					if (!isRecord(tool)) return tool;
+					return mapNativeField(
+						mapNativeField(mapNativeField(tool, "description", text), "input_schema", schema =>
+							mapNativeSchema(schema, transform),
+						),
+						"annotations",
+						annotations => mapJsonStrings(annotations as JsonValue, transform),
+					);
+				}),
+			);
+		case "mcp_approval_response":
+			return mapNativeField(value, "reason", text);
+		default:
+			return value;
+	}
+}
+
+/** Collect native plaintext before any replay fields lose regex values through redaction. */
+export function collectNativeReplayRegexSecretValues(
+	obfuscator: SecretObfuscator,
+	message: { providerPayload?: ProviderPayload; preserveData?: Record<string, unknown> },
+	values: Set<string>,
+): void {
+	if (!obfuscator.hasSecrets()) return;
+	const payload = message.providerPayload;
+	const remote = message.preserveData?.openaiRemoteCompaction;
+	if (payload?.type !== "openaiResponsesHistory" && !isRecord(remote)) return;
+	const collectItem = (item: unknown): unknown =>
+		mapNativeReplayItem(item, text => {
+			for (const value of obfuscator.collectRegexSecretValuesForObfuscation(text)) values.add(value);
+			return text;
+		});
+	if (payload?.type === "openaiResponsesHistory") mapNativeArray(payload.items, collectItem);
+	if (isRecord(remote)) {
+		if (payload?.type !== "openaiResponsesHistory" || remote.replacementHistory !== payload.items) {
+			mapNativeArray(remote.replacementHistory, collectItem);
+		}
+		collectItem(remote.compactionItem);
+	}
+}
+
+/** Re-obfuscate native replay and its next-compaction source with one collision set. */
+export function obfuscateNativeReplay<
+	T extends { providerPayload?: ProviderPayload; preserveData?: Record<string, unknown> },
+>(obfuscator: SecretObfuscator, message: T, sharedRegexSecretValues: ReadonlySet<string>): T {
+	if (!obfuscator.hasSecrets()) return message;
+	const payload = message.providerPayload;
+	const remote = message.preserveData?.openaiRemoteCompaction;
+	if (payload?.type !== "openaiResponsesHistory" && !isRecord(remote)) return message;
+	const transform = (text: string): string => obfuscator.obfuscate(text, sharedRegexSecretValues);
+	const mapItem = (item: unknown): unknown => {
+		const mapped = mapNativeReplayItem(item, transform);
+		return mapped !== item && isRecord(item) && isRecord(mapped)
+			? transferTransformedSourceOrigin(item, mapped) : mapped;
+	};
+	if (payload?.type === "openaiResponsesHistory") {
+		importItemOrigins(payload.items, validateNativeItemOrigins(payload.origins));
+	}
+	const items = payload?.type === "openaiResponsesHistory" ? mapNativeArray(payload.items, mapItem) : undefined;
+	const providerPayload =
+		payload?.type === "openaiResponsesHistory" && items !== payload.items
+			? { ...payload, items: items as Array<Record<string, unknown>>, origins: exportItemOrigins(items as Array<Record<string, unknown>>) }
+			: payload;
+	let preserveData = message.preserveData;
+	if (isRecord(remote)) {
+		const replacementHistory =
+			payload?.type === "openaiResponsesHistory" && remote.replacementHistory === payload.items
+				? items
+				: mapNativeArray(remote.replacementHistory, mapItem);
+		const compactionItem = mapItem(remote.compactionItem);
+		if (replacementHistory !== remote.replacementHistory || compactionItem !== remote.compactionItem) {
+			preserveData = {
+				...preserveData,
+				openaiRemoteCompaction: {
+					...remote,
+					replacementHistory,
+					...(compactionItem !== remote.compactionItem ? { compactionItem } : {}),
+				},
+			};
+		}
+	}
+	return providerPayload === payload && preserveData === message.preserveData
+		? message
+		: transferTransformedSourceOrigin(message, {
+				...message,
+				...(providerPayload !== payload ? { providerPayload } : {}),
+				...(preserveData !== message.preserveData ? { preserveData } : {}),
+			});
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -255,46 +641,12 @@ function mapAssistantMetadata(block: AssistantMessage["content"][number], map: (
 	return content === server.content ? block : transferTransformedSourceOrigin(block, { ...block, block: { ...server, content } });
 }
 
-function mapNativeSearchItem(item: Record<string, unknown>, map: (text: string) => string): Record<string, unknown> {
-	if (item.type !== "web_search_call" || !isRecord(item.action)) return item;
-	const action = item.action;
-	if (action.type === "search") {
-		const query = typeof action.query === "string" ? map(action.query) : action.query;
-		const queries = Array.isArray(action.queries) ? mapChanged(action.queries, query => typeof query === "string" ? map(query) : query) : action.queries;
-		const sources = Array.isArray(action.sources) ? mapChanged(action.sources, source => {
-			if (!isRecord(source) || source.type !== "url" || typeof source.url !== "string") return source;
-			const url = map(source.url);
-			return url === source.url ? source : { ...source, url };
-		}) : action.sources;
-		return query === action.query && queries === action.queries && sources === action.sources
-			? item : { ...item, action: { ...action, ...(query !== action.query ? { query } : {}), ...(queries !== action.queries ? { queries } : {}), ...(sources !== action.sources ? { sources } : {}) } };
-	}
-	if (action.type === "open_page" || action.type === "find_in_page") {
-		const url = typeof action.url === "string" ? map(action.url) : action.url;
-		const pattern = action.type === "find_in_page" && typeof action.pattern === "string" ? map(action.pattern) : action.pattern;
-		return url === action.url && pattern === action.pattern ? item
-			: { ...item, action: { ...action, ...(url !== action.url ? { url } : {}), ...(pattern !== action.pattern ? { pattern } : {}) } };
-	}
-	return item;
-}
-
 /** Only provider-visible typed fields; identifiers, opaque replay state and image bytes stay untouched. */
 function mapVisibleMetadata(message: Message, map: (text: string) => string): Message {
 	if (message.role === "assistant") {
 		const content = mapChanged(message.content, block => mapAssistantMetadata(block, map));
-		let providerPayload = message.providerPayload;
-		if (providerPayload?.type === "openaiResponsesHistory") {
-			const items = mapChanged(providerPayload.items, item => mapNativeSearchItem(item, map));
-			if (items !== providerPayload.items) {
-				importItemOrigins(providerPayload.items, validateNativeItemOrigins(providerPayload.origins));
-				for (let index = 0; index < items.length; index++) {
-					if (items[index] !== providerPayload.items[index]) transferTransformedSourceOrigin(providerPayload.items[index]!, items[index]!);
-				}
-				providerPayload = { ...providerPayload, items, origins: exportItemOrigins(items) };
-			}
-		}
-		return content === message.content && providerPayload === message.providerPayload ? message
-			: transferTransformedSourceOrigin(message, { ...message, content, providerPayload });
+		return content === message.content ? message
+			: transferTransformedSourceOrigin(message, { ...message, content });
 	}
 	if (message.role !== "toolResult") return message;
 	const providerMetadata = message.providerMetadata?.type === "computer" ? mapComputerMetadata(message.providerMetadata, map) : message.providerMetadata;
@@ -314,6 +666,24 @@ function mapVisibleMetadata(message: Message, map: (text: string) => string): Me
 	return result;
 }
 
+/**
+ * Harness file metadata riding on a natively-replayed compaction summary.
+ * The provider converter emits it after the verbatim block, so it must pass
+ * the same outbound boundary as the summary text it was split from. The
+ * verbatim block content itself stays untouched: it must match the opaque
+ * provider state replayed beside it.
+ */
+function anthropicCompactionPayload(message: Message): AnthropicCompactionPayload | undefined {
+	if (message.role !== "user" && message.role !== "developer" && message.role !== "assistant") return undefined;
+	const payload = message.providerPayload;
+	return payload?.type === "anthropicCompaction" ? payload : undefined;
+}
+
+function anthropicCompactionFilesText(message: Message): string | undefined {
+	const filesText = anthropicCompactionPayload(message)?.filesText;
+	return typeof filesText === "string" && filesText.length > 0 ? filesText : undefined;
+}
+
 function collectMessageRegexSecretValues(obfuscator: SecretObfuscator, messages: Message[]): Set<string> {
 	const values = new Set<string>();
 	const addText = (text: string | undefined): void => {
@@ -324,6 +694,14 @@ function collectMessageRegexSecretValues(obfuscator: SecretObfuscator, messages:
 	};
 	for (const message of messages) {
 		mapVisibleMetadata(message, text => { addText(text); return text; });
+		// File metadata replayed beside a native compaction block carries the
+		// same harness paths as the summary text, so its regex-secret values
+		// join the shared set.
+		const compactionFiles = anthropicCompactionFilesText(message);
+		if (compactionFiles !== undefined) addText(compactionFiles);
+		if (message.role === "user" || message.role === "developer" || message.role === "assistant") {
+			collectNativeReplayRegexSecretValues(obfuscator, message, values);
+		}
 		if (message.role === "assistant") {
 			for (const block of message.content) {
 				if (block.type === "text") addText(block.text);
@@ -370,29 +748,44 @@ export function obfuscateMessages(obfuscator: SecretObfuscator, messages: Messag
 	const obfuscateMetadata = (text: string): string => obfuscator.stripUnsafeFriendlyPlaceholderPrefixes(obfuscator.obfuscate(text, sharedRegexSecretValues), sharedRegexSecretValues);
 	let changed = false;
 	const result = messages.map((message): Message => {
-		const metadata = mapVisibleMetadata(message, obfuscateMetadata);
-		if (metadata !== message) changed = true;
-		message = metadata;
-		if (
-			message.role !== "user" &&
-			message.role !== "toolResult" &&
-			!(message.role === "developer" && message.attribution === "user")
-		) {
-			if (message.role !== "assistant") return message;
-			const content = obfuscateAssistantContentForReplay(obfuscator, message.content, sharedRegexSecretValues);
-			if (content === message.content) return message;
-			changed = true;
-			return setSourceOrigin({ ...message, content }, combineContentSourceOrigins(content));
+		let current = mapVisibleMetadata(message, obfuscateMetadata);
+		if (current !== message) changed = true;
+		const compactionPayload = anthropicCompactionPayload(current);
+		const compactionFiles = anthropicCompactionFilesText(current);
+		if (compactionPayload !== undefined && compactionFiles !== undefined) {
+			const filesText = obfuscator.obfuscate(compactionFiles, sharedRegexSecretValues);
+			if (filesText !== compactionFiles) {
+				current = transferTransformedSourceOrigin(current, { ...current, providerPayload: { ...compactionPayload, filesText } } as Message);
+				changed = true;
+			}
 		}
-		const target = message as UserFacingMessage;
+		if (current.role === "user" || current.role === "developer" || current.role === "assistant") {
+			const replay = obfuscateNativeReplay(obfuscator, current, sharedRegexSecretValues);
+			if (replay !== current) {
+				changed = true;
+				current = replay;
+			}
+		}
+		if (
+			current.role !== "user" &&
+			current.role !== "toolResult" &&
+			!(current.role === "developer" && current.attribution === "user")
+		) {
+			if (current.role !== "assistant") return current;
+			const content = obfuscateAssistantContentForReplay(obfuscator, current.content, sharedRegexSecretValues);
+			if (content === current.content) return current;
+			changed = true;
+			return setSourceOrigin({ ...current, content }, combineContentSourceOrigins(content));
+		}
+		const target = current as UserFacingMessage;
 		if (typeof target.content === "string") {
 			const content = obfuscator.obfuscate(target.content, sharedRegexSecretValues);
-			if (content === target.content) return message;
+			if (content === target.content) return current;
 			changed = true;
-			return transferTransformedSourceOrigin(message, { ...target, content } as Message);
+			return transferTransformedSourceOrigin(current, { ...target, content } as Message);
 		}
 		const content = obfuscateTextBlocks(obfuscator, target.content, sharedRegexSecretValues);
-		if (content === target.content) return message;
+		if (content === target.content) return current;
 		changed = true;
 		return setSourceOrigin({ ...target, content } as Message, combineContentSourceOrigins(content));
 	});
