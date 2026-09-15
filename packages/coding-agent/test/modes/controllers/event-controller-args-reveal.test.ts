@@ -71,7 +71,7 @@ async function dispatch(controller: EventController, message: AssistantMessage) 
 	const event = {
 		type: "message_update",
 		message,
-		assistantMessageEvent: undefined as never,
+		assistantMessageEvent: { type: "toolcall_delta", contentIndex: 0, delta: "", partial: message },
 	} as Extract<AgentSessionEvent, { type: "message_update" }>;
 	await controller.handleEvent(event);
 }

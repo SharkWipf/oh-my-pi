@@ -236,6 +236,8 @@ export class AssistantMessageComponent extends Container {
 	/** Whether the last updateContent carried an in-flight streaming partial; such
 	 *  renders bypass the markdown module LRU (see Markdown.transientRenderCache). */
 	#lastUpdateTransient = false;
+	/** Provider end events, not later block positions, establish immutability. */
+	#closedContentBlocks = new Set<number>();
 	// Fast-path state: reuse Markdown children when message shape is stable during streaming.
 	#fastPathKey: string | undefined;
 	#fastPathItems:
@@ -675,11 +677,8 @@ export class AssistantMessageComponent extends Container {
 		for (const child of this.#contentContainer.children) {
 			const item = items[itemIndex];
 			if (item?.md === child) {
-				if (itemIndex === items.length - 1) {
-					// Streaming child: publish Markdown's frozen prefix, and only
-					// once non-blank content exists past it — the block's last
-					// non-blank line is still being written (thinking's prose fold
-					// may rewrite it) and must stay out of published bytes.
+				if (!this.#closedContentBlocks.has(item.contentIndex) || itemIndex === items.length - 1) {
+					// Unclosed or still revealing: leave the mutable final line behind.
 					const raw = item.md.getLastRenderStableText();
 					const frozen = raw.trim();
 					if (frozen.length > 0 && /\S/.test(item.lastText.slice(raw.length))) {
@@ -687,8 +686,7 @@ export class AssistantMessageComponent extends Container {
 					}
 					break;
 				}
-				// Closed child: only the streaming tail may mutate in place, so
-				// everything before it is final.
+				// Explicit closure, not a later interleaved child, makes this immutable.
 				parts.push({ kind: item.blockType, text: item.lastText });
 				itemIndex++;
 				continue;
@@ -744,6 +742,14 @@ export class AssistantMessageComponent extends Container {
 
 	getTranscriptBlockVersion(): number {
 		return this.#blockVersion;
+	}
+
+	markContentBlockClosed(contentIndex: number): void {
+		this.#closedContentBlocks.add(contentIndex);
+	}
+
+	isContentBlockClosed(contentIndex: number): boolean {
+		return this.#closedContentBlocks.has(contentIndex);
 	}
 
 	markTranscriptBlockFinalized(): void {
@@ -1188,16 +1194,17 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	/**
-	 * Only the actively streaming (last) markdown renders in transient mode;
-	 * completed blocks render final — syntax-highlighted, module-LRU-cached,
-	 * byte-stable — so their rows can settle into native scrollback mid-turn
-	 * and are byte-identical to the finalize render.
+	 * Unclosed blocks remain transient even when a later block has appeared.
+	 * Closed blocks use the final cache once reveal has advanced past them;
+	 * the last revealed block may still contain only part of its closed target.
 	 */
 	#applyItemTransience(transient: boolean): void {
 		const items = this.#fastPathItems;
 		if (!items) return;
 		for (let i = 0; i < items.length; i++) {
-			items[i]!.md.transientRenderCache = transient && i === items.length - 1;
+			const item = items[i]!;
+			item.md.transientRenderCache =
+				transient && (!this.#closedContentBlocks.has(item.contentIndex) || i === items.length - 1);
 		}
 	}
 }

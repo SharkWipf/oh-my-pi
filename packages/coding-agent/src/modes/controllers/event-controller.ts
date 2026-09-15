@@ -155,6 +155,8 @@ export class EventController {
 	// with the other transcript anchors.
 	#orphanedToolCompletions = new Map<string, Extract<AgentSessionEvent, { type: "tool_execution_end" }>>();
 	#postToolAssistantComponents = new Map<string, AssistantMessageComponent>();
+	// Provider indices belong to the full message, not any split display segment.
+	#closedAssistantContentBlocks = new Set<number>();
 	#lastAssistantComponent: AssistantMessageComponent | undefined = undefined;
 	// Assistant component whose turn-ending error is currently mirrored in the
 	// pinned banner. Its inline `Error: …` line is suppressed while pinned and
@@ -278,6 +280,7 @@ export class EventController {
 			ttsr_triggered: e => this.#handleTtsrTriggered(e),
 			todo_reminder: e => this.#handleTodoReminder(e),
 			todo_auto_clear: e => this.#handleTodoAutoClear(e),
+			todo_changed: () => this.ctx.reloadTodos(this.ctx.viewSession),
 			irc_message: e => this.#handleIrcMessage(e),
 			notice: e => this.#handleNotice(e),
 			model_changed: async () => {
@@ -497,6 +500,11 @@ export class EventController {
 			this.#toolTimelineComponents.delete(oldId);
 			this.#toolTimelineComponents.set(newId, timeline);
 		}
+		const postToolSegment = this.#postToolAssistantComponents.get(oldId);
+		if (postToolSegment && !this.#postToolAssistantComponents.has(newId)) {
+			this.#postToolAssistantComponents.delete(oldId);
+			this.#postToolAssistantComponents.set(newId, postToolSegment);
+		}
 		// The reveal controller is id-keyed; drop the stale target so the loop's
 		// setTarget/bind under the new id owns the paced reveal.
 		this.#toolArgsReveal.finish(oldId);
@@ -610,14 +618,21 @@ export class EventController {
 			// setTarget, per-block tool-call reconciliation) even though the TUI
 			// paints at most ~30fps — at 40-100 tps the handler work then
 			// dominates the CPU profile of an idle-looking streaming session
-			// (issue #7443). Only the latest snapshot is meaningful; non-update
-			// events flush the pending snapshot first so ordering is preserved.
-			if (event.type === "message_update") {
+			// (issue #7443). End events establish immutable content boundaries;
+			// preserve them and flush the pending snapshot first.
+			if (
+				event.type === "message_update" &&
+				event.assistantMessageEvent.type !== "thinking_end" &&
+				event.assistantMessageEvent.type !== "text_end"
+			) {
 				this.#enqueueMessageUpdate(event);
 				return;
 			}
+			// Freeze this boundary at arrival, not when its queued handler runs:
+			// a later message's delta must not jump ahead of its message_start.
+			const pendingUpdate = this.#takePendingMessageUpdate();
 			await this.#runSerialized(async () => {
-				await this.#flushPendingMessageUpdate();
+				if (pendingUpdate) await this.handleEvent(pendingUpdate);
 				await this.handleEvent(event);
 			});
 		});
@@ -689,15 +704,15 @@ export class EventController {
 		if (this.#messageUpdateTimer) return;
 		this.#messageUpdateTimer = setTimeout(() => {
 			this.#messageUpdateTimer = undefined;
+			const pendingUpdate = this.#takePendingMessageUpdate();
+			if (!pendingUpdate) return;
 			// Mirror AgentSession.#emit: attach a catch so a streaming rebuild
 			// failure surfaces as a logged warning instead of a process-level
 			// unhandled rejection (the timer path has no listener to attach one).
 			// Runs inside the serialized dispatch chain so a message_end /
 			// agent_end landing mid-window cannot overtake this flush (issue
 			// #7443 follow-up).
-			void this.#runSerialized(async () => {
-				await this.#flushPendingMessageUpdate();
-			}).catch(err => {
+			void this.#runSerialized(() => this.handleEvent(pendingUpdate)).catch(err => {
 				logger.warn("Message update flush rejected", {
 					error: err instanceof Error ? err.message : String(err),
 				});
@@ -706,19 +721,17 @@ export class EventController {
 	}
 
 	/**
-	 * Run the coalesced `message_update` handler on the latest pending snapshot
-	 * (dropping any superseded intermediates) and clear the queue. Safe to call
-	 * more than once; no-ops when nothing is pending.
+	 * Detach the current coalescing window before scheduling its dispatch.
+	 * Later arrivals belong to a new window, even while this one is queued.
 	 */
-	async #flushPendingMessageUpdate(): Promise<void> {
+	#takePendingMessageUpdate(): Extract<AgentSessionEvent, { type: "message_update" }> | undefined {
 		if (this.#messageUpdateTimer) {
 			clearTimeout(this.#messageUpdateTimer);
 			this.#messageUpdateTimer = undefined;
 		}
 		const event = this.#pendingMessageUpdate;
-		if (!event) return;
 		this.#pendingMessageUpdate = undefined;
-		await this.handleEvent(event);
+		return event;
 	}
 
 	/** Whether `#handleToolExecutionStart` has fired for this call id this turn. */
@@ -744,6 +757,7 @@ export class EventController {
 		this.#lastIntent = undefined;
 		this.#toolTimelineComponents.clear();
 		this.#streamedToolCallIdByIndex.clear();
+		this.#closedAssistantContentBlocks.clear();
 		this.#pendingStreamPreviews.clear();
 		this.#retractedToolCallIds.clear();
 		this.#executionStartedCallIds.clear();
@@ -884,6 +898,7 @@ export class EventController {
 		this.#sealAbandonedForegroundTools();
 		this.#toolTimelineComponents.clear();
 		this.#streamedToolCallIdByIndex.clear();
+		this.#closedAssistantContentBlocks.clear();
 		this.#pendingStreamPreviews.clear();
 		this.#retractedToolCallIds.clear();
 		this.#executionStartedCallIds.clear();
@@ -1034,6 +1049,7 @@ export class EventController {
 			this.#finalizeAbandonedPostToolSegments();
 			this.#lastVisibleBlockCount = 0;
 			this.#streamedToolCallIdByIndex.clear();
+			this.#closedAssistantContentBlocks.clear();
 			this.ctx.streamingComponent = createAssistantMessageComponent(this.ctx);
 			this.ctx.streamingMessage = event.message;
 			this.ctx.streamingComponent.pickReactionTarget(this.ctx.chatContainer.children);
@@ -1252,6 +1268,11 @@ export class EventController {
 			this.#vocalizeDelta(event);
 		}
 		if (this.ctx.streamingComponent && event.message.role === "assistant") {
+			const delta = event.assistantMessageEvent;
+			if (delta.type === "thinking_end" || delta.type === "text_end") {
+				this.#closedAssistantContentBlocks.add(delta.contentIndex);
+				this.ctx.streamingComponent.markContentBlockClosed(delta.contentIndex);
+			}
 			const unlockedThinkingVisibility = this.ctx.noteDisplayableThinkingContent(event.message);
 			if (unlockedThinkingVisibility) {
 				this.ctx.streamingComponent.setHideThinkingBlock(this.ctx.effectiveHideThinkingBlock);
@@ -1271,26 +1292,25 @@ export class EventController {
 				this.#lastVisibleBlockCount = visibleBlockCount;
 			}
 
-			// Content blocks stream sequentially: a toolCall block can only begin
-			// after every preceding thinking/text block has closed, and the
-			// reveal's setTarget above force-completes the visible text for
-			// toolCall messages. Finalize the assistant block now instead of at
-			// message_end so the transcript's commit-safe run can extend through
-			// it into the streaming tool preview below — otherwise a long args
-			// stream (a big write/edit/eval) sits below a still-live block and
-			// can never reach native scrollback: the head of the preview is
-			// neither committed nor on screen and the transcript reads as cut.
+			// Providers can interleave blocks: a tool preview does not close
+			// earlier prose. Seal only after explicit end events for the whole
+			// prefix. setTarget has already completed its reveal, so genuinely
+			// closed prose still lets long tool previews reach native scrollback.
 			if (
-				this.ctx.streamingMessage.content.some(content => content.type === "toolCall") &&
-				!this.ctx.streamingComponent.isTranscriptBlockFinalized()
+				timeline.hasToolCalls &&
+				!this.ctx.streamingComponent.isTranscriptBlockFinalized() &&
+				timeline.beforeTools.content.every((_, index) => this.ctx.streamingComponent!.isContentBlockClosed(index))
 			) {
 				const linkTargets = await refreshAssistantMessageLinkTargets(this.ctx, [timeline.beforeTools]);
 				this.ctx.streamingComponent.setLinkTargets(assistantMessageLinkTargets(timeline.beforeTools, linkTargets));
 				this.ctx.streamingComponent.markTranscriptBlockFinalized();
 			}
+			let previousToolContentIndex = -1;
 			for (let contentIndex = 0; contentIndex < this.ctx.streamingMessage.content.length; contentIndex++) {
 				const content = this.ctx.streamingMessage.content[contentIndex]!;
 				if (content.type !== "toolCall") continue;
+				const separatedFromPreviousTool = previousToolContentIndex >= 0 && contentIndex > previousToolContentIndex + 1;
+				previousToolContentIndex = contentIndex;
 				// Re-key the live card when a provider rewrites this block's id
 				// across deltas, so the changed id reuses the existing card
 				// instead of spawning a duplicate (#6879).
@@ -1317,6 +1337,12 @@ export class EventController {
 							// A completed read remains in the timeline after leaving pendingTools.
 							this.#resolveDisplaceablePoll(renderToolName);
 							this.#trackReadToolCall(content.id, content.arguments);
+							// Empty interleaved prose can arrive only at text_end. Its block
+							// boundary already separates reads, or later segments share an anchor
+							// and are inserted in reverse order after the merged group.
+							if (separatedFromPreviousTool) {
+								this.#resetReadGroup();
+							}
 							const group = this.#getReadGroup();
 							group.updateArgs(content.arguments, content.id);
 							this.ctx.pendingTools.set(content.id, group);
@@ -1390,16 +1416,29 @@ export class EventController {
 					}
 				}
 			}
+			let contentOffset = 0;
 			for (const [toolCallId, segment] of timeline.afterToolCalls) {
+				// Walk once in original order; adjacent tools need not have a segment.
+				while (contentOffset < this.ctx.streamingMessage.content.length) {
+					const block = this.ctx.streamingMessage.content[contentOffset++]!;
+					if (block.type === "toolCall" && block.id === toolCallId) break;
+				}
 				if (this.#postToolAssistantComponents.get(toolCallId)?.isTranscriptBlockFinalized()) continue;
-				const closed = toolCallId !== timeline.lastToolCallId;
+				const closed =
+					toolCallId !== timeline.lastToolCallId &&
+					segment.content.every((_, index) => this.#closedAssistantContentBlocks.has(contentOffset + index));
 				const linkTargets = closed ? await refreshAssistantMessageLinkTargets(this.ctx, [segment]) : undefined;
 				const component = this.#upsertPostToolAssistantSegment(
 					toolCallId,
 					segment,
 					linkTargets ? assistantMessageLinkTargets(segment, linkTargets) : undefined,
-					closed ? undefined : { transient: true },
+					{ transient: true },
 				);
+				for (let index = 0; index < segment.content.length; index++) {
+					if (this.#closedAssistantContentBlocks.has(contentOffset + index)) {
+						component?.markContentBlockClosed(index);
+					}
+				}
 				if (closed) component?.markTranscriptBlockFinalized();
 			}
 
@@ -1467,6 +1506,17 @@ export class EventController {
 		}
 		if (this.ctx.streamingComponent && event.message.role === "assistant") {
 			this.ctx.streamingMessage = event.message;
+			// The final snapshot may be the first event carrying the canonical id.
+			// Re-key before execution starts, or the old preview remains a live frontier
+			// after the canonical card completes, across subsequent assistant messages.
+			for (let index = 0; index < event.message.content.length; index++) {
+				const content = event.message.content[index]!;
+				if (content.type !== "toolCall") continue;
+				const priorId = this.#streamedToolCallIdByIndex.get(index);
+				if (priorId !== undefined && priorId !== content.id) {
+					this.#migrateStreamedToolCallId(priorId, content.id);
+				}
+			}
 			this.#streamingReveal.stop();
 			this.#toolArgsReveal.flushAll();
 			let errorMessage: string | undefined;
@@ -2045,6 +2095,7 @@ export class EventController {
 		this.#priorTurnToolComponents = new Map(this.#toolTimelineComponents);
 		this.#toolTimelineComponents.clear();
 		this.#streamedToolCallIdByIndex.clear();
+		this.#closedAssistantContentBlocks.clear();
 		this.#pendingStreamPreviews.clear();
 		this.#retractedToolCallIds.clear();
 		this.#executionStartedCallIds.clear();

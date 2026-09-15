@@ -88,7 +88,7 @@ describe("EventController queues exclusive device writes until execution starts"
 		await controller.handleEvent({
 			type: "message_update",
 			message: streaming,
-			assistantMessageEvent: undefined as never,
+			assistantMessageEvent: { type: "toolcall_delta", contentIndex: 1, delta: "", partial: streaming },
 		} as Extract<AgentSessionEvent, { type: "message_update" }>);
 		expect(pendingTools.size).toBe(2);
 		expect(cardText(pendingTools, "write-1")).toContain("queued");

@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `/compact` no longer leaves retained tool cards reduced to bare Eval/Todo labels; their details remain available immediately after the transcript rebuild.
+- Streaming updates no longer cross queued message boundaries, which could lose assistant text and leave an orphaned running tool card that squeezed subsequent transcript entries into collapsed rows.
+- Interleaved reasoning and text no longer freeze native-scrollback progress when an earlier block grows after later text or a tool preview appears; only explicit content-end events seal the preceding prose.
+- TODO changes made inside Eval now persist and refresh the TODO pane; subagent completion reconciliation no longer restores an older displayed plan over the current session plan.
+- Reconcile tool-call ids first finalized at message end, preventing stale previews from pinning subsequent normal Eval/Todo results into bare labels across turns and resizes.
+- Project explicit text/thinking closure into split post-tool segments without freezing interleaved growth, while retaining mid-stream text retirement and revisable-wire protection.
+- Keep done-only prose between reads in chronological order instead of merging its surrounding tool cards into one shared anchor.
+
 ### Breaking Changes
 
 - Read tool results no longer duplicate the body in `details.truncation.content`; use result `content` or `details.displayContent` instead. ([#11255](https://github.com/can1357/oh-my-pi/pull/11255) by [@jiwangyihao](https://github.com/jiwangyihao))
