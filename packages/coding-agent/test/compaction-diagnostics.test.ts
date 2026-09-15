@@ -83,3 +83,37 @@ test("same-entry original and delivered projections keep separate physical owner
 		expect(facts.distribution.shared.tokens).toBe(0);
 	}
 });
+
+test("Anthropic replay inventories aggregate summary, opaque state and file metadata without charging its fallback wrapper", () => {
+	const payload = { type: "anthropicCompaction" as const, provider: "anthropic", content: "Native summary", encryptedContent: "opaque-state", filesText: "<read-files>README</read-files>" };
+	const message = { role: "user" as const, timestamp: 1, content: "Fallback wrapper must not be priced as native replay", providerPayload: payload };
+	const retained = { role: "user" as const, timestamp: 2, content: "Retained original" };
+	const tokenizer = new Tokenizer();
+	const facts = inventory({ model: { provider: "anthropic", id: "native" }, method: "anthropic-native", preparedContext: { messages: [message, retained] } });
+	const replay = facts.rows.filter(row => row.coverage === "aggregate");
+	expect(replay.map(row => row.kind)).toEqual(["summary", "native", "summary"]);
+	expect(replay.map(row => row.quantity.tokens)).toEqual([tokenizer.countTokens(payload.content), null, tokenizer.countTokens(payload.filesText)]);
+	expect(replay.map(row => row.sourceIds)).toEqual([undefined, undefined, undefined]);
+	expect(replay.reduce((sum, row) => sum + row.counts.blocks, 0)).toBe(2);
+	expect(replay.reduce((sum, row) => sum + row.counts.messages, 0)).toBe(1);
+	expect(facts.total.tokens).toBe(tokenizer.countTokens(payload.content) + tokenizer.countTokens(payload.filesText) + tokenizer.countMessage(retained));
+	expect(facts.warning).toBeDefined();
+	expect(message.providerPayload).toEqual(payload);
+	const fallback = inventory({ preparedContext: { messages: [message] } });
+	expect(fallback.total.tokens).toBe(tokenizer.countMessage(message));
+	expect(fallback.rows.some(row => row.quantity.tokens === null)).toBe(false);
+});
+
+test("Anthropic assistant replay counts its continuing text alongside native summary state", () => {
+	const tokenizer = new Tokenizer();
+	const message = {
+		role: "assistant" as const, content: [{ type: "text" as const, text: "Continuing answer" }],
+		api: "anthropic-messages" as const, provider: "anthropic", model: "native", stopReason: "stop" as const, timestamp: 1,
+		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+		providerPayload: { type: "anthropicCompaction" as const, provider: "anthropic", content: "Native summary", encryptedContent: "opaque", filesText: "not emitted on assistant payload" },
+	};
+	const facts = inventory({ model: { provider: "anthropic", id: "native" }, preparedContext: { messages: [message] } });
+	expect(facts.total.tokens).toBe(tokenizer.countTokens("Native summary") + tokenizer.countMessage(message));
+	expect(facts.rows.filter(row => row.coverage !== "fixed").map(row => row.kind)).toEqual(["summary", "native", "text"]);
+	expect(facts.rows.reduce((sum, row) => sum + row.counts.messages, 0)).toBe(1);
+});

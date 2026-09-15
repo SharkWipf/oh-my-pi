@@ -12,6 +12,10 @@ const COMPACTION_METHOD_LABELS: Record<string, string> = {
 	handoff: "handed-off",
 	snapcompact: "snap-compacted",
 	shake: "shaken",
+	"anthropic-native": "Anthropic-native",
+	"openai-native-v1": "OpenAI-native-v1",
+	"openai-native-v2": "OpenAI-native-v2",
+	"local-summary": "soft-compacted",
 };
 
 /** `256K→20K` amount badge, or undefined when the entry predates `tokensAfter`. */
@@ -122,7 +126,8 @@ export class CompactionSummaryMessageComponent implements Component {
 	}
 
 	#label(): string {
-		const name = (this.message.method && COMPACTION_METHOD_LABELS[this.message.method]) || "compacted";
+		const method = this.message.diagnostics?.method ?? this.message.method;
+		const name = (method && COMPACTION_METHOD_LABELS[method]) || "compacted";
 		let label = `${theme.icon.camera} ${name}`;
 		const amount = this.#diagnosticLines?.[0] ?? compactionAmount(this.message);
 		if (amount) label += `${theme.sep.dot}${amount}`;

@@ -19,6 +19,15 @@
 - Distinguished positive whole-message omissions from partial pruning and raster-to-text continuation.
 - Preserved partial normalized-unit coordinates at text/raster boundaries so adding or reloading a selected source completes an expanded glyph exactly once.
 - Recorded original-image coverage independently from neighboring text, preserving admitted image ownership and treating previously committed images as ordinary input on the next compaction.
+### Changed
+
+- `historyBlocks()` now resolves persisted frame payloads lazily, keeps the newest frames within a byte budget, and drops unresolved blob references instead of sending them to providers ([#10227](https://github.com/can1357/oh-my-pi/pull/10227) by [@lemonleks](https://github.com/lemonleks)).
+
+## [18.1.18] - 2026-09-11
+
+### Fixed
+
+- A snapcompact pass now also strips a superseded Anthropic server-compaction payload (`preserveData.anthropicCompaction`) alongside the OpenAI replacement history, so a stale native summary can never replay ahead of the archived frames.
 
 ## [18.1.0] - 2026-09-01
 

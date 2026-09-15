@@ -349,6 +349,24 @@ export function buildCompactionDiagnostics(input: CompactionDiagnosticsInput): C
 				hasUnknown ||= tokens === null;
 			};
 			const payload = "providerPayload" in message ? message.providerPayload : undefined;
+			if (payload?.type === "anthropicCompaction" && payload.provider === input.model.provider) {
+				const replacesFallback = message.role === "user" || message.role === "developer";
+				if (replacesFallback) nativePlaceholderEstimate += input.tokenizer.countMessage(message);
+				const summaryTokens = input.tokenizer.countTokens(payload.content);
+				nativeKnownEstimate += summaryTokens;
+				add("summary", "Anthropic native compaction summary", summaryTokens, undefined, Buffer.byteLength(payload.content, "utf8"), false, "Provider-native summary is aggregate content, not exact retained source. Local visible-text estimate only.");
+				if (payload.encryptedContent) {
+					add("native", "Anthropic encrypted compaction state", null, undefined, Buffer.byteLength(payload.encryptedContent, "utf8"), false, "Opaque replay content");
+					rows[rows.length - 1]!.counts.blocks = 0;
+				}
+				if (replacesFallback && payload.filesText?.trim()) {
+					const filesTokens = input.tokenizer.countTokens(payload.filesText);
+					nativeKnownEstimate += filesTokens;
+					add("summary", "Anthropic compaction file metadata", filesTokens, undefined, Buffer.byteLength(payload.filesText, "utf8"), false, "Native payload file metadata, without exact source attribution. Final provider placement may follow retained assistant/tool messages; this inventory follows OMP Context order, not provider wire order.");
+					rows[rows.length - 1]!.location += "/files";
+				}
+				if (replacesFallback) continue;
+			}
 			if (payload?.type === "openaiResponsesHistory" && (payload.provider === undefined || payload.provider === input.model.provider)) {
 				nativePlaceholderEstimate += input.tokenizer.countMessage(message);
 				const nativeStart = rows.length;
