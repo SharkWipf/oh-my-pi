@@ -1,5 +1,5 @@
-import type { Model } from "@oh-my-pi/pi-ai";
 import { getSourceOrigin } from "@oh-my-pi/pi-ai/utils/source-origin";
+import type { Model } from "@oh-my-pi/pi-ai";
 import { visitOpenAIResponsesLogicalContent, visitOpenAIResponsesSourceContent } from "@oh-my-pi/pi-ai/utils";
 import type { ModelTokenizer } from "@oh-my-pi/pi-catalog/types";
 import * as natives from "@oh-my-pi/pi-natives";
@@ -103,7 +103,7 @@ export interface TokenBudgetCheck {
 }
 
 /**
- * Baseline per original image in user, developer, custom, assistant, tool and hook messages.
+ * Baseline per original image in user, developer, assistant, tool and hook messages.
  * This local estimate is independent of provider/model/detail, not a bill.
  * A representation-specific projection must replace this charge (add only
  * its effective image estimate minus this baseline), never add a second image.
@@ -223,10 +223,14 @@ export class Tokenizer {
 		}
 
 		switch (message.role) {
-			case "custom":
-			case "developer":
-			case "user": {
-				const content: string | Array<{ type: string; text?: string }> = message.content;
+			case "user":
+			case "developer": {
+				// Both roles carry `string | (TextContent | ImageContent)[]` and both are
+				// sent to the provider -- convertMessageToLlm handles developer alongside
+				// user -- so they are counted alike. Without the developer case the switch
+				// fell through to `default: return 0`, and the old annotation narrowed the
+				// blocks to text-only, hiding the image charge the toolResult arm applies.
+				const content = message.content;
 				if (typeof content === "string") {
 					fragments.push(content);
 				} else if (Array.isArray(content)) {
@@ -281,6 +285,7 @@ export class Tokenizer {
 				}
 				break;
 			}
+			case "custom":
 			case "hookMessage":
 			case "toolResult": {
 				// Computer serializers consume the typed screenshot, not content image mirrors.

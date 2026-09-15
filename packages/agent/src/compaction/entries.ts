@@ -38,7 +38,7 @@ export interface CompactionEntry<T = unknown> extends SessionEntryBase {
 	shortSummary?: string;
 	firstKeptEntryId: string;
 	tokensBefore: number;
-	/** Last branch entry represented by native replay; later entries remain ordinary history. */
+	/** Last entry covered by native replay; later entries may precede the compaction record. */
 	providerReplayThroughEntryId?: string;
 	diagnostics?: CompactionDiagnostics;
 	/** Extension-specific data (e.g., ArtifactIndex, version markers for structured compaction) */
