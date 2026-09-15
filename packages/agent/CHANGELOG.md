@@ -17,7 +17,7 @@
 - Fixed native V2 compaction dropping typeless user messages emitted by the bundled Codex serializer and bypassing the retained-token budget for string user content.
 - Native compaction now carries local source provenance through ordinary serializers and preserves selected historical users chronologically without changing the ordinary retained-history allocation. V2 precharges complete selected tool exchanges before allocation and unions partial text/image coverage in one source slot.
 - Native V1 sends selected non-user history as attributed input context with original images, leaves the canonical provider output unchanged, and records unknown item attribution rather than guessing source identities.
-- Local compaction preserves selected source spans chronologically without refunding selected-user cut costs; complete admitted non-user atoms are charged once before the calibrated ordinary walk. Repeated sparse retention no longer resurrects intervening omitted originals.
+- Local compaction computes the upstream whole-group suffix first (including its newest-oversized-group exception), then preserves missing selected source spans chronologically without refunding selected-user costs. Complete admitted non-user atoms are charged once against that same calibrated budget. Repeated sparse retention no longer resurrects intervening omitted originals.
 - Authored images interleaved with snap archive frames keep their one-time original-image estimate instead of being priced as rasterized transcript frames.
 - Fixed repeated compaction losing messages retained by the previous compaction, including turns received while native compaction was running.
 ### Added

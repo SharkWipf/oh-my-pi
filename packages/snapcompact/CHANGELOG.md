@@ -21,7 +21,7 @@
 - Recorded original-image coverage independently from neighboring text, preserving admitted image ownership and treating previously committed images as ordinary input on the next compaction.
 ### Changed
 
-- `historyBlocks()` now resolves persisted frame payloads lazily, keeps the newest frames within a byte budget, and drops unresolved blob references instead of sending them to providers ([#10227](https://github.com/can1357/oh-my-pi/pull/10227) by [@lemonleks](https://github.com/lemonleks)).
+- `historyBlocks()` resolves persisted frame payloads lazily. Legacy/unmapped archives keep the newest fitting frames with in-place gap notices; mapped archives retain the oldest contiguous raster prefix and spill missing or over-budget frames to chronological source text without charging original images to the raster budget ([#10227](https://github.com/can1357/oh-my-pi/pull/10227) by [@lemonleks](https://github.com/lemonleks)).
 
 ## [18.1.18] - 2026-09-11
 

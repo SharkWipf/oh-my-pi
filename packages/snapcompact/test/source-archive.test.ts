@@ -188,3 +188,43 @@ describe("chronological source archive", () => {
 	});
 
 });
+
+it("rebuilds serialized source frames lazily without spending original-image or later-frame bytes", async () => {
+	const image: ImageContent = { type: "image", data: (await snap.render("ORIGINAL", shape)).data, mimeType: "image/png" };
+	const sources = Array.from({ length: 10 }, (_, i) => user(`lazy${i}`, i, `SOURCE${i} `.repeat(220)));
+	sources.push({ entryId: "image", order: 10, message: { role: "user", timestamp: 10, content: [image] } });
+	const options = { shape, maxFrames: 3 };
+	const first = await snap.compact(prepare(sources), options);
+	const resumed = JSON.parse(JSON.stringify(first.preserveData));
+	const repeated = await snap.compact({ ...prepare([], sources), previousPreserveData: resumed }, options);
+	const cleared = await snap.compact({ ...prepare([], []), previousPreserveData: resumed }, options);
+	for (const result of [first, repeated, cleared]) {
+		const { archive, representation } = unpack(result);
+		expect(archive.frames).toHaveLength(3);
+		const payloads = archive.frames.map(frame => frame.data);
+		const external = { ...archive, frames: archive.frames.map((frame, i) => ({ ...frame, data: `blob:sha256:${i}` })) };
+		const reads: number[] = [];
+		const resolveFrameData = (data: string) => {
+			const i = Number(data.slice("blob:sha256:".length));
+			return { bytes: payloads[i]!.length, read: () => { reads.push(i); return payloads[i]!; } };
+		};
+		const budget = payloads[0]!.length;
+		const expected = snap.historyBlocks(archive, { sourceRepresentation: representation, maxFrameDataBytes: budget, resolveSourceImage: () => image });
+		const blocks = snap.historyBlocks(external, { sourceRepresentation: representation, maxFrameDataBytes: budget, resolveFrameData, resolveSourceImage: () => image });
+		expect(blocks).toEqual(expected);
+		expect(reads).toEqual([0]);
+		expect(blocks.filter(block => block.type === "image").map(block => block.data)).toEqual([payloads[0], image.data]);
+		const replayedText: string[] = [];
+		const zero = snap.historyBlocks(external, { sourceRepresentation: representation, maxFrameDataBytes: 0, resolveFrameData, resolveSourceImage: () => image,
+			onEmit: (i, _blockIndex, block) => { if (representation.layout[i]!.kind !== "gap" && block.type === "text") replayedText.push(block.text); } });
+		expect(reads).toEqual([0]);
+		expect(zero.filter(block => block.type === "image")).toEqual([image]);
+		expect(replayedText.join("")).toBe(snap.archiveSourceText(archive)!);
+		expect(snap.historyBlocks(external, { sourceRepresentation: representation, resolveFrameData: () => undefined, resolveSourceImage: () => image })).toEqual(zero);
+		reads.length = 0;
+		const legacy = snap.historyBlocks({ frames: external.frames, totalChars: external.totalChars, truncatedChars: 0 }, { maxFrameDataBytes: payloads[2]!.length, resolveFrameData });
+		expect(reads).toEqual([2]);
+		expect(legacy.filter(block => block.type === "image").map(block => block.data)).toEqual([payloads[2]]);
+		expect(legacy.map(block => block.type)).toEqual(["text", "image"]);
+	}
+});
