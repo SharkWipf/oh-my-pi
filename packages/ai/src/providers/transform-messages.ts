@@ -9,7 +9,7 @@ import type {
 	ToolResultMessage,
 	UserMessage,
 } from "../types";
-import { isDemotedThinking, kDemotedThinking } from "../utils/block-symbols";
+import { isDemotedThinking, kDemotedThinking, kSyntheticUser, type SyntheticUserCarrier } from "../utils/block-symbols";
 import { combineSourceOrigins, setSourceOrigin, transferMessageSourceOrigin, transferSourceOrigin, transferTransformedSourceOrigin } from "../utils/source-origin";
 
 const enum ToolCallStatus {
@@ -1233,11 +1233,15 @@ export function transformMessages<TApi extends Api>(
 				if (textParts.length > 0) {
 					const errorAttr = msg.isError ? ' is-error="true"' : "";
 					const textOrigin = setSourceOrigin({}, combineSourceOrigins(msg.content.filter(part => part.type === "text" && part.text.trim() !== "")));
-					result.push(transferTransformedSourceOrigin(textOrigin, {
+					const note: UserMessage & SyntheticUserCarrier = {
 						role: "user",
 						content: `<stale-tool-result tool="${msg.toolName}" id="${msg.toolCallId}"${errorAttr}>\n${textParts.join("\n")}\n</stale-tool-result>`,
 						timestamp: messageTimestamp,
-					} as UserMessage));
+					} as UserMessage;
+					// Synthesized, not sent by the user: prompt-cache decimation counts
+					// conversational turns and must skip this note.
+					note[kSyntheticUser] = true;
+					result.push(transferTransformedSourceOrigin(textOrigin, note));
 				}
 			}
 
