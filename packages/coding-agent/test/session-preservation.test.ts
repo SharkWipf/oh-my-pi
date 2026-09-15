@@ -162,6 +162,43 @@ describe("durable manual preservation actions", () => {
 		expect(f.changed).toEqual([]);
 	});
 
+	it("refuses capture recovery over a peer's durable turn", async () => {
+		const f = await fixture(manager => {
+			const source = user(manager, "original source");
+			manager.appendCustomEntry(MESSAGE_OVERRIDE_CUSTOM_TYPE, { messageIds: [source], state: "keep" });
+		});
+		f.storage.failDrain = true;
+		await expect(f.preservation.capturePreservedMessageOverrideReset()).rejects.toThrow("flush failed");
+		const file = f.manager.getSessionFile()!;
+		const peer = await SessionManager.open(file);
+		try {
+			user(peer, "durable peer turn");
+			await peer.ensureOnDisk();
+			await peer.flush();
+		} finally {
+			await peer.close();
+		}
+		const durable = fs.readFileSync(file, "utf8");
+		await expect(f.preservation.capturePreservedMessageOverrideReset()).rejects.toThrow();
+		expect(fs.readFileSync(file, "utf8")).toBe(durable);
+		expect(f.changed).toEqual([]);
+		// Reload for fixture disposal only; the user-facing retry above must refuse the conflict.
+		await f.manager.setSessionFile(file);
+	});
+
+	it("does not carry failed capture recovery into a different ownership scope", async () => {
+		const f = await fixture(manager => {
+			const source = user(manager, "original source");
+			manager.appendCustomEntry(MESSAGE_OVERRIDE_CUSTOM_TYPE, { messageIds: [source], state: "keep" });
+		});
+		f.storage.failDrain = true;
+		await expect(f.preservation.capturePreservedMessageOverrideReset()).rejects.toThrow("flush failed");
+		f.transition();
+		await expect(f.preservation.capturePreservedMessageOverrideReset()).rejects.toThrow("flush failed");
+		expect(f.changed).toEqual([]);
+		await f.manager.setSessionFile(f.manager.getSessionFile()!);
+	});
+
 	it("resets captured hidden sources, allows suffixes, and skips newer same-value journal revisions", async () => {
 		let first = "", second = "", tag = "";
 		const f = await fixture(manager => {
@@ -277,6 +314,19 @@ describe("durable manual preservation actions", () => {
 		expect(f.changed).toEqual([]);
 		expect(await f.preservation.resetPreservedMessageOverrides(snapshot)).toEqual({ reset: 1, skipped: 0 });
 		expect(overrides(f.manager)).toHaveLength(2);
+	});
+
+	it("retries a manual state change after preflight fails without publishing a duplicate override", async () => {
+		let source = "";
+		const f = await fixture(manager => { source = user(manager, "manual state retry"); });
+		f.storage.failDrain = true;
+		await expect(f.preservation.setPreservedMessageOverride(source, "keep")).rejects.toThrow("flush failed");
+		expect(overrides(f.manager)).toEqual([]);
+		expect(f.changed).toEqual([]);
+		await f.preservation.setPreservedMessageOverride(source, "keep");
+		expect(overrides(f.manager)).toHaveLength(1);
+		expect(f.changed).toEqual([[source]]);
+		expect((await reopenedQuery(f.manager)).getManualGroup(source)?.members[0]?.state).toBe("keep");
 	});
 
 	it("retries the same logically committed transition after a flush failure", async () => {
