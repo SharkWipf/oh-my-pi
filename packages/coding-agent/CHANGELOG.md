@@ -130,6 +130,9 @@
 - Secret redaction now covers provider-visible computer actions and safety messages, tool explanations, Anthropic server-tool text, and native web-search text while preserving opaque replay data, identifiers, and original screenshots.
 - Inline snap images now expose transient, identity-bound frame estimates and prompt/tool ownership through provider normalization, separately from original images. Outgoing image mutations no longer corrupt cached frames for later requests.
 - Added `goal.injectAsUserMessage` to queue objective-only ordinary user follow-ups after successful goal tool creation, retaining host tool provenance without duplicate lifecycle or `/goal` injection. Provenance survives attributed, staged queued delivery independently of billing attribution; disabling the setting leaves historical messages unchanged.
+- Added opt-in `advisor.compactBeforeGuidance`: force normal primary compaction before accepted advisor guidance enters context, including low-pressure, live interrupting, deferred, and idle delivery with Auto-Compact disabled. Held guidance survives its own advisor reset but is discarded on cancellation or source/conversation invalidation.
+- Preserved accepted guidance across staged queued-message preparation without re-admission. Terminal non-blockers compact before their visible card without an unsolicited primary restart; blockers retain paired-tool steering.
+
 - `find` (and `omp find`) accepts an `omp://` docs scope: `omp://` searches every embedded harness doc and `omp://<file>.md` searches one, reporting hits as canonical `omp://` URLs that `read` opens directly, including with `:start-end` selectors ([#12758](https://github.com/can1357/oh-my-pi/pull/12758) by [@H4vC](https://github.com/H4vC)).
 
 ## [18.2.8] - 2026-09-21
