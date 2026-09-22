@@ -195,7 +195,11 @@ await agent.prompt({ role: "user", content: "Hello", timestamp: Date.now() });
 await agent.continue();
 ```
 
-`Tokenizer.countMessage` includes a local baseline of 1,200 tokens per original image in user, developer, tool-result, and hook messages. The baseline is exported as `IMAGE_TOKEN_ESTIMATE` from `@oh-my-pi/pi-agent-core/tokenizer`. It is not a provider invoice: image detail, dimensions, and model-specific billing remain provider-owned. A projection using a different effective image estimate must replace the included baseline (add only the difference), not charge the image again. Snapcompact frames retain their separate frame estimate.
+`Tokenizer.countMessage` includes a local baseline of 1,200 tokens per original image in user, developer, assistant, tool-result, custom, and hook messages. The baseline is exported as `IMAGE_TOKEN_ESTIMATE` from `@oh-my-pi/pi-agent-core/tokenizer`. It is not a provider invoice: image detail, dimensions, and model-specific billing remain provider-owned. A projection using a different effective image estimate must replace the included baseline (add only the difference), not charge the image again. Snapcompact frames retain their separate frame estimate.
+
+Computer tool results count the screenshot in their typed provider metadata as one image, even when no content image is present. Content-image mirrors are not charged separately because computer-result serialization consumes the metadata screenshot instead. This baseline applies to both ordinary estimates and the compaction floor.
+
+Current native response deltas contribute their known original logical text, code, logs, search context, and generated/interpreter images through the shared typed source visitor. Normalized native mirrors are counted through current content only, including after controlled source rewrites and JSON reload; deleted mirrors and opaque native snapshots do not become new source charges. Existing provider-reasoning and native server-tool estimates retain their ordinary-versus-compaction-floor behavior. Custom messages retain neutral text and image pricing; pricing does not select a preservation policy.
 
 ### State Management
 
