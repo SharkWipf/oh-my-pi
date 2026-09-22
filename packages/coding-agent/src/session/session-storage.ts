@@ -151,6 +151,8 @@ export interface SessionStorage {
 	hasAssistantTurn?(path: string): Promise<boolean>;
 	writeText(path: string, content: string): Promise<void>;
 	writeTextAtomic(path: string, content: string, options?: WriteTextAtomicOptions): Promise<void>;
+	/** Append a complete suffix atomically to an existing prefix, using the same commit guard as writeTextAtomic. */
+	appendTextAtomic(path: string, suffix: string, options?: WriteTextAtomicOptions): Promise<void>;
 	rename(path: string, nextPath: string): Promise<void>;
 	unlink(path: string): Promise<void>;
 	deleteSessionWithArtifacts(sessionPath: string): Promise<void>;
@@ -708,6 +710,25 @@ export class FileSessionStorage implements SessionStorage {
 			this.#discardTemp(tempPath, fpath);
 			throw toError(err);
 		}
+		this.#publishAtomic(tempPath, fpath, options);
+	}
+
+	async appendTextAtomic(fpath: string, suffix: string, options?: WriteTextAtomicOptions): Promise<void> {
+		const dir = path.resolve(fpath, "..");
+		const tempPath = path.join(dir, `.${path.basename(fpath)}.${Snowflake.next()}.tmp`);
+		const expectedSize = options?.expectedSize === undefined ? fs.statSync(fpath).size : options.expectedSize;
+		try {
+			// Clone when supported; copyFile falls back to a native copy without decoding the prefix.
+			await fsp.copyFile(fpath, tempPath, fs.constants.COPYFILE_FICLONE);
+			await fsp.appendFile(tempPath, suffix);
+		} catch (err) {
+			this.#discardTemp(tempPath, fpath);
+			throw toError(err);
+		}
+		this.#publishAtomic(tempPath, fpath, { ...options, expectedSize });
+	}
+
+	#publishAtomic(tempPath: string, fpath: string, options?: WriteTextAtomicOptions): void {
 		// Guard-check + rename MUST NOT be separated by an await. A concurrent
 		// synchronous rewrite (flushSync -> #rewriteSynchronously) can otherwise
 		// publish a fresh body between the check and the rename, and this stale
@@ -722,6 +743,10 @@ export class FileSessionStorage implements SessionStorage {
 			// interleave, and appenders re-open a replaced path before writing.
 			this.#withPublishLock(fpath, () => {
 				this.#assertExpectedSize(fpath, options?.expectedSize);
+				if (options?.commitGuard && !options.commitGuard()) {
+					this.#discardTemp(tempPath, fpath);
+					return;
+				}
 				try {
 					this.renameSync(tempPath, fpath);
 					return;
@@ -737,7 +762,7 @@ export class FileSessionStorage implements SessionStorage {
 	}
 
 	/**
-	 * Sync rename hook. Split from `rename` so `writeTextAtomic` can perform its
+	 * Sync rename hook. Split from `rename` so atomic writes and appends can perform their
 	 * guard-then-publish step without a yield, and so tests can inject
 	 * Windows-style EPERM at the sync layer used by the atomic path.
 	 */
@@ -781,37 +806,35 @@ export class FileSessionStorage implements SessionStorage {
 			throw toError(renameError);
 		}
 		if (commitGuard && !commitGuard()) {
-			// A concurrent synchronous rewrite published a fresh body between the
-			// move-aside and this point. Restore the moved-aside file so we do
-			// not overwrite it with our staged (stale) body, and drop the temp
-			// so `writeTextAtomic`'s "discard on abandon" contract holds.
+			// Restore only if no fresh target took over while the guard rejected us.
 			try {
-				this.renameSync(backupPath, targetPath);
+				if (!this.existsSync(targetPath)) this.renameSync(backupPath, targetPath);
 			} catch (restoreErr) {
-				logger.warn("Failed to restore backup after commitGuard rejection", {
-					sessionFile: targetPath,
-					backupPath,
-					error: toError(restoreErr).message,
-				});
-			}
-			this.#discardTemp(tempPath, targetPath);
-			return;
-		}
-		try {
-			this.renameSync(tempPath, targetPath);
-		} catch (replaceError) {
-			try {
-				this.renameSync(backupPath, targetPath);
-			} catch (rollbackErr) {
-				const rollbackError = toError(rollbackErr);
 				throw new Error(
-					`Failed to replace session file after EPERM (original: ${toError(renameError).message}; retry: ${
-						toError(replaceError).message
-					}; rollback: ${rollbackError.message})`,
+					`Failed to restore session file after EPERM commitGuard rejection (original: ${
+						toError(renameError).message
+					}; rollback: ${toError(restoreErr).message})`,
 					{ cause: toError(renameError) },
 				);
 			}
-			throw toError(replaceError);
+			this.#discardTemp(tempPath, targetPath);
+		} else {
+			try {
+				this.renameSync(tempPath, targetPath);
+			} catch (replaceError) {
+				try {
+					this.renameSync(backupPath, targetPath);
+				} catch (rollbackErr) {
+					const rollbackError = toError(rollbackErr);
+					throw new Error(
+						`Failed to replace session file after EPERM (original: ${toError(renameError).message}; retry: ${
+							toError(replaceError).message
+						}; rollback: ${rollbackError.message})`,
+						{ cause: toError(renameError) },
+					);
+				}
+				throw toError(replaceError);
+			}
 		}
 		try {
 			fs.unlinkSync(backupPath);
@@ -1228,6 +1251,16 @@ export class MemorySessionStorage implements SessionStorage {
 		if (options?.commitGuard && !options.commitGuard()) return Promise.resolve();
 		this.writeTextSync(path, content, { expectedSize: options?.expectedSize });
 		return Promise.resolve();
+	}
+
+	async appendTextAtomic(path: string, suffix: string, options?: WriteTextAtomicOptions): Promise<void> {
+		const entry = this.#requireEntry(path);
+		if (options?.commitGuard && !options.commitGuard()) return;
+		if (options?.expectedSize !== undefined && entry.size !== options.expectedSize) {
+			throw new SessionWriteConflictError(path, options.expectedSize, entry.size);
+		}
+		appendMemoryChunk(entry, suffix);
+		entry.mtimeMs = Date.now();
 	}
 
 	rename(path: string, nextPath: string): Promise<void> {

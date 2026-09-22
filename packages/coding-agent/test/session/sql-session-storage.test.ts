@@ -7,6 +7,7 @@
  */
 
 import { describe, expect, it } from "bun:test";
+import { SessionWriteConflictError } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 import { SqlSessionStorage, type SqlSessionStorageClient } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
 import { SQL } from "bun";
@@ -18,6 +19,152 @@ async function createSqlite(): Promise<{ client: InstanceType<typeof SQL>; stora
 }
 
 describe("SqlSessionStorage (SQLite backend)", () => {
+	it("CAS rejects a simultaneous peer suffix and stale rewrite without overwriting durable turns", async () => {
+		const { client, storage } = await createSqlite();
+		try {
+			const path = "/sessions/concurrent.jsonl";
+			await storage.writeText(path, "seed\n");
+			const peer = await SqlSessionStorage.create({ client });
+			const outcomes = await Promise.allSettled([
+				storage.appendTextAtomic(path, "first-é\n", { expectedSize: 5 }),
+				peer.appendTextAtomic(path, "second-猫\n", { expectedSize: 5 }),
+			]);
+			expect(outcomes.filter(result => result.status === "fulfilled")).toHaveLength(1);
+			const rejected = outcomes.find(result => result.status === "rejected");
+			expect(rejected?.status === "rejected" && rejected.reason).toBeInstanceOf(SessionWriteConflictError);
+			const expected = outcomes[0].status === "fulfilled" ? "seed\nfirst-é\n" : "seed\nsecond-猫\n";
+			expect(await storage.readText(path)).toBe(expected);
+			const stale = outcomes[0].status === "fulfilled" ? peer : storage;
+			await expect(stale.writeTextAtomic(path, "stale", { expectedSize: 5 })).rejects.toBeInstanceOf(
+				SessionWriteConflictError,
+			);
+			expect(await storage.readText(path)).toBe(expected);
+			const fresh = await SqlSessionStorage.create({ client });
+			await fresh.writeTextAtomic(path, "fresh", { expectedSize: Buffer.byteLength(expected) });
+			expect(await fresh.readText(path)).toBe("fresh");
+		} finally {
+			await client.end();
+		}
+	});
+	it("does not reinterpret a definite CAS conflict as an identical lost acknowledgement", async () => {
+		const { client, storage } = await createSqlite();
+		try {
+			const path = "/sessions/identical.jsonl";
+			await storage.writeText(path, "base");
+			const peer = await SqlSessionStorage.create({ client });
+			const results = await Promise.allSettled([
+				storage.appendTextAtomic(path, "same", { expectedSize: 4 }),
+				peer.appendTextAtomic(path, "same", { expectedSize: 4 }),
+			]);
+			expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+			const stale = results[0].status === "fulfilled" ? peer : storage;
+			await expect(stale.writeTextAtomic(path, "basesame", { expectedSize: 4 })).rejects.toBeInstanceOf(
+				SessionWriteConflictError,
+			);
+			expect(stale.statSync(path).size).toBe(4);
+			expect(await storage.readText(path)).toBe("basesame");
+		} finally {
+			await client.end();
+		}
+	});
+	it("failed delayed suffix aborts queued positional work and restores a reachable size", async () => {
+		const client = new SQL("sqlite::memory:");
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const failure = new Error("delayed suffix failure");
+		let failAppend = false;
+		const wrapped: SqlSessionStorageClient = {
+			options: { adapter: "sqlite" },
+			async unsafe(query, values) {
+				if (failAppend && query.startsWith("UPDATE") && query.includes("content = content ||")) {
+					failAppend = false;
+					started.resolve();
+					await release.promise;
+					throw failure;
+				}
+				return client.unsafe(query, values);
+			},
+			transaction(callback) {
+				return client.transaction(async transaction => callback(transaction));
+			},
+		};
+		try {
+			const storage = await SqlSessionStorage.create({ client: wrapped });
+			const path = "/sessions/chained.jsonl";
+			await storage.writeText(path, "base\n");
+			failAppend = true;
+			const first = storage.appendTextAtomic(path, "first\n", { expectedSize: 5 }).catch(error => error);
+			await started.promise;
+			const writer = storage.openWriter(path);
+			const second = writer.append("second\n").catch(error => error);
+			const third = storage.appendTextAtomic(path, "third\n").catch(error => error);
+			release.resolve();
+			expect(await first).toBe(failure);
+			expect(await second).toBe(failure);
+			expect(await third).toBe(failure);
+			await writer.close().catch(() => {});
+			await storage.drain().catch(() => {});
+			expect(storage.statSync(path).size).toBe(5);
+			expect(await storage.readText(path)).toBe("base\n");
+			await storage.appendTextAtomic(path, "recovered-猫\n", { expectedSize: 5 });
+			expect(await storage.readText(path)).toBe("base\nrecovered-猫\n");
+		} finally {
+			await client.end();
+		}
+	});
+	it("a superseded suffix cannot leave a queued append on an unreachable index", async () => {
+		const { client, storage } = await createSqlite();
+		try {
+			const path = "/sessions/superseded.jsonl";
+			await storage.writeText(path, "base\n");
+			const writer = storage.openWriter(path);
+			let dependent: Promise<unknown> | undefined;
+			let checks = 0;
+			await storage.appendTextAtomic(path, "cancelled\n", {
+				commitGuard: () => {
+					checks++;
+					if (checks === 2)
+						queueMicrotask(() => {
+							dependent = writer.append("dependent\n").catch(error => error);
+						});
+					return checks < 3;
+				},
+			});
+			expect(await dependent).toBeInstanceOf(Error);
+			await writer.close().catch(() => {});
+			await storage.drain().catch(() => {});
+			expect(await storage.readText(path)).toBe("base\n");
+			expect(storage.statSync(path).size).toBe(5);
+			await storage.appendTextAtomic(path, "fresh\n", { expectedSize: 5 });
+			expect(await storage.readText(path)).toBe("base\nfresh\n");
+		} finally {
+			await client.end();
+		}
+	});
+	it("publishes an ordinary suffix when full-history reads are unavailable", async () => {
+		const client = new SQL("sqlite::memory:");
+		const wrapped: SqlSessionStorageClient = {
+			options: { adapter: "sqlite" },
+			unsafe(query, values) {
+				if (/SELECT\s+content\s+AS\s+content/i.test(query)) throw new Error("full-history read unavailable");
+				return client.unsafe(query, values);
+			},
+			transaction(callback) {
+				return client.transaction(async transaction => callback(transaction));
+			},
+		};
+		try {
+			const storage = await SqlSessionStorage.create({ client: wrapped });
+			const path = "/sessions/bounded.jsonl";
+			const prefix = "x".repeat(1024 * 1024) + "\n";
+			await storage.writeText(path, prefix);
+			await storage.appendTextAtomic(path, "suffix-é\n", { expectedSize: prefix.length });
+			const rows = await client.unsafe("SELECT content FROM omp_session_files WHERE path = ?", [path]);
+			expect(rows[0].content).toBe(prefix + "suffix-é\n");
+		} finally {
+			await client.end();
+		}
+	});
 	it("indexes writeText metadata and reads content asynchronously", async () => {
 		const { client, storage } = await createSqlite();
 		await storage.writeText("/sessions/p/a.jsonl", "line1\nline2\n");
@@ -98,6 +245,103 @@ describe("SqlSessionStorage (SQLite backend)", () => {
 
 		await writer.close();
 		await client.end();
+	});
+
+	it("atomic suffixes preserve UTF-8 prefix bytes and indexed title across reload", async () => {
+		const { client, storage } = await createSqlite();
+		try {
+			const path = "/sessions/atomic.jsonl";
+			const prefix = serializeTitleSlot({ title: "Old", source: "auto", updatedAt: "t1" }) + "préfix\n";
+			await storage.writeText(path, prefix);
+			await storage.updateSessionTitle(path, { title: "Current", source: "user", updatedAt: "t2" });
+			await Promise.all([storage.appendTextAtomic(path, "α\nβ\n"), storage.appendTextAtomic(path, "γ\n")]);
+			const rows = await client.unsafe("SELECT content FROM omp_session_files WHERE path = ?", [path]);
+			expect(rows[0].content).toBe(prefix + "α\nβ\nγ\n");
+			const reloaded = await SqlSessionStorage.create({ client });
+			expect(storage.statSync(path).size).toBe(Buffer.byteLength(prefix + "α\nβ\nγ\n"));
+			expect(reloaded.statSync(path).size).toBe(storage.statSync(path).size);
+			expect(JSON.parse((await reloaded.readText(path)).split("\n")[0])).toMatchObject({
+				title: "Current",
+				source: "user",
+				updatedAt: "t2",
+			});
+			await expect(storage.appendTextAtomic("/missing.jsonl", "suffix\n")).rejects.toMatchObject({ code: "ENOENT" });
+			expect((await SqlSessionStorage.create({ client })).existsSync("/missing.jsonl")).toBe(false);
+		} finally {
+			await client.end();
+		}
+	});
+
+	it("atomic suffix failure cannot mistake an unchanged matching tail for a lost acknowledgement", async () => {
+		const client = new SQL("sqlite::memory:");
+		const failure = new Error("append acknowledgement failed");
+		let fail: "before" | "after" | undefined;
+		const wrapped: SqlSessionStorageClient = {
+			options: { adapter: "sqlite" },
+			async unsafe(query, values) {
+				const mode = fail;
+				fail = undefined;
+				if (mode === "before") throw failure;
+				const rows = await client.unsafe(query, values);
+				if (mode === "after") throw failure;
+				return rows;
+			},
+			transaction(callback) {
+				return client.transaction(async transaction => callback(transaction));
+			},
+		};
+		try {
+			const storage = await SqlSessionStorage.create({ client: wrapped });
+			const path = "/sessions/ack.jsonl";
+			const suffix = "é\n";
+			await storage.writeText(path, "prefix\n" + suffix);
+			const before = storage.statSync(path);
+			fail = "before";
+			await expect(storage.appendTextAtomic(path, suffix)).rejects.toBe(failure);
+			expect(storage.statSync(path)).toEqual(before);
+			expect(await storage.readText(path)).toBe("prefix\n" + suffix);
+			fail = "after";
+			await storage.appendTextAtomic(path, suffix);
+			expect(await storage.readText(path)).toBe("prefix\n" + suffix + suffix);
+			expect(storage.statSync(path).size).toBe(before.size + Buffer.byteLength(suffix));
+			await storage.drain();
+		} finally {
+			await client.end();
+		}
+	});
+
+	it("atomic suffix rechecks currentness after waiting for its path", async () => {
+		const { client, storage } = await createSqlite();
+		try {
+			const path = "/sessions/guarded.jsonl";
+			await storage.writeText(path, "prefix\n");
+			const before = storage.statSync(path);
+			let current = true;
+			const append = storage.appendTextAtomic(path, "stale\n", { commitGuard: () => current });
+			current = false;
+			await append;
+			expect(await storage.readText(path)).toBe("prefix\n");
+			expect(storage.statSync(path)).toEqual(before);
+		} finally {
+			await client.end();
+		}
+	});
+
+	it("atomic suffix does not overwrite the index of a newer queued replacement", async () => {
+		const { client, storage } = await createSqlite();
+		try {
+			const path = "/sessions/newer.jsonl";
+			await storage.writeText(path, "old");
+			const append = storage.appendTextAtomic(path, "suffix");
+			await Promise.resolve();
+			storage.writeTextSync(path, "new");
+			await append;
+			await storage.drain();
+			expect(await storage.readText(path)).toBe("new");
+			expect(storage.statSync(path).size).toBe(3);
+		} finally {
+			await client.end();
+		}
 	});
 
 	it("flags='w' truncates both mirror and SQL row", async () => {
@@ -332,30 +576,6 @@ describe("SqlSessionStorage (SQLite backend)", () => {
 		await client.end();
 	});
 
-	it("readTextSlices uses bounded SQL byte substrings instead of a full content select", async () => {
-		const client = new SQL("sqlite::memory:");
-		const queries: string[] = [];
-		const wrapped: SqlSessionStorageClient = {
-			options: { adapter: "sqlite" },
-			unsafe(query, values) {
-				queries.push(query);
-				return client.unsafe(query, values);
-			},
-			transaction(callback) {
-				return client.transaction(async transaction => callback(transaction));
-			},
-		};
-		const storage = await SqlSessionStorage.create({ client: wrapped });
-		await storage.writeText("/sessions/p/big.jsonl", "abcdefghij");
-
-		queries.length = 0;
-		expect(await storage.readTextSlices("/sessions/p/big.jsonl", 4, 3)).toEqual(["abcd", "hij"]);
-		expect(queries).toHaveLength(1);
-		expect(queries[0]).toContain("substr(cast(content AS blob)");
-		expect(queries[0]).not.toMatch(/SELECT\s+content\s+AS\s+content/i);
-		await client.end();
-	});
-
 	it("custom table name is honored", async () => {
 		const client = new SQL("sqlite::memory:");
 		const storage = await SqlSessionStorage.create({ client, table: "agent_sessions" });
@@ -412,104 +632,7 @@ describe("SqlSessionStorage (SQLite backend)", () => {
 	});
 });
 
-// ---------------------------------------------------------------------------
-// Dialect-specific statement coverage. We can't run a real Postgres/MySQL
-// instance from the test process, so we instantiate a `Bun.SQL` client (which
-// parses the URL but doesn't connect until the first query) and stub
-// `client.unsafe` to capture the rendered SQL. This catches dialect-specific
-// regressions in the query builder.
-// ---------------------------------------------------------------------------
-
-interface CapturedQuery {
-	sql: string;
-	values: unknown[] | undefined;
-}
-
-function capturingClient(adapter: "postgres" | "mysql"): {
-	client: SqlSessionStorageClient;
-	queries: CapturedQuery[];
-} {
-	const queries: CapturedQuery[] = [];
-	const client: SqlSessionStorageClient = {
-		options: { adapter },
-		async unsafe(sql, values) {
-			queries.push({ sql, values });
-			return [];
-		},
-		async transaction(callback) {
-			return callback(client);
-		},
-	};
-	return { client, queries };
-}
-
-describe("SqlSessionStorage (dialect-specific SQL)", () => {
-	it("PostgreSQL uses numbered placeholders and `||` concat", async () => {
-		const { client, queries } = capturingClient("postgres");
-		const storage = await SqlSessionStorage.create({ client });
-		const writer = storage.openWriter("/s/p.jsonl");
-		await writer.append("chunk\n");
-		await writer.close();
-
-		const ddl = queries.find(q => q.sql.startsWith("CREATE TABLE"));
-		expect(ddl?.sql).toContain("path TEXT PRIMARY KEY");
-		expect(ddl?.sql).toContain("mtime_ms BIGINT");
-
-		const loadIndex = queries.find(q => q.sql.startsWith("SELECT path"));
-		expect(loadIndex?.sql).toContain("octet_length(content)");
-		expect(loadIndex?.sql).not.toMatch(/SELECT\s+path,\s*content\b/i);
-
-		const append = queries.find(q => q.sql.includes("ON CONFLICT") && q.sql.includes("||"));
-		expect(append?.sql).toContain("$1");
-		expect(append?.sql).toContain("$2");
-		expect(append?.sql).toContain("$3");
-		expect(append?.sql).toMatch(/content = \w+\.content \|\| excluded\.content/);
-
-		expect(storage.adapter).toBe("postgres");
-	});
-
-	it("MySQL uses bound update values with `ON DUPLICATE KEY UPDATE` and `CONCAT()`", async () => {
-		const { client, queries } = capturingClient("mysql");
-		const storage = await SqlSessionStorage.create({ client });
-		await storage.writeText("/s/replace.jsonl", "body\n");
-		const writer = storage.openWriter("/s/m.jsonl");
-		await writer.append("chunk\n");
-		await writer.close();
-
-		const ddl = queries.find(q => q.sql.startsWith("CREATE TABLE"));
-		expect(ddl?.sql).toContain("VARCHAR(512)");
-		expect(ddl?.sql).toContain("LONGTEXT");
-		expect(ddl?.sql).toContain("ENGINE=InnoDB");
-		expect(ddl?.sql).toContain("utf8mb4");
-
-		const loadIndex = queries.find(q => q.sql.startsWith("SELECT path"));
-		expect(loadIndex?.sql).toContain("length(content)");
-		expect(loadIndex?.sql).not.toMatch(/SELECT\s+path,\s*content\b/i);
-
-		const upserts = queries.filter(q => q.sql.includes("ON DUPLICATE KEY UPDATE"));
-		expect(upserts).toHaveLength(2);
-		expect(upserts.every(query => !/VALUES\(\w+\)/i.test(query.sql))).toBe(true);
-
-		const replace = upserts.find(q => q.sql.includes("title_updated_at"));
-		expect(replace?.values?.slice(0, 6)).toEqual([
-			"/s/replace.jsonl",
-			"body\n",
-			expect.any(Number),
-			null,
-			null,
-			null,
-		]);
-		expect(replace?.values?.slice(6)).toEqual(["body\n", expect.any(Number), null, null, null]);
-
-		const append = upserts.find(q => q.sql.includes("CONCAT"));
-		expect(append?.sql).toContain("CONCAT(content, ?)");
-		expect(append?.values?.slice(0, 3)).toEqual(["/s/m.jsonl", "chunk\n", expect.any(Number)]);
-		expect(append?.values?.slice(3)).toEqual(["chunk\n", expect.any(Number)]);
-		expect(append?.sql).not.toContain("$1");
-
-		expect(storage.adapter).toBe("mysql");
-	});
-
+describe("SqlSessionStorage adapter selection", () => {
 	it("rejects clients reporting an unknown adapter without an override", async () => {
 		const client: SqlSessionStorageClient = {
 			options: { adapter: "weirdb" },

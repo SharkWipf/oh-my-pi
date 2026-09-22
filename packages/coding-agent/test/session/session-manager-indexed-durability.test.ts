@@ -16,7 +16,10 @@ import {
 	type SessionStorageBackend,
 	type SessionStorageIndexEntry,
 } from "@oh-my-pi/pi-coding-agent/session/indexed-session-storage";
-import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import {
+	SessionManager,
+	SessionPersistenceIndeterminateError,
+} from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { SessionWriteConflictError } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 
 class FakeBackend implements SessionStorageBackend {
@@ -49,12 +52,17 @@ class FakeBackend implements SessionStorageBackend {
 		return [prefix, suffix];
 	}
 
-	async append(path: string, line: string): Promise<void> {
+	async append(path: string, line: string, _mtimeMs: number, expectedSize?: number | null): Promise<void> {
 		if (this.failAppends > 0) {
 			this.failAppends -= 1;
 			throw new Error("transient backend append failure");
 		}
-		this.files.set(path, (this.files.get(path) ?? "") + line);
+		const current = this.files.get(path);
+		const actualSize = current === undefined ? null : Buffer.byteLength(current, "utf8");
+		if (expectedSize !== undefined && actualSize !== expectedSize) {
+			throw new SessionWriteConflictError(path, expectedSize, actualSize);
+		}
+		this.files.set(path, (current ?? "") + line);
 		this.mtimes.set(path, this.#mtime++);
 	}
 
@@ -139,6 +147,39 @@ async function makeManager(): Promise<{
 }
 
 describe("SessionManager + indexed backend durability", () => {
+	it("late append confirmation cannot advance a restored snapshot over durable content", async () => {
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		class DelayedBackend extends FakeBackend {
+			override async append(
+				path: string,
+				line: string,
+				mtimeMs: number,
+				expectedSize?: number | null,
+			): Promise<void> {
+				started.resolve();
+				await release.promise;
+				await super.append(path, line, mtimeMs, expectedSize);
+			}
+		}
+		const backend = new DelayedBackend();
+		const storage = new IndexedSessionStorage(backend);
+		await storage.initialize();
+		const manager = SessionManager.create("/cwd", "/sessions/proj", storage);
+		await manager.ensureOnDisk();
+		const snapshot = manager.captureState();
+		manager.appendMessage({ role: "user", content: "late durable turn", timestamp: 1 });
+		await started.promise;
+		manager.restoreState(snapshot);
+		release.resolve();
+		await storage.drain();
+		await manager.flush();
+		expect(manager.captureState().expectedDiskSize).toBe(snapshot.expectedDiskSize);
+		await expect(manager.recoverPersistenceFromCurrentState()).rejects.toBeInstanceOf(
+			SessionPersistenceIndeterminateError,
+		);
+		expect(await storage.readText(snapshot.sessionFile!)).toContain("late durable turn");
+	});
 	it("does not advance the durable size before the backend confirms the append", async () => {
 		const { backend, storage, manager } = await makeManager();
 		const sessionFile = manager.getSessionFile();

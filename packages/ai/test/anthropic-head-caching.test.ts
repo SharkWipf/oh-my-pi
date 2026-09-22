@@ -26,6 +26,7 @@ import type {
 } from "@oh-my-pi/pi-ai/types";
 import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { bindMessageSource, getSourceOrigin, type NativeItemOrigin } from "@oh-my-pi/pi-ai/utils/source-origin";
 
 const MODEL_SPEC: ModelSpec<"anthropic-messages"> = {
 	id: "claude-sonnet-4-5",
@@ -672,5 +673,41 @@ describe("anthropic head caching (general API-key path)", () => {
 			.map((block, index) => ("cache_control" in block && block.cache_control != null ? index : -1))
 			.filter(index => index >= 0);
 		expect(cachedSystem).toContain(systemAfter.length - 1);
+	});
+	it("preserves source ranges through both string and block cache-control conversion", async () => {
+		for (const content of ["source text", [{ type: "text" as const, text: "source text" }]]) {
+			const message: Message = { role: "user", content, timestamp: 1 };
+			bindMessageSource(message, "cached-source", 0, "original");
+			let cachedOrigin: NativeItemOrigin | undefined;
+			let wireBody: MessageCreateParams | undefined;
+			await streamAnthropic(
+				VISION_MODEL,
+				{ messages: [message] },
+				{
+					apiKey: "sk-ant-api-test",
+					cacheRetention: "short",
+					onPayload(payload) {
+						const block = (payload as MessageCreateParams).messages[0]?.content;
+						if (Array.isArray(block) && block[0]) cachedOrigin = getSourceOrigin(block[0]);
+					},
+					fetch: (async (_input: string | URL | Request, init?: RequestInit) => {
+						wireBody = JSON.parse(String(init?.body)) as MessageCreateParams;
+						return new Response(
+							JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "captured" } }),
+							{ status: 400, headers: { "Content-Type": "application/json" } },
+						);
+					}) as typeof fetch,
+				},
+			).result();
+			expect(cachedOrigin).toMatchObject({
+				kind: "source",
+				parts: [
+					{ entryId: "cached-source", projection: "original", blockIndex: 0, sourceSpan: { start: 0, end: 11 } },
+				],
+			});
+			expect(wireBody?.messages[0]?.content).toEqual([
+				{ type: "text", text: "source text", cache_control: { type: "ephemeral" } },
+			]);
+		}
 	});
 });

@@ -19,6 +19,12 @@ import {
 	type CompactionMethod,
 	DEFAULT_COMPACTION_METHOD_ORDER,
 } from "../session/compaction-methods";
+import {
+	DEFAULT_MAX_TOKENS_PER_USER_MESSAGE,
+	PRESERVED_USER_MESSAGE_FILTER_KEEP_CAPS,
+	PRUNE_LONG_USER_MESSAGE_MODES,
+	type PreservedUserMessageRegexRule,
+} from "../session/preserved-message-settings";
 import { STT_SUBMIT_TRIGGER_OPTIONS, STT_SUBMIT_TRIGGER_VALUES } from "../stt/submit-trigger";
 import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
 import {
@@ -226,6 +232,7 @@ export interface ModelTagsSettings {
 const EMPTY_STRING_ARRAY: string[] = [];
 const EMPTY_STRING_RECORD: Record<string, string> = {};
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
+const EMPTY_PRESERVATION_REGEX_RULES: Record<string, PreservedUserMessageRegexRule> = {};
 const EMPTY_AGENT_SERVICE_TIER_OVERRIDES: Record<string, ServiceTierInheritSettingValue> = {};
 const DEFAULT_CYCLE_ORDER: string[] = ["smol", "default", "slow"];
 const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["hub"];
@@ -2730,6 +2737,305 @@ export const SETTINGS_SCHEMA = {
 			label: "Elide Uneventful Results",
 			description:
 				"Prune tool results flagged contextually useless (no matches, timed-out waits) once consumed (cache-aware)",
+		},
+	},
+
+	"compaction.keepUserMessages": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "context",
+			group: "User Message Preservation",
+			label: "Remember User Messages",
+			description:
+				"After compaction, keep selected user messages beside the summary and normal recent history. Enables First/Recent, recent protection and filters. Off still honors manual Always (/keep) and its limit.",
+		},
+	},
+
+	"compaction.keepFirstLimit": {
+		type: "string",
+		default: "all",
+		ui: {
+			tab: "context",
+			group: "User Message Preservation",
+			label: "Keep First Limit",
+			description:
+				"With Remember User Messages on, keep the oldest user messages that pass filters after compaction. Off adds none; All keeps all. Combined with Recent/protection. Rule / Manual Keep can reuse this budget.",
+		},
+	},
+
+	"compaction.keepLastLimit": {
+		type: "string",
+		default: "all",
+		ui: {
+			tab: "context",
+			group: "User Message Preservation",
+			label: "Keep Recent Limit",
+			description:
+				"With Remember User Messages on, keep the newest user messages that pass filters after compaction. Off adds none; All keeps all. Combined with First/protection. Rule / Manual Keep can reuse this budget.",
+		},
+	},
+
+	"compaction.keepRecentUserMessagesLimit": {
+		type: "string",
+		default: "off",
+		ui: {
+			tab: "context",
+			group: "User Message Preservation",
+			label: "Protect Most-Recent Limit",
+			description:
+				"With Remember User Messages on, keep newest user messages intact after compaction, overriding filters, manual Never and pruning. Separate from other keep limits. Off protects none; All protects all.",
+		},
+	},
+
+	"compaction.pruneLongUserMessages": {
+		type: "enum",
+		values: PRUNE_LONG_USER_MESSAGE_MODES,
+		default: "no",
+		ui: {
+			tab: "context",
+			group: "User Message Preservation",
+			label: "Prune Kept Long Messages",
+			description:
+				"Automatic keeps above Max Tokens Per Message: no = intact; middle-out = trim middle; head-only = keep start; tail-only = keep end; exclude = skip. Manual Always/protected recent are exempt. Trimming retains images.",
+		},
+	},
+
+	"compaction.maxTokensPerUserMessage": {
+		type: "number",
+		default: DEFAULT_MAX_TOKENS_PER_USER_MESSAGE,
+		ui: {
+			tab: "context",
+			group: "User Message Preservation",
+			label: "Max Tokens Per Message",
+			description:
+				"Text-plus-image token threshold for Prune Kept Long Messages; enter a positive whole number. Not a total retention budget. Manual Always and protected recent messages are exempt.",
+		},
+	},
+
+	"compaction.keepUserMessagesFilterKeepCap": {
+		type: "enum",
+		values: PRESERVED_USER_MESSAGE_FILTER_KEEP_CAPS,
+		default: "keep-last",
+		ui: {
+			tab: "context",
+			group: "User Message Preservation Filtering",
+			label: "Rule / Manual Keep Limit",
+			description:
+				"After compaction, additionally keep filter Keep or manual Always (/keep) messages, including assistant/tools. Reuses First/Recent budget; overlaps kept once, not a total cap. Open for order and budget rules.",
+		},
+	},
+
+	"compaction.keepUserMessagesHeuristic": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "context",
+			group: "User Message Preservation Filtering",
+			label: "Use Heuristics Filter",
+			description: "Remove or fall through only; never Keep. Saved settings survive disabling.",
+		},
+	},
+
+	"compaction.keepUserMessagesRegex": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "context",
+			group: "User Message Preservation Filtering",
+			label: "Use Custom Regex Filters",
+			description:
+				"Ordinary RE2 before classifier policy; Final after it. Keep wins same-stage conflicts; Auto is neutral.",
+		},
+	},
+
+	"compaction.keepUserMessagesClassifierFilter": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "context",
+			group: "User Message Preservation Filtering",
+			label: "Use Classifier Filter",
+			description: "Apply stored categories without scheduling requests, independently of live classification.",
+		},
+	},
+
+	"compaction.keepUserMessagesRegexRules": {
+		type: "record",
+		default: EMPTY_PRESERVATION_REGEX_RULES,
+		ui: {
+			tab: "context",
+			group: "User Message Preservation Filtering",
+			label: "Custom Regex Rules",
+			description:
+				"RE2 Condition, Auto (disabled) / Keep / Never, case-insensitivity, Final (default off). Validate before save.",
+		},
+	},
+
+	"compaction.keepUserMessagesLlmLongTermRule": {
+		type: "enum",
+		values: ["auto", "keep", "exclude"] as const,
+		default: "keep",
+		ui: {
+			tab: "context",
+			group: "User Message Preservation Filtering",
+			label: "Long-term rule / specification",
+			description:
+				"Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
+		},
+	},
+
+	"compaction.keepUserMessagesLlmLongTermGoal": {
+		type: "enum",
+		values: ["auto", "keep", "exclude"] as const,
+		default: "keep",
+		ui: {
+			tab: "context",
+			group: "User Message Preservation Filtering",
+			label: "Long-term goal / feature",
+			description:
+				"Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
+		},
+	},
+
+	"compaction.keepUserMessagesLlmLastingSolution": {
+		type: "enum",
+		values: ["auto", "keep", "exclude"] as const,
+		default: "keep",
+		ui: {
+			tab: "context",
+			group: "User Message Preservation Filtering",
+			label: "Lasting solution / guidance",
+			description:
+				"Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
+		},
+	},
+
+	"compaction.keepUserMessagesLlmShortTermTask": {
+		type: "enum",
+		values: ["auto", "keep", "exclude"] as const,
+		default: "auto",
+		ui: {
+			tab: "context",
+			group: "User Message Preservation Filtering",
+			label: "Short-term task / improvement",
+			description:
+				"Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
+		},
+	},
+
+	"compaction.keepUserMessagesLlmShortTermContext": {
+		type: "enum",
+		values: ["auto", "keep", "exclude"] as const,
+		default: "auto",
+		ui: {
+			tab: "context",
+			group: "User Message Preservation Filtering",
+			label: "Short-term context / instruction",
+			description:
+				"Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
+		},
+	},
+
+	"compaction.keepUserMessagesLlmVenting": {
+		type: "enum",
+		values: ["auto", "keep", "exclude"] as const,
+		default: "exclude",
+		ui: {
+			tab: "context",
+			group: "User Message Preservation Filtering",
+			label: "Venting after a failure",
+			description:
+				"Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
+		},
+	},
+
+	"compaction.keepUserMessagesLlmRestorationGuidance": {
+		type: "enum",
+		values: ["auto", "keep", "exclude"] as const,
+		default: "auto",
+		ui: {
+			tab: "context",
+			group: "User Message Preservation Filtering",
+			label: "Restoration guidance",
+			description:
+				"Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
+		},
+	},
+
+	"compaction.keepUserMessagesLlmPreventionGuidance": {
+		type: "enum",
+		values: ["auto", "keep", "exclude"] as const,
+		default: "auto",
+		ui: {
+			tab: "context",
+			group: "User Message Preservation Filtering",
+			label: "Prevention guidance",
+			description:
+				"Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
+		},
+	},
+
+	"compaction.keepUserMessagesLlmContextFreeInstruction": {
+		type: "enum",
+		values: ["auto", "keep", "exclude"] as const,
+		default: "auto",
+		ui: {
+			tab: "context",
+			group: "User Message Preservation Filtering",
+			label: "Context-free instruction",
+			description:
+				"Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
+		},
+	},
+
+	"compaction.keepUserMessagesLlmBanter": {
+		type: "enum",
+		values: ["auto", "keep", "exclude"] as const,
+		default: "exclude",
+		ui: {
+			tab: "context",
+			group: "User Message Preservation Filtering",
+			label: "Banter / no lasting information",
+			description:
+				"Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
+		},
+	},
+
+	"compaction.keepUserMessagesLlmQuestion": {
+		type: "enum",
+		values: ["auto", "keep", "exclude"] as const,
+		default: "auto",
+		ui: {
+			tab: "context",
+			group: "User Message Preservation Filtering",
+			label: "Question",
+			description:
+				"Stored category action: Auto is neutral; Keep wins over Never. Category numbering is not priority.",
+		},
+	},
+
+	"compaction.keepUserMessagesLlm": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "context",
+			group: "User Message Classifier (LLM)",
+			label: "Auto-Classify New User Messages",
+			description:
+				"Launch background tagging only while Remember User Messages is enabled. Can consume substantial tokens; explicit classification and stored tags are independent.",
+		},
+	},
+
+	"compaction.keepUserMessagesLlmModel": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "context",
+			group: "User Message Classifier (LLM)",
+			label: "Model",
+			description:
+				"Registered role/model for live and explicit classification. Automatic uses @tiny; unavailable models are explained before requests.",
 		},
 	},
 

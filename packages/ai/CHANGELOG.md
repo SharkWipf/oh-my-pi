@@ -53,9 +53,12 @@
 - Bedrock no longer sends provider-invalid payloads when an errored tool result contains an image; the image is hoisted into a sibling block ([#12865](https://github.com/can1357/oh-my-pi/pull/12865) by [@roboomp](https://github.com/roboomp)).
 - Gemini, Vertex, and Cloud Code Assist requests no longer include the unsupported `minP`/`repetitionPenalty` sampling fields, which caused 400s when set globally ([#12850](https://github.com/can1357/oh-my-pi/pull/12850) by [@roboomp](https://github.com/roboomp)).
 - Added guarded transient inline-rendering facts to source-origin metadata. Known clone operations preserve them; changed blocks, unknown hook output, and persisted metadata cannot retain stale physical attribution.
+- Added shared `OriginalSubmission` and `UserMessageProducer` metadata contracts for host-recorded user input and producer identity, separate from delivered content and billing attribution.
 
 ### Fixed
 
+- Preserve local source and original-image provenance through Codex, OpenAI, and Azure request builders, native replay, one-to-many tool emissions, and clone/filter operations without adding provider-wire fields. Mapped full snapshots do not duplicate their input prefix; arbitrary request hooks invalidate unsupported source attribution.
+- Preserve Anthropic source origins through text, tool exchanges, cache-control copies, and mid-conversation system/control conversion. Replayed native summaries and encrypted state retain aggregate provenance rather than claiming exact original-source content.
 - Preserved optional native source attribution through interleaved Codex completion ordering and schema-directed replay redaction without changing provider item order or exposing local metadata on the wire.
 - Native source binding now keeps journal payloads byte-for-byte unchanged during context reconstruction and compaction projections, while preserving transient replay provenance and authoritative invalidation.
 - Kept differing original-submission and delivered-message source coordinates distinct through native history deduplication, persistence, and controlled rewrites. Ordinary messages still need no source metadata.

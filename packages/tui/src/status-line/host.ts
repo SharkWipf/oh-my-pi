@@ -67,7 +67,16 @@ export interface FooterSession {
 	autoResolvedThinkingLevel(): string | undefined;
 	getContextUsage: StatusLineSession["getContextUsage"];
 	modelRegistry: Pick<StatusLineSession["modelRegistry"], "isUsingOAuth">;
-	sessionManager: { getEntries(): readonly { type: string; message?: AgentMessage }[] };
+	sessionManager: {
+		getAssistantUsageStatistics(): {
+			input: number;
+			output: number;
+			cacheRead: number;
+			cacheWrite: number;
+			premiumRequests: number;
+			cost: number;
+		};
+	};
 }
 
 /**

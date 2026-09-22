@@ -29,6 +29,7 @@ import type { AssistantMessage, Context, Model, ModelSpec, UserMessage } from "@
 import { type ConversationalUserCarrier, kConversationalUser } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { withEnv, withOfficialAnthropicEndpoint } from "./helpers";
+import { bindMessageSource, getSourceOrigin, setSourceOrigin } from "@oh-my-pi/pi-ai/utils/source-origin";
 
 const fableSpec: ModelSpec<"anthropic-messages"> = {
 	id: "claude-fable-5",
@@ -693,16 +694,45 @@ describe("anthropic server-side compaction replay", () => {
 	});
 
 	it("round-trips the opaque encrypted_content verbatim with the block", () => {
-		const params = convertAnthropicMessages(
-			[compactionSummaryMessage("anthropic", SUMMARY, ENCRYPTED), { role: "user", content: "next", timestamp: 2 }],
-			fableModel,
-			false,
-			{ replayCompaction: true },
-		);
+		const summary = compactionSummaryMessage("anthropic", SUMMARY, ENCRYPTED);
+		setSourceOrigin(summary, { kind: "aggregate", compactionEntryId: "native-summary" });
+		const original: UserMessage = {
+			role: "user",
+			content: [
+				{ type: "text", text: "original submission" },
+				{ type: "image", data: "aGVsbG8=", mimeType: "image/png" },
+			],
+			timestamp: 2,
+		};
+		bindMessageSource(original, "original-source", 1, "original");
+		const params = convertAnthropicMessages([summary, original], { ...fableModel, input: ["text", "image"] }, false, {
+			replayCompaction: true,
+		});
 
 		expect(params[0]).toEqual({
 			role: "assistant",
 			content: [{ type: "compaction", content: SUMMARY, encrypted_content: ENCRYPTED }],
+		});
+		const summaryContent = params[0]!.content;
+		if (typeof summaryContent === "string") throw new Error("Expected native compaction block");
+		expect(getSourceOrigin(summaryContent[0]!)).toEqual({ kind: "aggregate", compactionEntryId: "native-summary" });
+		expect(getSourceOrigin(params[0]!)).toEqual({ kind: "aggregate", compactionEntryId: "native-summary" });
+		expect(params[1]!.content).toEqual([
+			{ type: "text", text: "original submission" },
+			{ type: "image", source: { type: "base64", media_type: "image/png", data: "aGVsbG8=" } },
+		]);
+		expect(getSourceOrigin(params[1]!)).toMatchObject({
+			kind: "source",
+			parts: [
+				{ entryId: "original-source", projection: "original", blockIndex: 0, transportBlockIndex: 0 },
+				{
+					entryId: "original-source",
+					projection: "original",
+					blockIndex: 1,
+					representation: "original-image",
+					transportBlockIndex: 1,
+				},
+			],
 		});
 	});
 

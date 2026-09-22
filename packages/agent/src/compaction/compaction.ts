@@ -23,7 +23,12 @@ import {
 	type Usage,
 	withAuth,
 } from "@oh-my-pi/pi-ai";
-import type { SourceBlockRange, SourceMessage, SourceRepresentation } from "@oh-my-pi/pi-ai/compaction-source";
+import {
+	compactionSourceKey,
+	type SourceBlockRange,
+	type SourceMessage,
+	type SourceRepresentation,
+} from "@oh-my-pi/pi-ai/compaction-source";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createOpenAICodexCompactionRequestContext } from "@oh-my-pi/pi-ai/providers/openai-codex-compaction";
@@ -35,6 +40,14 @@ import type { InputItem as CodexInputItem } from "@oh-my-pi/pi-ai/providers/open
 import { convertTools } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { buildResponsesInput, resolveOpenAICompatPolicy } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { stripOpenAIResponsesOutputOnlyStatusesForReplay } from "@oh-my-pi/pi-ai/utils";
+import {
+	bindMessageSource,
+	cloneWithSourceOrigins,
+	combineSourceOrigins,
+	getSourceOrigin,
+	mergeSourceHistory,
+	setSourceOrigin,
+} from "@oh-my-pi/pi-ai/utils/source-origin";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
@@ -60,6 +73,7 @@ import {
 	shouldUseCompactionV2Streaming,
 	storeCompactionV2PreserveData,
 	V2_RETAINED_MESSAGE_TOKEN_BUDGET,
+	unionNativeUserHistory,
 } from "./compaction-v2-streaming";
 import type { CompactionEntry, SessionEntry } from "./entries";
 import type { CompactionDiagnostics } from "./diagnostics";
@@ -73,6 +87,8 @@ import {
 } from "./messages";
 import {
 	buildOpenAiNativeHistory,
+	buildCompleteNativeAtomItems,
+	composeOpenAiHistoricalInput,
 	getPreservedOpenAiRemoteCompactionData,
 	isOpenAiRemoteCompactionApi,
 	requestOpenAiRemoteCompaction,
@@ -1254,6 +1270,8 @@ export type CompactionSelectedSource = SourceMessage<AgentMessage> & { spans?: S
 
 /** Frozen, policy-admitted sources. Admission and user candidate pricing belong to the caller. */
 export interface CompactionSourceSelection {
+	/** Normal host reader for differing pre-expansion submission bytes. */
+	originalSourceMessage?: (message: Extract<Message, { role: "user" }>) => Extract<Message, { role: "user" }>;
 	/** Frozen selecting reasons and source quota counters, never physical charges. */
 	selectionReasons?: Record<string, string[]>;
 	selectionQuota?: Record<string, { count: number; tokens: number }>;
@@ -1441,14 +1459,20 @@ export function prepareCompaction(
 	// its sparse members, not the intervening journal entries a scalar cut would resurrect.
 	const sourceEntries = pathEntries;
 	const sourceStart = resetBoundaryIndex + 1;
+	const previousEntry = prevCompactionIndex >= 0 ? (sourceEntries[prevCompactionIndex] as CompactionEntry) : undefined;
+	const previousSource = getCompactionSourceRepresentation(previousEntry?.preserveData);
+	const trackSources =
+		!!previousSource ||
+		!!sourceSelection?.selectedSources?.length ||
+		!!sourceSelection?.admittedNonUserSources?.length ||
+		!!sourceSelection?.pendingSourceEntryIds?.size;
 	const sourceById = new Map<string, SourceMessage<AgentMessage>>();
-	for (let i = sourceStart; i < sourceEntries.length; i++) {
+	const representedSources = new WeakMap<SessionEntry, SourceMessage<AgentMessage>>();
+	for (let i = sourceStart; trackSources && i < sourceEntries.length; i++) {
 		const entry = sourceEntries[i];
 		const message = getMessageFromEntry(entry);
 		if (message) sourceById.set(entry.id, { entryId: entry.id, order: i, message });
 	}
-	const previousEntry = prevCompactionIndex >= 0 ? (sourceEntries[prevCompactionIndex] as CompactionEntry) : undefined;
-	const previousSource = getCompactionSourceRepresentation(previousEntry?.preserveData);
 	if (
 		previousEntry &&
 		previousSource?.throughEntryId &&
@@ -1457,21 +1481,16 @@ export function prepareCompaction(
 	) {
 		const throughIndex = sourceEntries.findIndex(entry => entry.id === previousSource.throughEntryId);
 		if (throughIndex >= sourceStart) {
-			const represented = new Map(
-				previousSource.layout.flatMap(part => (part.kind === "source" ? [[part.entryId, part] as const] : [])),
-			);
+			const represented = new Map<string, Extract<SourceRepresentation["layout"][number], { kind: "source" }>[]>();
+			for (const part of previousSource.layout) {
+				if (part.kind !== "source") continue;
+				const parts = represented.get(part.entryId);
+				if (parts) parts.push(part);
+				else represented.set(part.entryId, [part]);
+			}
 			for (const run of previousSource.coverage) {
 				const source = sourceById.get(run.entryId);
 				if (source && run.atomicGroup) source.atomicGroup = run.atomicGroup;
-			}
-			let pendingStart = throughIndex + 1;
-			if (sourceSelection?.pendingSourceEntryIds?.size) {
-				for (let i = sourceStart; i <= throughIndex; i++) {
-					if (!sourceSelection.pendingSourceEntryIds.has(sourceEntries[i].id)) continue;
-					const turnStart = findTurnStartIndex(sourceEntries, i, sourceStart);
-					pendingStart = turnStart >= 0 ? turnStart : sourceStart;
-					break;
-				}
 			}
 			const ordinaryEntries: SessionEntry[] = [];
 			for (let i = sourceStart; i < sourceEntries.length; i++) {
@@ -1480,15 +1499,27 @@ export function prepareCompaction(
 					ordinaryEntries.push(entry);
 					continue;
 				}
-				const part = represented.get(entry.id);
-				const pending = i >= pendingStart;
+				const parts = represented.get(entry.id);
 				const source = sourceById.get(entry.id);
-				if ((!part && !pending) || !source) continue;
-				const spans = pending ? undefined : part?.spans;
-				const message = materializeCompactionSourceMessage(source.message, spans);
-				if (!message) continue;
-				source.spans = spans;
-				ordinaryEntries.push({ ...entry, type: "message", message });
+				if (!parts || !source) continue;
+				for (const part of parts) {
+					let original = source.message;
+					if (part.projection === "original") {
+						if (original.role !== "user" || !sourceSelection?.originalSourceMessage)
+							throw new Error("Original submission reader unavailable for compacted source " + entry.id);
+						original = sourceSelection.originalSourceMessage(original);
+					}
+					const message = materializeCompactionSourceMessage(original, part.spans);
+					if (!message) continue;
+					const representedEntry: SessionEntry = { ...entry, type: "message", message };
+					representedSources.set(representedEntry, {
+						...source,
+						message: original,
+						spans: part.spans,
+						...(part.projection ? { projection: part.projection } : {}),
+					});
+					ordinaryEntries.push(representedEntry);
+				}
 			}
 			pathEntries = ordinaryEntries;
 			boundaryStart = 0;
@@ -1534,18 +1565,28 @@ export function prepareCompaction(
 	let prechargedTokens = 0;
 	for (let i = sourceStart; i < sourceEntries.length; i++) {
 		const entry = sourceEntries[i];
-		const selected = selectedById.get(entry.id);
-		if (!selected) continue;
+		let selected = selectedById.get(entry.id);
+		const pending = sourceSelection?.pendingSourceEntryIds?.has(entry.id);
+		if (!selected && !pending) continue;
 		const message = getMessageFromEntry(entry);
 		if (!message) continue;
-		selectedSources.push({ ...selected, entryId: entry.id, order: i, message });
-		if (nonUserById.has(entry.id) && message.role !== "user" && !prechargedEntryIds.has(entry.id)) {
-			prechargedTokens += tokenizer.countMessage(message);
+		if (pending && message.role === "user")
+			selected = {
+				...selected,
+				entryId: entry.id,
+				order: i,
+				message: selected?.message ?? message,
+				spans: undefined,
+			};
+		if (!selected) continue;
+		selectedSources.push({ ...selected, entryId: entry.id, order: i });
+		if (nonUserById.has(entry.id) && selected.message.role !== "user" && !prechargedEntryIds.has(entry.id)) {
+			prechargedTokens += tokenizer.countMessage(selected.message);
 			prechargedEntryIds.add(entry.id);
 		}
 	}
 	const residualBudget = Math.max(0, keepRecentTokens - prechargedTokens);
-	let cutPoint = findCutPoint(
+	const cutPoint = findCutPoint(
 		compactionEntries,
 		tokenizer,
 		0,
@@ -1553,18 +1594,8 @@ export function prepareCompaction(
 		residualBudget,
 		prechargedEntryIds,
 	);
-	if (sourceSelection?.pendingSourceEntryIds?.size) {
-		for (let i = 0; i < cutPoint.firstKeptEntryIndex; i++) {
-			if (!sourceSelection.pendingSourceEntryIds.has(compactionEntries[i].id)) continue;
-			// Keep the complete containing turn rather than orphaning an unresolved tool result.
-			const turnStart = findTurnStartIndex(compactionEntries, i, 0);
-			const firstKept = turnStart >= 0 ? turnStart : (findValidCutPoints(compactionEntries, 0, i + 1)[0] ?? i);
-			cutPoint = { firstKeptEntryIndex: firstKept, turnStartIndex: -1, isSplitTurn: false };
-			break;
-		}
-	}
 	const sourceReference = (entry: SessionEntry): SourceMessage<AgentMessage> => {
-		const source = sourceById.get(entry.id)!;
+		const source = representedSources.get(entry) ?? sourceById.get(entry.id)!;
 		const atomicGroup = selectedById.get(entry.id)?.atomicGroup ?? source.atomicGroup;
 		return atomicGroup === source.atomicGroup ? source : { ...source, atomicGroup };
 	};
@@ -1583,11 +1614,12 @@ export function prepareCompaction(
 		? compactionMessages.slice(cutPoint.turnStartIndex, cutPoint.firstKeptEntryIndex)
 		: [];
 	const recentMessages = compactionMessages.slice(cutPoint.firstKeptEntryIndex);
-	const sourcesToSummarize = compactionEntries.slice(0, historyEnd).map(sourceReference);
-	const turnPrefixSources = cutPoint.isSplitTurn
-		? compactionEntries.slice(cutPoint.turnStartIndex, cutPoint.firstKeptEntryIndex).map(sourceReference)
-		: [];
-	const recentSources = compactionEntries.slice(cutPoint.firstKeptEntryIndex).map(sourceReference);
+	const sourcesToSummarize = trackSources ? compactionEntries.slice(0, historyEnd).map(sourceReference) : [];
+	const turnPrefixSources =
+		trackSources && cutPoint.isSplitTurn
+			? compactionEntries.slice(cutPoint.turnStartIndex, cutPoint.firstKeptEntryIndex).map(sourceReference)
+			: [];
+	const recentSources = trackSources ? compactionEntries.slice(cutPoint.firstKeptEntryIndex).map(sourceReference) : [];
 	// Nothing to summarize means compaction would be a no-op.
 	if (messagesToSummarize.length === 0 && turnPrefixMessages.length === 0) {
 		return undefined;
@@ -1603,6 +1635,27 @@ export function prepareCompaction(
 		}
 	}
 
+	if (!trackSources)
+		return {
+			firstKeptEntryId,
+			messagesToSummarize,
+			turnPrefixMessages,
+			recentMessages,
+			isSplitTurn: cutPoint.isSplitTurn,
+			tokensBefore,
+			previousSummary: previousCompaction?.summary,
+			previousSummaryTimestamp: previousCompaction?.timestamp,
+			previousPreserveData: previousCompaction?.preserveData,
+			fileOps,
+			settings,
+			retentionTarget: {
+				configuredTokens: settings.keepRecentTokens,
+				calibratedTokens: keepRecentTokens,
+				manualNonUserTokens: 0,
+				residualTokens: residualBudget,
+			},
+		};
+
 	const aggregateIds = new Set(previousSource?.aggregate?.entryIds);
 	for (const run of previousSource?.coverage ?? []) if (run.normalized) aggregateIds.add(run.entryId);
 	for (const source of sourcesToSummarize) aggregateIds.add(source.entryId);
@@ -1614,11 +1667,11 @@ export function prepareCompaction(
 		layout: [],
 		aggregate: { entryIds: [...aggregateIds], reason: "summary" },
 	};
-	const ordinaryById = new Map(recentSources.map(source => [source.entryId, source]));
+	const ordinaryById = new Map(recentSources.map(source => [compactionSourceKey(source), source]));
 	const retainedById = new Map(ordinaryById);
 	for (const source of selectedSources) {
-		const ordinary = retainedById.get(source.entryId);
-		if (!ordinary || !source.spans) retainedById.set(source.entryId, source);
+		const ordinary = retainedById.get(compactionSourceKey(source));
+		if (!ordinary || !source.spans) retainedById.set(compactionSourceKey(source), source);
 		else if (ordinary.spans) {
 			const spans = [...ordinary.spans, ...source.spans].sort(
 				(a, b) => a.blockIndex - b.blockIndex || a.start - b.start,
@@ -1630,11 +1683,11 @@ export function prepareCompaction(
 					previous.end = Math.max(previous.end, span.end);
 				else union.push({ ...span });
 			}
-			retainedById.set(source.entryId, { ...ordinary, spans: union });
+			retainedById.set(compactionSourceKey(source), { ...ordinary, spans: union });
 		}
 	}
 	for (const source of [...retainedById.values()].sort((a, b) => a.order - b.order)) {
-		const ordinary = ordinaryById.get(source.entryId);
+		const ordinary = ordinaryById.get(compactionSourceKey(source));
 		const ordinarySpans =
 			ordinary?.spans && [...ordinary.spans].sort((a, b) => a.blockIndex - b.blockIndex || a.start - b.start);
 		// Physical additions are distinct from the complete N precharge above.
@@ -1646,6 +1699,7 @@ export function prepareCompaction(
 			contribution ??= owner;
 			sourceRepresentation.coverage.push({
 				entryId: source.entryId,
+				...(source.projection ? { projection: source.projection } : {}),
 				order: source.order,
 				atomicGroup: source.atomicGroup,
 				contribution: owner,
@@ -1698,6 +1752,7 @@ export function prepareCompaction(
 		sourceRepresentation.layout.push({
 			kind: "source",
 			entryId: source.entryId,
+			...(source.projection ? { projection: source.projection } : {}),
 			order: source.order,
 			spans: source.spans,
 			...(!mixedContribution && contribution ? { contribution } : {}),
@@ -1775,7 +1830,7 @@ function buildOpenAiResponsesCompactionInput(
 		nativeInput.push(item);
 	}
 	return stripOpenAIResponsesOutputOnlyStatusesForReplay(
-		previousReplacementHistory ? [...previousReplacementHistory, ...nativeInput] : nativeInput,
+		previousReplacementHistory ? mergeSourceHistory(previousReplacementHistory, nativeInput) : nativeInput,
 	);
 }
 
@@ -1824,6 +1879,57 @@ function formatRemoteCompactionSummary(inputTokens: number): string {
 		"Remote compaction preserved provider-native history for this session." +
 		(inputTokens > 0 ? ` Compaction processed ${inputTokens} input tokens.` : "")
 	);
+}
+
+function nativeSelectedMessages(
+	preparation: CompactionPreparation,
+	tokenizer: Tokenizer,
+): { messages: Message[]; nonUserSourceIds: string[]; nonUserTokens: number } {
+	const selected: Message[] = [];
+	const sourceIds = new Set<string>();
+	const nonUserSourceIds: string[] = [];
+	let nonUserTokens = 0;
+	for (const source of preparation.selectedSources ?? []) {
+		const original = source.message;
+		if (
+			original.role !== "user" &&
+			original.role !== "assistant" &&
+			original.role !== "toolResult" &&
+			original.role !== "developer"
+		)
+			continue;
+		const sourceKey = compactionSourceKey(source);
+		if (sourceIds.has(sourceKey)) continue;
+		sourceIds.add(sourceKey);
+		if (original.role !== "user") {
+			nonUserTokens += tokenizer.countMessage(original);
+			nonUserSourceIds.push(source.entryId);
+		}
+		bindMessageSource(original, source.entryId, source.order, source.projection);
+		const materialized = materializeCompactionSourceMessage(original, source.spans);
+		if (
+			!materialized ||
+			(materialized.role !== "user" &&
+				materialized.role !== "assistant" &&
+				materialized.role !== "toolResult" &&
+				materialized.role !== "developer")
+		)
+			continue;
+		const message = cloneWithSourceOrigins(materialized);
+		// A response delta belongs to this selected atom; a full snapshot also contains
+		// unrelated history and must never be admitted through its carrier.
+		if (
+			message.role !== "assistant" ||
+			message.providerPayload?.type !== "openaiResponsesHistory" ||
+			message.providerPayload.dt !== true
+		) {
+			if ("providerPayload" in message) delete message.providerPayload;
+		} else {
+			setSourceOrigin(message, combineSourceOrigins([message, ...message.providerPayload.items]));
+		}
+		selected.push(message);
+	}
+	return { messages: selected, nonUserSourceIds, nonUserTokens };
 }
 
 /**
@@ -1904,6 +2010,17 @@ export async function compact(
 			? createCompactionSummaryMessage(previousSummary, tokensBefore, new Date().toISOString())
 			: undefined;
 
+	// Migration aggregates must reach the provider once, but they are consumed by
+	// its new compaction item, not retained again as ordinary user source content.
+	for (const migration of [previousSummaryMigrationMessage, snapcompactArchiveMigrationMessage]) {
+		if (!migration) continue;
+		setSourceOrigin(migration, { kind: "synthetic", reason: "compaction-migration-aggregate" });
+		if ("content" in migration && Array.isArray(migration.content)) {
+			for (const block of migration.content) {
+				setSourceOrigin(block, { kind: "synthetic", reason: "compaction-migration-aggregate" });
+			}
+		}
+	}
 	let preserveData = withAnthropicCompactionPreserveData(
 		withOpenAiRemoteCompactionPreserveData(previousPreserveData, undefined),
 		undefined,
@@ -1915,7 +2032,44 @@ export async function compact(
 		...turnPrefixMessages,
 		...recentMessages,
 	];
+	const usesOpenAiNativeCompaction =
+		settings.remoteEnabled !== false &&
+		(shouldUseOpenAiRemoteCompaction(model) ||
+			(settings.remoteStreamingV2Enabled !== false && shouldUseCompactionV2Streaming(model)));
+	let frozenMessages: Message[] = [];
+	let selectedUsers: Message[] = [];
+	let selectedNonUsers: Message[] = [];
+	let nonUserSourceIds: string[] = [];
+	let nonUserTokens = 0;
+	if (usesOpenAiNativeCompaction) {
+		// Bind before cloning/conversion, then freeze the same operation for V2 and its V1 fallback.
+		for (const sources of [
+			preparation.sourcesToSummarize,
+			preparation.turnPrefixSources,
+			preparation.recentSources,
+		]) {
+			for (const source of sources ?? []) {
+				const message = source.message;
+				if (
+					message.role === "user" ||
+					message.role === "assistant" ||
+					message.role === "toolResult" ||
+					message.role === "developer"
+				) {
+					bindMessageSource(message, source.entryId, source.order, source.projection);
+				}
+			}
+		}
+		const nativeSelection = nativeSelectedMessages(preparation, new Tokenizer(model));
+		({ nonUserSourceIds, nonUserTokens } = nativeSelection);
+		const convertToLlm = summaryOptions.convertToLlm ?? defaultConvertToLlm;
+		frozenMessages = cloneWithSourceOrigins(convertToLlm(remoteMessages));
+		const selectedMessages = cloneWithSourceOrigins(convertToLlm(nativeSelection.messages));
+		selectedUsers = selectedMessages.filter(message => message.role === "user");
+		selectedNonUsers = selectedMessages.filter(message => message.role !== "user");
+	}
 	let usedRemoteCompaction = false;
+	let nativeRetentionTarget: CompactionResult["retentionTarget"];
 	let nativeCompactionError: unknown;
 	if (
 		settings.remoteEnabled !== false &&
@@ -1927,7 +2081,7 @@ export async function compact(
 			previousRemoteCompaction?.provider === model.provider
 				? previousRemoteCompaction.replacementHistory
 				: undefined;
-		const messages = (summaryOptions.convertToLlm ?? defaultConvertToLlm)(remoteMessages);
+		const messages = cloneWithSourceOrigins(frozenMessages);
 		const remoteSystemPrompt = summaryOptions.remoteSystemPrompt ?? [SUMMARIZATION_SYSTEM_PROMPT];
 		let codexBody: OpenAICodexCompactionBody | undefined;
 		let remoteHistory: Array<Record<string, unknown>>;
@@ -1972,6 +2126,47 @@ export async function compact(
 		}
 		if (remoteHistory.length > 0) {
 			try {
+				const serializeSelection = async (selection: Message[]): Promise<Array<Record<string, unknown>>> => {
+					if (!selection.length) return [];
+					const items = isCodexResponsesModel(model)
+						? (
+								await buildTransformedCodexRequestBody(
+									model,
+									{
+										systemPrompt: remoteSystemPrompt,
+										messages: cloneWithSourceOrigins(selection),
+										tools: summaryOptions.tools,
+									},
+									{
+										reasoning: resolveCompactionEffort(model, summaryOptions.thinkingLevel),
+										forceReasoningOff: summaryOptions.thinkingLevel === ThinkingLevel.Off,
+										responsesLite: model.useResponsesLite,
+									},
+								)
+							).input
+						: buildOpenAiResponsesCompactionInput(cloneWithSourceOrigins(selection), model, undefined);
+					return (Array.isArray(items) ? items : []).filter(
+						(item): item is Record<string, unknown> => isRecord(item) && getSourceOrigin(item)?.kind === "source",
+					);
+				};
+				const userCandidates = await serializeSelection(selectedUsers);
+				const nonUserItems = buildCompleteNativeAtomItems(
+					await serializeSelection(selectedNonUsers),
+					selectedNonUsers,
+				);
+				const ordinaryInput = remoteHistory;
+				const preservation = { userCandidates, nonUserSourceIds, nonUserItems, nonUserTokens, ordinaryInput };
+				const nonUserIds = new Set(nonUserSourceIds);
+				remoteHistory = unionNativeUserHistory(
+					mergeSourceHistory(
+						nonUserItems,
+						remoteHistory.filter(item => {
+							const origin = getSourceOrigin(item);
+							return origin?.kind !== "source" || !origin.parts.some(part => nonUserIds.has(part.entryId));
+						}),
+					),
+					userCandidates,
+				);
 				const instructions = codexBody
 					? typeof codexBody.instructions === "string"
 						? codexBody.instructions
@@ -1990,6 +2185,7 @@ export async function compact(
 					model.contextWindow,
 					instructions,
 					tools,
+					nonUserIds,
 				);
 				if (trimmed.rewrittenOutputs > 0) {
 					logger.info("Rewrote trailing tool outputs before OpenAI V2 remote compaction", {
@@ -2005,6 +2201,7 @@ export async function compact(
 					sessionId: summaryOptions.sessionId,
 					promptCacheKey: summaryOptions.promptCacheKey,
 					retainedMessageBudget: settings.v2RetainedMessageBudget,
+					preservation,
 				};
 				const request = codexBody
 					? buildCompactionV2RequestFromBody(model, { ...codexBody, input: trimmed.input }, requestOptions)
@@ -2025,6 +2222,7 @@ export async function compact(
 					{ signal },
 				);
 				preserveData = { ...preserveData, ...storeCompactionV2PreserveData(remote, model) };
+				nativeRetentionTarget = remote.retentionTarget;
 				usedRemoteCompaction = true;
 			} catch (err) {
 				// A user/session abort is a cancellation, not a remote failure —
@@ -2050,11 +2248,15 @@ export async function compact(
 				: previousV2Compaction?.provider === model.provider
 					? previousV2Compaction.replacementHistory
 					: undefined;
-		const remoteHistory = buildOpenAiNativeHistory(
-			(summaryOptions.convertToLlm ?? defaultConvertToLlm)(remoteMessages),
-			model,
-			previousReplacementHistory,
-			openAiCompatSupportsImageDetailOriginal(model),
+		const remoteHistory = composeOpenAiHistoricalInput(
+			buildOpenAiNativeHistory(
+				cloneWithSourceOrigins(frozenMessages),
+				model,
+				previousReplacementHistory,
+				openAiCompatSupportsImageDetailOriginal(model),
+			),
+			buildOpenAiNativeHistory(cloneWithSourceOrigins(selectedUsers), model),
+			selectedNonUsers,
 		);
 		if (remoteHistory.length > 0) {
 			try {
@@ -2295,7 +2497,9 @@ export async function compact(
 	// re-attach to the rebuilt context. Only the legacy-frame case needs stripping —
 	// when there was no previous archive, preserveData carries no frames to drop.
 	let finalPreserveData = previousSnapcompactArchive ? snapcompact.stripPreservedArchive(preserveData) : preserveData;
-	if (!usedRemoteCompaction && preparation.sourcePreserveData) {
+	// Anthropic replaces only the aggregate; selected atoms and the ordinary tail
+	// still replay from the source layout. OpenAI stores its replacement history instead.
+	if ((!usedRemoteCompaction || nativeSummary !== undefined) && preparation.sourcePreserveData) {
 		finalPreserveData = { ...finalPreserveData, ...preparation.sourcePreserveData };
 	}
 
@@ -2306,6 +2510,7 @@ export async function compact(
 		tokensBefore,
 		details: { readFiles, modifiedFiles } as CompactionDetails,
 		preserveData: finalPreserveData,
+		...(nativeRetentionTarget ? { retentionTarget: nativeRetentionTarget } : {}),
 	};
 }
 
