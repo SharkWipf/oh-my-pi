@@ -209,15 +209,19 @@ describe("AgentSession historical image prompts", () => {
 		const ctx = await createTestSession({ inMemory: true });
 		try {
 			const text = "Inspect [Image #1, 1x1]";
+			const sessionId = ctx.sessionManager.getSessionId();
 			const entryId = ctx.sessionManager.appendMessage(historicalImagePrompt(text));
 
 			const result = await ctx.session.branch(entryId);
 
-			expect(result).toEqual({
+			expect(result).toMatchObject({
 				selectedText: text,
 				selectedImages: [HISTORICAL_IMAGE],
 				cancelled: false,
 			});
+			expect(ctx.sessionManager.getSessionId()).not.toBe(sessionId);
+			expect(ctx.session.messages).toEqual([]);
+			expect(ctx.sessionManager.buildSessionContext().messages).toEqual([]);
 		} finally {
 			await ctx.cleanup();
 		}
@@ -227,6 +231,10 @@ describe("AgentSession historical image prompts", () => {
 		const ctx = await createTestSession({ inMemory: true });
 		try {
 			const text = "Compare [Image #1, 1x1]";
+			const sessionId = ctx.sessionManager.getSessionId();
+			ctx.sessionManager.appendMessage({ role: "user", content: "first", timestamp: Date.now() });
+			const parentId = ctx.sessionManager.appendMessage(assistantMsg("reply"));
+			const retainedMessages = ctx.sessionManager.buildSessionContext().messages;
 			const entryId = ctx.sessionManager.appendMessage(historicalImagePrompt(text));
 			ctx.sessionManager.appendMessage(assistantMsg("Compared."));
 
@@ -237,6 +245,9 @@ describe("AgentSession historical image prompts", () => {
 				editorImages: [HISTORICAL_IMAGE],
 				cancelled: false,
 			});
+			expect(ctx.sessionManager.getLeafId()).toBe(parentId);
+			expect(ctx.sessionManager.getSessionId()).toBe(sessionId);
+			expect(ctx.sessionManager.buildSessionContext().messages).toEqual(retainedMessages);
 		} finally {
 			await ctx.cleanup();
 		}

@@ -147,6 +147,11 @@
 
 - Fixed advisor resets retaining late-aborted prompt state and replaying stale guidance into the next review. Invalidated reviews no longer count as completed; ordinary provider error and abort recovery is unchanged.
 
+### Fixed
+
+- Esc-Esc rewind paints a cancellable loading surface before cooperatively collecting and indexing cold history, renders only its source-anchored viewport, and reuses unchanged source indexes on reopen. Branch lookup uses indexed children, including root siblings; persisted skill/custom requests and image-only prompts remain selectable, and empty returned drafts replace stale editor text.
+- Grouped Read cards refresh their display at render time rather than rebuilding it for every replayed result. Deferred rewind preserves model-substitution and execution-artifact warnings.
+
 ## [18.2.8] - 2026-09-21
 
 ### Added
