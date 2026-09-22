@@ -122,6 +122,10 @@
 - Edits targeting auto-generated files now return a tool-scoped rejection instead of aborting the whole turn ([#12499](https://github.com/can1357/oh-my-pi/pull/12499) by [@Dante-dan](https://github.com/Dante-dan)).
 - Subagents with an ordered model fallback keep it reachable on startup when the parent default role shares the same primary model ([#12377](https://github.com/can1357/oh-my-pi/pull/12377) by [@Dante-dan](https://github.com/Dante-dan)).
 - omp-plugins MCP servers now substitute `${CLAUDE_PLUGIN_ROOT}`/`${OMP_PLUGIN_ROOT}` in `command`, `args`, and `cwd` ([#12801](https://github.com/can1357/oh-my-pi/pull/12801) by [@holny](https://github.com/holny)).
+- Added opt-in `advisor.compactBeforeGuidance`: force normal primary compaction before accepted advisor guidance enters context, including low-pressure, live interrupting, deferred, and idle delivery with Auto-Compact disabled. Held guidance survives its own advisor reset but is discarded on cancellation or source/conversation invalidation.
+- Preserved accepted guidance across staged queued-message preparation without re-admission. Terminal non-blockers compact before their visible card without an unsolicited primary restart; blockers retain paired-tool steering.
+
+- `find` (and `omp find`) accepts an `omp://` docs scope: `omp://` searches every embedded harness doc and `omp://<file>.md` searches one, reporting hits as canonical `omp://` URLs that `read` opens directly, including with `:start-end` selectors ([#12758](https://github.com/can1357/oh-my-pi/pull/12758) by [@H4vC](https://github.com/H4vC)).
 
 ## [18.2.8] - 2026-09-21
 

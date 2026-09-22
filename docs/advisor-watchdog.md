@@ -43,6 +43,16 @@ Model selectors use normal role/model resolution, including provider-prefixed id
 
 `tier.advisor` controls service tier for all advisors. It defaults to `none` (standard processing); `inherit` follows the primary's live per-family tier, including `/fast` changes. Concrete values (`auto`, `default`, `flex`, `scale`, `priority`) are applied only when the advisor model's provider family supports them.
 
+### Maintenance before guidance
+
+Set `advisor.compactBeforeGuidance: true` (or enable **Compact Before Guidance** in `/settings` → Model → Advisor) to force primary context compaction before accepted advisor guidance reaches the primary. The default is `false`. The gate applies to every accepted severity (`nit`, `concern`, and `blocker`), including guidance emitted below the normal pressure threshold or while Auto-Compact is disabled.
+
+Review still runs in the ordinary upstream order. Accepted guidance waits outside primary history until compaction completes, so the summary does not consume the advice itself. Live blockers retain cooperative tool interruption: the tool result is paired first, then the primary context is compacted before the blocker is injected. Deferred notes retain their normal delivery boundary, and late idle guidance uses the same gate. The held batch survives its own compaction resetting advisor runtimes; cancellation, advisor-source replacement, conversation changes, and disposal invalidate stale guidance.
+
+During terminal unwind, accepted `nit` and `concern` notes remain visible advisor cards rather than starting another primary response. The compaction gate runs before that card is preserved, and the guidance re-enters context on the next genuine resume. Blockers retain their steering route. This behavior also applies with `advisor.syncBacklog: off`; asynchronous review completion does not reopen the non-blocker restart path. Admission remains owned by `AdviseTool`, so withheld or rejected notes retain their truthful queued or suppressed acknowledgment.
+
+The gate uses the configured compaction methods and existing speculative-result reuse rather than a separate summarizer. Disabled gating or a review with no accepted advice does not force maintenance; ordinary thresholds, speculative background work, and grace deferral remain unchanged. Advisor-private history continues to use its own existing maintenance path.
+
 ### Headless runs
 
 Use `--advisor` to enable the advisor for one print-mode process without
