@@ -25,6 +25,12 @@ import {
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { captureOpenAIHttpError } from "@oh-my-pi/pi-ai/utils/openai-http";
 import {
+	exportItemOrigins,
+	importItemOrigins,
+	type NativeItemOrigin,
+	validateNativeItemOrigins,
+} from "@oh-my-pi/pi-ai/utils/source-origin";
+import {
 	applyCodexResidencyHeader,
 	CODEX_BASE_URL,
 	codexRoutingHint,
@@ -84,6 +90,7 @@ export interface CompactionV2Request {
 export interface CompactionV2Response {
 	compactionItem: Record<string, unknown>;
 	replacementHistory: Array<Record<string, unknown>>;
+	replacementOrigins?: NativeItemOrigin[];
 	usedTokens: number;
 	usage?: CompactionV2Usage;
 	retainedImageCount: number;
@@ -820,6 +827,7 @@ export function storeCompactionV2PreserveData(response: CompactionV2Response, mo
 			version: "v2",
 			provider: model.provider,
 			replacementHistory: response.replacementHistory,
+			replacementOrigins: response.replacementOrigins ?? exportItemOrigins(response.replacementHistory),
 			usedTokens: response.usedTokens,
 			usage: response.usage,
 			retainedImageCount: response.retainedImageCount,
@@ -828,18 +836,26 @@ export function storeCompactionV2PreserveData(response: CompactionV2Response, mo
 }
 
 /** Retrieve preserved OpenAI replacement history that V2 can extend. */
-export function getCompactionV2PreserveData(
-	preserveData: Record<string, unknown> | undefined,
-): { provider: string; replacementHistory: Array<Record<string, unknown>>; usedTokens: number } | undefined {
+export function getCompactionV2PreserveData(preserveData: Record<string, unknown> | undefined):
+	| {
+			provider: string;
+			replacementHistory: Array<Record<string, unknown>>;
+			replacementOrigins?: NativeItemOrigin[];
+			usedTokens: number;
+	  }
+	| undefined {
 	const candidate = preserveData?.[OPENAI_REMOTE_COMPACTION_PRESERVE_KEY];
 	if (!isRecord(candidate)) return undefined;
 	const provider = stringField(candidate, "provider");
 	if (!provider) return undefined;
 	if (!Array.isArray(candidate.replacementHistory)) return undefined;
+	const replacementOrigins = validateNativeItemOrigins(candidate.replacementOrigins);
+	importItemOrigins(candidate.replacementHistory, replacementOrigins);
 
 	return {
 		provider,
 		replacementHistory: candidate.replacementHistory as Array<Record<string, unknown>>,
+		replacementOrigins,
 		usedTokens: numberField(candidate, "usedTokens") ?? 0,
 	};
 }
