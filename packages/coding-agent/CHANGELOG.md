@@ -135,6 +135,10 @@
 
 - `find` (and `omp find`) accepts an `omp://` docs scope: `omp://` searches every embedded harness doc and `omp://<file>.md` searches one, reporting hits as canonical `omp://` URLs that `read` opens directly, including with `:start-end` selectors ([#12758](https://github.com/can1357/oh-my-pi/pull/12758) by [@H4vC](https://github.com/H4vC)).
 
+### Fixed
+
+- Fixed advisor resets retaining late-aborted prompt state and replaying stale guidance into the next review. Invalidated reviews no longer count as completed; ordinary provider error and abort recovery is unchanged.
+
 ## [18.2.8] - 2026-09-21
 
 ### Added
