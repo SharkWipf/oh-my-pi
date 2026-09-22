@@ -1547,10 +1547,9 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		}
 		void (async () => {
 			try {
-				if (ref.status === "running" && ref.session) {
-					await ref.session.abort({ reason: USER_INTERRUPT_LABEL });
-				}
-				await this.#lifecycle().release(ref.id, ref, { tombstone: true });
+				const abort = ref.status === "running" ? ref.session?.abort({ reason: USER_INTERRUPT_LABEL }) : undefined;
+				// Release immediately: an in-flight turn may be blocked in a provider or shutdown hook.
+				await Promise.all([abort, this.#lifecycle().release(ref.id, ref, { tombstone: true })]);
 			} catch (error) {
 				logger.warn("Agent hub: kill failed", { id: ref.id, error: String(error) });
 				this.#notice = error instanceof Error ? error.message : String(error);

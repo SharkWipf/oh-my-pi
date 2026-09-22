@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Killing a subagent cancels its assignment and provider requests before asynchronous shutdown hooks finish, while keeping upstream disposal idempotency, accepted-yield handling, and wake-failure notifications. Disposed sessions reject late prompts; killed or replaced workers cannot deliver late success, but the executor still notifies the original waker of cancellation.
+
 ### Added
 
 - Added `omp login` command for terminal-based OAuth authentication, including automated model discovery refresh and browser-opening support
