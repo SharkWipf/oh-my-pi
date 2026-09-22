@@ -123,6 +123,10 @@
 - Subagents with an ordered model fallback keep it reachable on startup when the parent default role shares the same primary model ([#12377](https://github.com/can1357/oh-my-pi/pull/12377) by [@Dante-dan](https://github.com/Dante-dan)).
 - omp-plugins MCP servers now substitute `${CLAUDE_PLUGIN_ROOT}`/`${OMP_PLUGIN_ROOT}` in `command`, `args`, and `cwd` ([#12801](https://github.com/can1357/oh-my-pi/pull/12801) by [@holny](https://github.com/holny)).
 
+### Fixed
+
+- Retained browser target ownership until closure is confirmed, including failed or abandoned initialization, with retryable owner cleanup and same-process restart recovery that leaves current and unrecorded tabs untouched.
+
 ## [18.2.8] - 2026-09-21
 
 ### Added

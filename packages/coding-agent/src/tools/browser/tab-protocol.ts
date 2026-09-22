@@ -156,6 +156,7 @@ export type WorkerOutbound =
 	| { type: "result"; id: string; ok: false; error: RunErrorPayload }
 	| { type: "tool-call"; id: string; runId: string; name: string; args: unknown }
 	| { type: "log"; level: "debug" | "warn" | "error"; msg: string; meta?: Record<string, unknown> }
+	| { type: "close-failed"; error: RunErrorPayload }
 	| { type: "closed" };
 
 export interface Transport {

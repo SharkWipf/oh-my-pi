@@ -731,7 +731,11 @@ describe("browser settle — lifecycle freeze via CDP", () => {
 
 	describe.skipIf(!CHROMIUM_AVAILABLE)("browser settle — real headless Chromium", () => {
 		afterEach(async () => {
-			await drainAllTabs();
+			try {
+				await drainAllTabs();
+			} finally {
+				vi.restoreAllMocks();
+			}
 		});
 
 		it("freezes at settle, resumes transparently on run, and idle-closes", async () => {
