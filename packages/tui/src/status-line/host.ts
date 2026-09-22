@@ -68,10 +68,14 @@ export interface FooterSession {
 	getContextUsage: StatusLineSession["getContextUsage"];
 	modelRegistry: Pick<StatusLineSession["modelRegistry"], "isUsingOAuth">;
 	sessionManager: {
-		getAssistantUsageStatistics(): Pick<
-			ReturnType<StatusLineSession["sessionManager"]["getUsageStatistics"]>,
-			"input" | "output" | "cacheRead" | "cacheWrite" | "cost" | "premiumRequests"
-		>;
+		getAssistantUsageStatistics(): {
+			input: number;
+			output: number;
+			cacheRead: number;
+			cacheWrite: number;
+			premiumRequests: number;
+			cost: number;
+		};
 	};
 }
 
