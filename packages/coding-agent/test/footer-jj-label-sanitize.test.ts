@@ -49,7 +49,7 @@ function makeSession() {
 		sessionManager: {
 			getSessionName: () => "footer-sanitize test",
 			getEntries: () => [],
-			getUsageStatistics: () => ({
+			getAssistantUsageStatistics: () => ({
 				input: 0,
 				output: 0,
 				cacheRead: 0,
