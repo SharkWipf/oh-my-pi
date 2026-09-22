@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Abandoned tool previews no longer leave later messages stuck as collapsed Eval/Todo rows when a streamed response replaces or removes a tool call.
+- `/compact` no longer leaves retained tool cards reduced to bare Eval/Todo labels; their details remain available immediately after the transcript rebuild.
+- Streaming updates no longer cross queued message boundaries, which could lose assistant text and leave an orphaned running tool card that squeezed subsequent transcript entries into collapsed rows.
+- Interleaved reasoning and text no longer freeze native-scrollback progress when an earlier block grows after later text or a tool preview appears; only explicit content-end events seal the preceding prose.
+- TODO changes made inside Eval now refresh the TODO pane; subagent completion reconciliation no longer restores an older displayed plan over the current session plan.
+- Reconcile tool-call ids first finalized at message end, preventing stale previews from pinning subsequent normal Eval/Todo results into bare labels across turns and resizes.
+- Project explicit text/thinking closure into split post-tool segments without freezing interleaved growth, while retaining mid-stream text retirement and revisable-wire protection.
+- Keep done-only prose between reads in chronological order instead of merging its surrounding tool cards into one shared anchor.
+
 ### Added
 
 - Added `omp login` command for terminal-based OAuth authentication, including automated model discovery refresh and browser-opening support
