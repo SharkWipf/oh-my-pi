@@ -62,6 +62,8 @@ export type SubmittedUserInput = {
 	text: string;
 	images?: ImageContent[];
 	imageLinks?: (string | undefined)[];
+	originalSubmission?: OriginalSubmission;
+	compactionOverride?: "keep" | "exclude";
 	customType?: string;
 	/** Route through `session.prompt(text, { synthetic: true })` so the text lands
 	 *  as a hidden agent-authored `developer` message rather than a visible user

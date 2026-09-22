@@ -45,6 +45,7 @@ import {
 	type ToolChoiceDirective,
 } from "@oh-my-pi/pi-agent-core";
 import {
+	CompactionCancelledError,
 	type CompactionPreparation,
 	type CompactionResult,
 	calculatePromptTokens,
@@ -63,6 +64,7 @@ import type {
 	MessageAttribution,
 	Model,
 	OAuthAccountIdentity,
+	OriginalSubmission,
 	ProviderResponseMetadata,
 	ProviderSessionState,
 	ResetCreditAccountStatus,
@@ -347,6 +349,7 @@ import {
 	isUserInterruptAbort,
 	isUserInvokedSkillPrompt,
 	logProviderTurnError,
+	getOriginalSourceMessage,
 	normalizeCustomMessagePayload,
 	type PythonExecutionMessage,
 	SILENT_ABORT_MARKER,
@@ -379,9 +382,9 @@ import {
 } from "./session-advisors";
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import { getRestorableSessionModels, isTranscriptEntry } from "./session-context";
-import { isUserRequestEntry, transcriptEntryMessage, userTurnDraft } from "@oh-my-pi/pi-tui/chat/transcript-entry";
+import { isUserRequestEntry, transcriptEntryMessage } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { formatSessionDumpText } from "./session-dump-format";
-import type { BranchSummaryEntry, NewSessionOptions, SessionMessageEntry } from "./session-entries";
+import type { BranchSummaryEntry, NewSessionOptions, SessionEntry, SessionMessageEntry } from "./session-entries";
 import { SessionHandoff, type SessionHandoffHost } from "./session-handoff";
 import {
 	COMPACTION_CHECK_NONE,
@@ -396,14 +399,30 @@ import { getInlineFrameAccounting, getInlineTextAccounting } from "./snapcompact
 import { getSourceOrigin } from "@oh-my-pi/pi-ai/utils/source-origin";
 import { buildSessionMetadata } from "./session-metadata";
 import { SessionMessageClassifier, type MessageClassificationListener } from "./session-message-classifier";
-import { readPreservedUserMessageClassificationMasks } from "./preserved-messages";
+import {
+	PreservedMessageQuery,
+	readPreservedUserMessageClassificationMasks,
+	type PreservationSelection,
+} from "./preserved-messages";
+import {
+	parseCompactionOverridePrompt,
+	restoreCompactionOverridePrompt,
+	readPreservationPolicySettings,
+	type PreservationAction,
+} from "./preserved-message-settings";
+import {
+	SessionPreservation,
+	ensurePreservedMessageStateOnDisk,
+	type PreservedMessageOverrideResetSnapshot,
+} from "./session-preservation";
+import type { CompactionSourceSelection } from "@oh-my-pi/pi-agent-core/compaction";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
 import { SessionTools, type SessionToolsHost } from "./session-tools";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { skillPromptTitleInput } from "@oh-my-pi/pi-tui/chat/skill-title-input";
 import { ToolChoiceQueue } from "./tool-choice-queue";
-import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
+import { planTurnPersistence, sessionMessagePersistenceKey } from "./turn-persistence";
 import { TurnRecovery, type TurnRecoveryHost } from "./turn-recovery";
 import { YieldQueue } from "./yield-queue";
 
@@ -672,6 +691,26 @@ export class AgentSession {
 	#movedFromEmptySessionFile?: string;
 
 	readonly #maintenance: SessionMaintenance;
+	readonly #preservation: SessionPreservation;
+	#preservationSettingsIdentity: object = {};
+	#preservationPolicyIdentity: object = {};
+	#compactionPendingLive:
+		| Readonly<{ sessionId: string; epoch: number; generation: number; entryIds: readonly string[] }>
+		| undefined;
+	#preservationSettings: ReturnType<typeof readPreservationPolicySettings> | undefined;
+	#preservedQuery:
+		| {
+				query: PreservedMessageQuery;
+				ownership: object;
+				settings: object;
+				sessionId: string;
+				leaf: string | null;
+				tokenizer: Agent["tokenizer"];
+		  }
+		| undefined;
+	#preservedQueryBuild: Promise<PreservedMessageQuery> | undefined;
+	readonly #preservedMessageListeners = new Set<(affectedIds?: readonly string[]) => void>();
+	#unsubscribePreservationSettings?: () => void;
 
 	// Branch summarization state
 	#branchSummaryAbortController: AbortController | undefined = undefined;
@@ -767,7 +806,6 @@ export class AgentSession {
 	#turnIndex = 0;
 	#messageEndPersistenceTail: Promise<void> = Promise.resolve();
 	#pendingMessageEndPersistence = new Map<string, Promise<void>>();
-	#persistedMessageKeys: { anchor: string; keys: Set<string> } | undefined;
 
 	// Custom commands (TypeScript slash commands)
 	#customCommands: LoadedCustomCommand[] = [];
@@ -856,6 +894,8 @@ export class AgentSession {
 	 *  enqueue and fold/resume normally across an in-session interrupt, only a session identity
 	 *  change should drop them. */
 	#sessionGeneration = 0;
+	/** Active history ownership; ordinary appends and policy changes leave it intact. */
+	#compactionOwnership: object = {};
 	/** Settles when switchSession commits or restores its previous generation on rollback.
 	 *  newSession never rolls its generation back, so it does not delay stale aside/SDK calls. */
 	#sessionGenerationSettled: Promise<void> | undefined;
@@ -2006,6 +2046,18 @@ export class AgentSession {
 			isDisposed: () => this.#isDisposed,
 			isStreaming: () => this.isStreaming,
 			isGeneratingHandoff: () => this.isGeneratingHandoff,
+			compactionOwnership: () => this.#compactionOwnership,
+			compactionPolicyIdentity: () => {
+				const pending = this.requirements.pendingLiveSnapshot();
+				if (pending !== this.#compactionPendingLive) {
+					this.#compactionPendingLive = pending;
+					this.#preservationPolicyIdentity = {};
+				}
+				return this.#preservationPolicyIdentity;
+			},
+			compactionSourceSelection: () => this.#compactionSourceSelection(),
+			protectedSourceEntryIds: () => this.#protectedSourceEntryIds(),
+			preservedSourcesChanged: (changedIds, affectedIds) => this.#preservedSourcesChanged(changedIds, affectedIds),
 			promptGeneration: () => this.#promptGeneration,
 			sessionId: () => this.sessionId,
 			messages: () => this.messages,
@@ -2083,6 +2135,58 @@ export class AgentSession {
 			abortHandoff: () => this.abortHandoff(),
 		};
 		this.#maintenance = new SessionMaintenance(maintenanceHost);
+		this.#messageClassifier = new SessionMessageClassifier({
+			sessionManager: this.sessionManager,
+			settings: this.settings,
+			modelRegistry: this.#modelRegistry,
+			generation: () => this.#sessionGeneration,
+			isDisposed: () => this.#isDisposed,
+			isStreaming: () => this.isStreaming,
+			sideStreamFn: this.#sideStreamFn,
+			prepareOptions: (options, model) =>
+				this.prepareSimpleStreamOptions(
+					{
+						...options,
+						serviceTier: this.#models.effectiveServiceTier(model),
+						metadata: buildSessionMetadata(options.sessionId!, model.provider, this.#modelRegistry.authStorage),
+					},
+					model.provider,
+				),
+			obfuscate: context => obfuscateProviderContext(this.#obfuscator, context),
+			readMasks: (entries, isCurrent) => readPreservedUserMessageClassificationMasks(entries, { isCurrent }),
+		});
+		this.#preservationSettings = readPreservationPolicySettings(this.settings);
+		this.#preservation = new SessionPreservation({
+			sessionManager: this.sessionManager,
+			getQuery: () => {
+				const query = this.getPreservedMessageQuery();
+				if (!query) throw new Error("Preservation source view is rebuilding; reopen the action.");
+				return query;
+			},
+			preparePreservedMessages: async () => {
+				await ensurePreservedMessageStateOnDisk(this.sessionManager);
+				return this.preparePreservedMessages();
+			},
+			ownership: () => this.#compactionOwnership,
+			onChanged: ids => this.preservedMessagesChanged(ids),
+		});
+		this.#unsubscribePreservationSettings = this.settings.onEffectiveChange(path => {
+			if (!path.startsWith("compaction.")) return;
+			this.#preservationSettings = readPreservationPolicySettings(this.settings);
+			this.#preservationPolicyIdentity = {};
+			if (
+				path.startsWith("compaction.keepUserMessagesLlm") ||
+				path === "compaction.keepUserMessagesHeuristic" ||
+				path === "compaction.keepUserMessagesRegex" ||
+				path === "compaction.keepUserMessagesRegexRules" ||
+				path === "compaction.keepUserMessagesClassifierFilter" ||
+				path === "compaction.pruneLongUserMessages" ||
+				path === "compaction.maxTokensPerUserMessage"
+			) {
+				this.#preservationSettingsIdentity = {};
+			}
+			this.#publishPreservedMessages();
+		});
 
 		const handoffHost: SessionHandoffHost = {
 			agent: this.agent,
@@ -2106,25 +2210,12 @@ export class AgentSession {
 			effectiveServiceTier: model => this.#models.effectiveServiceTier(model),
 		};
 		this.#handoff = new SessionHandoff(handoffHost);
-		this.#messageClassifier = new SessionMessageClassifier({
-			sessionManager: this.sessionManager,
-			settings: this.settings,
-			modelRegistry: this.#modelRegistry,
-			generation: () => this.#sessionGeneration,
-			isDisposed: () => this.#isDisposed,
-			isStreaming: () => this.isStreaming,
-			sideStreamFn: this.#sideStreamFn,
-			prepareOptions: (options, model) =>
-				this.prepareSimpleStreamOptions(
-					{
-						...options,
-						serviceTier: this.#models.effectiveServiceTier(model),
-						metadata: buildSessionMetadata(options.sessionId!, model.provider, this.#modelRegistry.authStorage),
-					},
-					model.provider,
-				),
-			obfuscate: context => obfuscateProviderContext(this.#obfuscator, context),
-			readMasks: (entries, isCurrent) => readPreservedUserMessageClassificationMasks(entries, { isCurrent }),
+		this.subscribeMessageClassification((status, affectedIds) => {
+			const savedIds: string[] = [];
+			for (const row of status.rows) {
+				if (row.state === "saved" && affectedIds.includes(row.entryId)) savedIds.push(row.entryId);
+			}
+			if (savedIds.length > 0) this.preservedMessagesChanged(savedIds);
 		});
 
 		this.#rehydrateCheckpointRewindState();
@@ -2609,6 +2700,10 @@ export class AgentSession {
 
 	/** Emit an event to all listeners */
 	#emit(event: AgentSessionEvent): void {
+		if (event.type === "model_changed") {
+			this.#preservationPolicyIdentity = {};
+			this.#publishPreservedMessages();
+		}
 		// Copy array before iteration to avoid mutation during iteration.
 		const listeners = [...this.#eventListeners];
 		for (const l of listeners) {
@@ -2912,94 +3007,10 @@ export class AgentSession {
 		await this.#pendingMessageEndPersistence.get(key);
 	}
 
-	/**
-	 * Index every message entry on the current branch by persistence key, so
-	 * the mid-run-compaction planner can ask "is this turn message already on
-	 * the branch?" in O(1). The set is memoized through the current leaf path
-	 * and validated at use time against a (session file, leaf id) anchor.
-	 *
-	 * The mid-run ordering check uses key identity alone: same-key content
-	 * variants are one logical message at this boundary, because otherwise a
-	 * display-side rewrite can make the assistant look missing after its tool
-	 * results have already persisted.
-	 *
-	 * Coherency is anchor-based, not invalidation-based: every branch mutation
-	 * (rewind, branch switch, new session, custom-entry append) changes the
-	 * session manager's leaf id or session file, so `#ensurePersistedMessageKeys`
-	 * detects staleness itself and rebuilds. No mutation call site has to
-	 * remember to invalidate anything.
-	 *
-	 * Pre-#3629 the equivalent was `sessionManager.getBranch()` called twice
-	 * per turn message, each call rebuilding the path via O(n²) `unshift` and
-	 * structurally JSON-comparing every entry — seconds of synchronous work
-	 * per `onTurnEnd` on a long session and the load-bearing source of the
-	 * `ui.loop-blocked` warnings in the bug report.
-	 */
-	#indexPersistedMessageKeys(): Set<string> {
-		return this.#ensurePersistedMessageKeys();
-	}
-
-	#persistedMessageKeysAnchor(): string {
-		return `${this.sessionManager.getSessionFile() ?? ""}\u0000${this.sessionManager.getLeafId() ?? ""}`;
-	}
-
-	#ensurePersistedMessageKeys(): Set<string> {
-		const anchor = this.#persistedMessageKeysAnchor();
-		let cache = this.#persistedMessageKeys;
-		if (cache === undefined || cache.anchor !== anchor) {
-			cache = { anchor, keys: this.#buildPersistedMessageKeySet() };
-			this.#persistedMessageKeys = cache;
-		}
-		return cache.keys;
-	}
-
-	#buildPersistedMessageKeySet(): Set<string> {
-		const keys = new Set<string>();
-		for (const entry of this.sessionManager.getBranch()) {
-			if (entry.type !== "message") continue;
-			const key = sessionMessagePersistenceKey(entry.message);
-			if (key !== undefined) keys.add(key);
-		}
-		return keys;
-	}
-
-	/**
-	 * True when {@link message} is structurally identical to a message already
-	 * appended to the current branch. Uses the current branch's memoized
-	 * persistence-key cache for the common missing-key case, and only walks the
-	 * branch to verify content when a key hit could be a rare collision.
-	 *
-	 * Error turns need one extra discriminator. An empty error turn carries no
-	 * content at all, so every failed attempt of one retry saga serializes to the
-	 * same `[]` — and when two attempts land in the same wall-clock millisecond
-	 * (mocked/zero retry delay, or a fast provider failure) they also share a
-	 * persistence key of `assistant:<ts>:<provider>:<model>::error`. Content
-	 * equality alone then reports the aggregated terminal turn ("Retry budget
-	 * exhausted after N retries: …") as a duplicate of the attempt error it
-	 * supersedes, and the session journal silently loses the record of why the
-	 * run stopped. The failure text is the only thing that distinguishes them.
-	 */
+	/** Persistence identity lives in the normal entry index, not a rebuilt branch snapshot. */
 	#sessionMessageAlreadyPersisted(message: AgentMessage): boolean {
 		const key = sessionMessagePersistenceKey(message);
-		if (key === undefined) return false;
-		const keys = this.#ensurePersistedMessageKeys();
-		if (!keys.has(key)) return false;
-		const branch = this.sessionManager.getBranch();
-		for (let index = branch.length - 1; index >= 0; index--) {
-			const entry = branch[index];
-			if (entry.type !== "message") continue;
-			if (sessionMessagePersistenceKey(entry.message) !== key) continue;
-			if (!sameMessageContent(entry.message, message)) continue;
-			if (
-				entry.message.role === "assistant" &&
-				message.role === "assistant" &&
-				entry.message.errorMessage !== message.errorMessage
-			) {
-				continue;
-			}
-			return true;
-		}
-		return false;
+		return key !== undefined && this.sessionManager.hasMessageWithPersistenceKey(key, message);
 	}
 
 	#appendSessionMessage(
@@ -3012,16 +3023,18 @@ export class AgentSession {
 			| FileMentionMessage,
 		sourceOrigin?: SessionMessageEntry["sourceOrigin"],
 	): string {
-		const cache = this.#persistedMessageKeys;
-		const wasFresh = cache !== undefined && cache.anchor === this.#persistedMessageKeysAnchor();
-		const entryId = this.sessionManager.appendMessage(message, sourceOrigin ? { sourceOrigin } : undefined);
+		const compactionOverride =
+			message.role === "user" || message.role === "custom" ? message.compactionOverride : undefined;
+		const entryId = this.sessionManager.appendMessage(
+			message,
+			sourceOrigin || compactionOverride !== undefined ? { sourceOrigin, compactionOverride } : undefined,
+		);
+		if (this.#preservedMessageListeners.size > 0) {
+			this.getPreservedMessageQuery();
+			this.#publishPreservedMessages([entryId]);
+		}
 		if (message.role === "assistant") {
 			(message as PersistedAssistantMessage)[kPersistedSessionEntryId] = entryId;
-		}
-		const key = sessionMessagePersistenceKey(message);
-		if (wasFresh && cache && key) {
-			cache.keys.add(key);
-			cache.anchor = this.#persistedMessageKeysAnchor();
 		}
 		if ((message.role === "user" || message.role === "custom") && this.settings.get("requirements.enabled"))
 			void this.requirements
@@ -3179,12 +3192,7 @@ export class AgentSession {
 		for (const message of turnMessages) {
 			await this.#waitForSessionMessagePersistence(message);
 		}
-		// One branch snapshot + one persistence-key index drives the entire
-		// planning pass. Pre-#3629 this re-walked the branch and structurally
-		// JSON-compared every entry per turn message, which on long sessions
-		// turned each `onTurnEnd` into a seconds-long sync block (the
-		// `ui.loop-blocked` warnings tagged `subagent:*` in the bug report).
-		const branchKeys = this.#indexPersistedMessageKeys();
+		// Only the turn identities are queried; metadata appends do not rebuild cold keys.
 		const turnKeys = turnMessages.map(sessionMessagePersistenceKey);
 		const persistedKeys = new Set<string>();
 		for (let index = 0; index < turnMessages.length; index++) {
@@ -3194,7 +3202,7 @@ export class AgentSession {
 			// variant (for example, redacted/deobfuscated content) must still count;
 			// otherwise the assistant can look missing while later tool results are
 			// present, producing a false out-of-order skip.
-			if (branchKeys.has(key)) {
+			if (this.sessionManager.hasMessageWithPersistenceKey(key)) {
 				persistedKeys.add(key);
 			}
 		}
@@ -4867,6 +4875,8 @@ export class AgentSession {
 		this.#disposeAutolearn?.();
 		this.#disposeAutolearn = undefined;
 		this.#messageClassifier.dispose();
+		this.#preservedMessageListeners.clear();
+		this.#preservedQuery = undefined;
 		this.#modelDiscoveryAbortController.abort();
 		this.#queuedMessageDrainBlocked = false;
 		this.#usagePreflightReadyForNextModelCall = false;
@@ -5124,6 +5134,8 @@ export class AgentSession {
 			this.#unsubscribeIdleCloseSetting();
 			this.#unsubscribeIdleCloseSetting = undefined;
 		}
+		this.#unsubscribePreservationSettings?.();
+		this.#unsubscribePreservationSettings = undefined;
 		this.#eventListeners = [];
 		this.#runStateListeners.clear();
 		this.#sessionChangeCallbacks.clear();
@@ -5275,6 +5287,7 @@ export class AgentSession {
 		if (this.isStreaming || this.isBashRunning || this.isEvalRunning) return undefined;
 		const droppedCount = this.agent.state.messages.length;
 		this.#messageClassifier.interrupt("Context cleared; resume missing classifications explicitly.");
+		this.#advancePreservedMessagesOwnership();
 
 		// Tear down the same per-turn runtime state that newSession() resets across
 		// a conversation boundary, so work scheduled from the pre-reset turn cannot
@@ -6021,6 +6034,230 @@ export class AgentSession {
 		return this.#providerBoundary.getImageAttachments();
 	}
 
+	/** Shared scope identity for source menus and asynchronous source-addressed work. */
+	getPreservedMessagesOwnership(): object {
+		return this.#compactionOwnership;
+	}
+
+	subscribePreservedMessages(listener: (affectedIds?: readonly string[]) => void): () => void {
+		this.#preservedMessageListeners.add(listener);
+		return () => this.#preservedMessageListeners.delete(listener);
+	}
+
+	#publishPreservedMessages(affectedIds?: readonly string[]): void {
+		for (const listener of this.#preservedMessageListeners) {
+			try {
+				listener(affectedIds);
+			} catch (error) {
+				logger.warn("Preservation source listener failed", { error: String(error) });
+			}
+		}
+	}
+
+	#advancePreservedMessagesOwnership(): void {
+		this.#compactionOwnership = {};
+		this.#publishPreservedMessages();
+	}
+
+	/** Refresh only entries appended since the last indexed leaf. No active-history copy on sends. */
+	getPreservedMessageQuery(): PreservedMessageQuery | undefined {
+		const state = this.#preservedQuery;
+		if (
+			!state ||
+			this.#isDisposed ||
+			state.ownership !== this.#compactionOwnership ||
+			state.settings !== this.#preservationSettingsIdentity ||
+			state.sessionId !== this.sessionManager.getSessionId() ||
+			state.tokenizer !== this.agent.tokenizer
+		)
+			return undefined;
+		const leaf = this.sessionManager.getLeafId();
+		if (leaf === state.leaf) return state.query;
+		const suffix: SessionEntry[] = [];
+		let cursor = leaf;
+		while (cursor !== state.leaf) {
+			if (cursor === null) return undefined;
+			const entry = this.sessionManager.getEntry(cursor);
+			if (!entry || entry.type === "reset_boundary") return undefined;
+			suffix.push(entry);
+			cursor = entry.parentId;
+		}
+		suffix.reverse();
+		if (!state.query.appendEntries(suffix)) return undefined;
+		state.leaf = leaf;
+		return state.query;
+	}
+
+	/** Cold/global source work is cooperative and publishes only a complete current query. */
+	async preparePreservedMessages(): Promise<PreservedMessageQuery> {
+		const ready = this.getPreservedMessageQuery();
+		if (ready) return ready;
+		if (this.#preservedQueryBuild) {
+			await this.#preservedQueryBuild;
+			const current = this.getPreservedMessageQuery();
+			if (current) return current;
+		}
+		const ownership = this.#compactionOwnership;
+		const settings = this.#preservationSettingsIdentity;
+		const sessionId = this.sessionManager.getSessionId();
+		const tokenizer = this.agent.tokenizer;
+		const isCurrent = () =>
+			!this.#isDisposed &&
+			ownership === this.#compactionOwnership &&
+			settings === this.#preservationSettingsIdentity &&
+			sessionId === this.sessionManager.getSessionId() &&
+			tokenizer === this.agent.tokenizer;
+		const build = (async () => {
+			if (!isCurrent()) throw new CompactionCancelledError("Preservation source scope changed while preparing.");
+			const entries = this.sessionManager.getBranch();
+			const leaf = this.sessionManager.getLeafId();
+			const query = await PreservedMessageQuery.build(entries, this.#preservationSettings!, tokenizer, {
+				isCurrent,
+			});
+			if (!query || !isCurrent())
+				throw new CompactionCancelledError("Preservation source scope changed while preparing.");
+			this.#preservedQuery = { query, ownership, settings, sessionId, leaf, tokenizer };
+			const current = this.getPreservedMessageQuery();
+			if (!current) throw new CompactionCancelledError("Preservation source branch changed while preparing.");
+			return current;
+		})();
+		this.#preservedQueryBuild = build;
+		try {
+			return await build;
+		} finally {
+			if (this.#preservedQueryBuild === build) this.#preservedQueryBuild = undefined;
+		}
+	}
+
+	#preservationSelection(query: PreservedMessageQuery): PreservationSelection {
+		const policy = this.#preservationSettings!;
+		return query.select({
+			maximumContext: this.model?.contextWindow ?? undefined,
+			enabled: policy.enabled,
+			first: policy.first,
+			recent: policy.recent,
+			hardRecent: policy.hardRecent,
+			alwaysCap: policy.alwaysCap,
+		});
+	}
+
+	getPreservedMessageSelection(): PreservationSelection | undefined {
+		const query = this.getPreservedMessageQuery();
+		return query ? this.#preservationSelection(query) : undefined;
+	}
+	/** Called after the actual manual/classifier journal transition is durably published. */
+	preservedMessagesChanged(affectedIds: readonly string[]): void {
+		this.#preservationPolicyIdentity = {};
+		this.getPreservedMessageQuery();
+		this.#publishPreservedMessages(affectedIds);
+	}
+
+	#preservedSourcesChanged(changedIds: readonly string[], affectedClassifierIds: readonly string[]): void {
+		this.interruptMessageClassificationInputs(affectedClassifierIds);
+		const query = this.getPreservedMessageQuery();
+		query?.invalidateClassifications(affectedClassifierIds);
+		query?.refreshSources(changedIds);
+		this.#preservationPolicyIdentity = {};
+		this.#publishPreservedMessages([...new Set([...changedIds, ...affectedClassifierIds])]);
+	}
+
+	async setPreservedMessageOverride(sourceId: string, state: PreservationAction): Promise<void> {
+		const ownership = this.#compactionOwnership;
+		await this.preparePreservedMessages();
+		if (ownership !== this.#compactionOwnership)
+			throw new Error("The source branch changed; reopen the manual action.");
+		await this.#preservation.setPreservedMessageOverride(sourceId, state);
+	}
+
+	capturePreservedMessageOverrideReset(sourceIds?: readonly string[]): Promise<PreservedMessageOverrideResetSnapshot> {
+		return this.#preservation.capturePreservedMessageOverrideReset(sourceIds);
+	}
+
+	resetPreservedMessageOverrides(
+		snapshot: PreservedMessageOverrideResetSnapshot,
+	): Promise<{ reset: number; skipped: number }> {
+		return this.#preservation.resetPreservedMessageOverrides(snapshot);
+	}
+
+	/** Explicitly retry durable publication of the same frozen compaction event. */
+	recoverCompactionPersistence(): Promise<boolean> {
+		return this.#maintenance.recoverCompactionPersistence();
+	}
+
+	async #protectedSourceEntryIds(): Promise<Pick<ReadonlySet<string>, "has">> {
+		const query = await this.preparePreservedMessages();
+		const { P, N } = this.#preservationSelection(query);
+		const pending = new Set(this.requirements.pendingLiveSnapshot().entryIds);
+		return { has: id => P.has(id) || N.has(id) || pending.has(id) };
+	}
+
+	async #compactionSourceSelection(): Promise<CompactionSourceSelection> {
+		const query = await this.preparePreservedMessages();
+		const selected = this.#preservationSelection(query);
+		const selectedSources: NonNullable<CompactionSourceSelection["selectedSources"]>[number][] = [];
+		const pendingSourceEntryIds = new Set(this.requirements.pendingLiveSnapshot().entryIds);
+		const selectionReasons: NonNullable<CompactionSourceSelection["selectionReasons"]> = {};
+		for (const id of selected.P) {
+			const candidate = selected.candidate(id);
+			const entry = this.sessionManager.getEntry(id);
+			const order = query.positionOf(id);
+			if (!candidate || entry?.type !== "message" || order === undefined)
+				throw new Error("Selected source is no longer available.");
+			selectionReasons[id] = Object.entries(selected.reasons(id))
+				.filter(([, active]) => active)
+				.map(([reason]) => reason);
+			const message = query.inspectCandidate(id, true)!.message;
+			selectedSources.push({
+				entryId: id,
+				order,
+				message,
+				projection: message !== entry.message ? "original" : undefined,
+				spans: candidate.spans.map(span => ({
+					blockIndex: span.blockIndex,
+					start: span.text?.start ?? 0,
+					end: span.text?.end ?? 1,
+				})),
+			});
+		}
+		for (const id of pendingSourceEntryIds) {
+			if (selected.P.has(id)) continue;
+			const entry = this.sessionManager.getEntry(id);
+			const order = query.positionOf(id);
+			if (entry?.type !== "message" || order === undefined || entry.message.role !== "user") continue;
+			const message = getOriginalSourceMessage(entry.message);
+			selectedSources.push({
+				entryId: id,
+				order,
+				message,
+				projection: message !== entry.message ? "original" : undefined,
+			});
+		}
+		const admittedNonUserSources: NonNullable<CompactionSourceSelection["admittedNonUserSources"]>[number][] = [];
+		for (const atom of selected.nonUserAtoms())
+			for (const entry of atom.entries) {
+				const order = query.positionOf(entry.id);
+				if (order === undefined) throw new Error("Selected source is no longer available.");
+				selectionReasons[entry.id] = ["manual-nonuser", "always"];
+				admittedNonUserSources.push({
+					entryId: entry.id,
+					order,
+					message: entry.message,
+					atomicGroup: { id: atom.id, entryIds: [...atom.memberIds] },
+				});
+			}
+		const selectionQuota = Object.fromEntries(
+			Object.entries(selected.quota).map(([name, quota]) => [name, { count: quota.count, tokens: quota.tokens }]),
+		);
+		return {
+			selectedSources,
+			admittedNonUserSources,
+			pendingSourceEntryIds,
+			selectionReasons,
+			selectionQuota,
+			originalSourceMessage: getOriginalSourceMessage,
+		};
+	}
+
 	buildDisplaySessionContext(): SessionContext {
 		return this.#withEvalStateContext(this.#providerBoundary.buildDisplaySessionContext());
 	}
@@ -6703,6 +6940,10 @@ export class AgentSession {
 			return false;
 		}
 		const outcome: PromptDispatchOutcome = { sessionClaimed: false };
+		if (await this.#sessionGenerationChanged(intakeGeneration)) {
+			release?.(false);
+			return false;
+		}
 		if (!release) return this.#dispatchPrompt(text, options, submittedAt, outcome);
 		try {
 			return await this.#dispatchPrompt(text, options, submittedAt, outcome);
@@ -6718,9 +6959,25 @@ export class AgentSession {
 		outcome: PromptDispatchOutcome,
 	): Promise<boolean> {
 		if (this.#isDisposed) return false;
+		if (
+			!options?.synthetic &&
+			options?.attribution !== "agent" &&
+			options?.producer?.type !== "generated" &&
+			options?.compactionOverride === undefined
+		) {
+			const directive = parseCompactionOverridePrompt(text);
+			if (directive) {
+				text = directive.text;
+				options = { ...options, compactionOverride: directive.compactionOverride };
+			}
+		}
+		if (options?.compactionOverride !== undefined && !text.trim() && !options?.images?.length) {
+			throw new Error("/keep and /once require a message.");
+		}
 		const producer = options?.producer;
 		const originalSubmission = options?.originalSubmission;
-		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
+		const expandPromptTemplates =
+			options?.compactionOverride === undefined && (options?.expandPromptTemplates ?? true);
 		// Slash/custom-command handling below rewrites `text`; keep the original
 		// so a dropped prompt is handed back exactly as the user typed it.
 		const typedText = text;
@@ -6787,6 +7044,7 @@ export class AgentSession {
 				await this.#queueCustomMessage(notice, streamingBehavior);
 			}
 			await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, {
+				...options,
 				timestamp: submittedAt,
 				attribution: promptAttribution,
 				producer,
@@ -6844,6 +7102,7 @@ export class AgentSession {
 				await this.#queueCustomMessage(notice, streamingBehavior);
 			}
 			await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, {
+				...options,
 				timestamp: submittedAt,
 				attribution: promptAttribution,
 				producer,
@@ -6918,7 +7177,13 @@ export class AgentSession {
 			});
 		} catch (error) {
 			if (error instanceof AgentStartPolicyChangedError && message.role === "user") {
-				this.#promptDropped?.({ text: typedText, images: options?.images });
+				this.#promptDropped?.({
+					text: typedText,
+					images: options?.images,
+					originalSubmission,
+					imageLinks: options?.imageLinks,
+					compactionOverride: options?.compactionOverride,
+				});
 			}
 			throw error;
 		} finally {
@@ -7141,8 +7406,7 @@ export class AgentSession {
 	 * Stage extension results; committing them must remain synchronous with delivery validation.
 	 *
 	 * `signal` cancels awaited setup (memory auto-recall) for both direct and queued turns.
-	 * Disposal cancels both direct and queued starts; `origin` only controls whether
-	 * policy retry exhaustion blocks the queued settle drain.
+	 * Both direct and queued preparation are cancelled when the session is disposed.
 	 */
 	async #prepareAgentStart(
 		message: AgentMessage,
@@ -7153,6 +7417,7 @@ export class AgentSession {
 		origin: "direct" | "queued",
 	): Promise<QueuedMessagePreparation & { baseXdevCatalogDelivered: boolean }> {
 		const sessionGeneration = this.#sessionGeneration;
+
 		const isCurrent = () =>
 			this.#promptGeneration === generation &&
 			this.#sessionGeneration === sessionGeneration &&
@@ -7215,6 +7480,7 @@ export class AgentSession {
 						this.#tools.setTurnSystemPromptOverride(result.systemPrompt);
 					} else {
 						this.#tools.clearTurnSystemPromptOverride();
+						this.#tools.setBaseSystemPrompt(this.#tools.baseSystemPrompt);
 					}
 					return messages;
 				},
@@ -7619,29 +7885,40 @@ export class AgentSession {
 	 * Queue a steering message to interrupt the agent mid-run.
 	 */
 	async steer(text: string, images?: ImageContent[], options?: SteerOptions): Promise<void> {
-		if (text.startsWith("/")) {
+		const originalText = text;
+		if (options?.producer?.type !== "generated" && options?.compactionOverride === undefined) {
+			const directive = parseCompactionOverridePrompt(text);
+			if (directive) {
+				text = directive.text;
+				options = { ...options, compactionOverride: directive.compactionOverride };
+			}
+		}
+		if (options?.compactionOverride !== undefined && !text.trim() && !images?.length) {
+			throw new Error("/keep and /once require a message.");
+		}
+		const expandTemplates = options?.compactionOverride === undefined;
+		if (expandTemplates && text.startsWith("/")) {
 			this.#throwIfExtensionCommand(text);
 		}
 
 		const intakeGeneration = this.#sessionGeneration;
 		const originalSubmission = options?.originalSubmission ?? {
-			text,
+			text: originalText,
 			images,
 			imageLinks: options?.imageLinks,
 			compactionOverride: options?.compactionOverride,
 		};
 		if (await this.#sessionGenerationChanged(intakeGeneration)) return;
-		const expandedText = expandPromptTemplate(text, [...this.#promptTemplates]);
+		const expandedText = expandTemplates ? expandPromptTemplate(text, [...this.#promptTemplates]) : text;
 		// Stamp before image preprocessing so a queued image steer measures from
 		// the operator's submission, not after the vision-model description.
 		const submittedAt = Date.now();
 		await this.#queueUserMessage(expandedText, images, "steer", {
+			...options,
 			timestamp: submittedAt,
 			attribution: options?.attribution,
 			producer: options?.producer,
 			originalSubmission,
-			imageLinks: options?.imageLinks,
-			compactionOverride: options?.compactionOverride,
 		});
 	}
 
@@ -7653,7 +7930,24 @@ export class AgentSession {
 	 * flipping advisor auto-resume.
 	 */
 	async followUp(text: string, images?: ImageContent[], options?: FollowUpOptions): Promise<void> {
-		if (text.startsWith("/")) {
+		const originalText = text;
+		if (
+			!options?.synthetic &&
+			options?.attribution !== "agent" &&
+			options?.producer?.type !== "generated" &&
+			options?.compactionOverride === undefined
+		) {
+			const directive = parseCompactionOverridePrompt(text);
+			if (directive) {
+				text = directive.text;
+				options = { ...options, compactionOverride: directive.compactionOverride };
+			}
+		}
+		if (options?.compactionOverride !== undefined && !text.trim() && !images?.length) {
+			throw new Error("/keep and /once require a message.");
+		}
+		const expandTemplates = options?.compactionOverride === undefined && options?.expandPromptTemplates !== false;
+		if (expandTemplates && text.startsWith("/")) {
 			this.#throwIfExtensionCommand(text);
 		}
 
@@ -7661,25 +7955,23 @@ export class AgentSession {
 		const originalSubmission = options?.synthetic
 			? undefined
 			: (options?.originalSubmission ?? {
-					text,
+					text: originalText,
 					images,
 					imageLinks: options?.imageLinks,
 					compactionOverride: options?.compactionOverride,
 				});
 		if (await this.#sessionGenerationChanged(intakeGeneration)) return;
-		const expandedText =
-			options?.expandPromptTemplates === false ? text : expandPromptTemplate(text, [...this.#promptTemplates]);
+		const expandedText = expandTemplates ? expandPromptTemplate(text, [...this.#promptTemplates]) : text;
 		// Stamp before image preprocessing so a queued image follow-up measures
 		// from the operator's submission, not after the vision-model description.
 		const submittedAt = Date.now();
 		if (!options?.synthetic) {
 			await this.#queueUserMessage(expandedText, images, "followUp", {
+				...options,
 				timestamp: submittedAt,
 				attribution: options?.attribution,
 				producer: options?.producer,
 				originalSubmission,
-				imageLinks: options?.imageLinks,
-				compactionOverride: options?.compactionOverride,
 			});
 			return;
 		}
@@ -7745,18 +8037,19 @@ export class AgentSession {
 			timestamp?: number;
 			attribution?: MessageAttribution;
 			producer?: UserMessage["producer"];
-			originalSubmission?: import("@oh-my-pi/pi-ai").OriginalSubmission;
+			originalSubmission?: OriginalSubmission;
 			imageLinks?: (string | undefined)[];
 			compactionOverride?: "keep" | "exclude";
 			preprocessed?: { images: ImageContent[] | undefined; descriptionNotice: CustomMessage | undefined };
 		},
 	): Promise<void> {
 		const attribution = options?.attribution ?? "user";
+		const producer =
+			options?.producer ?? (attribution === "agent" ? { type: "generated" as const } : { type: "human" as const });
+		let originalSubmission = options?.originalSubmission;
+		const inputOptions = options;
 		const timestamp = options?.timestamp;
 		const preprocessed = options?.preprocessed;
-		const producer = options?.producer ?? { type: "human" as const };
-		const inputOptions = options;
-		let originalSubmission = options?.originalSubmission;
 		// Captured before any await below so the aside branch can detect a
 		// newSession()/switchSession() that completed while normalization/vision
 		// description was in flight and drop a record that would otherwise land in a
@@ -7805,8 +8098,8 @@ export class AgentSession {
 				timestamp: timestamp ?? Date.now(),
 				producer,
 				originalSubmission,
-				imageLinks: options?.imageLinks,
-				compactionOverride: options?.compactionOverride,
+				imageLinks: inputOptions?.imageLinks,
+				compactionOverride: inputOptions?.compactionOverride,
 			});
 			this.#irc.queueAside(records);
 			// The awaits above (image normalization / vision description) can span the run's
@@ -7824,8 +8117,8 @@ export class AgentSession {
 				role: "user",
 				producer,
 				originalSubmission,
-				imageLinks: options?.imageLinks,
-				compactionOverride: options?.compactionOverride,
+				imageLinks: inputOptions?.imageLinks,
+				compactionOverride: inputOptions?.compactionOverride,
 				content,
 				attribution,
 				timestamp: timestamp ?? Date.now(),
@@ -8040,7 +8333,7 @@ export class AgentSession {
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
 		deliverAs: "steer" | "followUp" | "aside",
 		queueChipText?: string,
-		originalSubmission?: import("@oh-my-pi/pi-ai").OriginalSubmission,
+		originalSubmission?: OriginalSubmission,
 		inputOptions?: Pick<PromptOptions, "imageLinks" | "compactionOverride" | "producer">,
 	): Promise<void> {
 		// Captured before the normalization await below — see #sessionGeneration's doc comment.
@@ -8314,15 +8607,24 @@ export class AgentSession {
 			imageLinks: options?.imageLinks,
 			compactionOverride: options?.compactionOverride,
 		};
+		options = { ...options, originalSubmission };
+		if (options?.producer?.type === "human" && options?.compactionOverride === undefined) {
+			const directive = parseCompactionOverridePrompt(text);
+			if (directive) {
+				text = directive.text;
+				options = { ...options, compactionOverride: directive.compactionOverride };
+			}
+		}
+		if (options?.compactionOverride !== undefined && !text.trim() && !images?.length) {
+			throw new Error("/keep and /once require a message.");
+		}
 		let deliveredAsAside = false;
 		if (options?.deliverAs === "aside") {
 			if (this.isStreaming) {
 				await this.#queueUserMessage(text, images, "aside", {
-					attribution: options.attribution,
+					...options,
 					producer: options.producer ?? { type: "generated" },
 					originalSubmission,
-					imageLinks: options.imageLinks,
-					compactionOverride: options.compactionOverride,
 				});
 				return;
 			}
@@ -8331,20 +8633,16 @@ export class AgentSession {
 			deliveredAsAside = true;
 		} else if (options?.deliverAs === "followUp") {
 			await this.#queueUserMessage(text, images, "followUp", {
-				attribution: options.attribution,
+				...options,
 				producer: options.producer ?? { type: "generated" },
 				originalSubmission,
-				imageLinks: options.imageLinks,
-				compactionOverride: options.compactionOverride,
 			});
 			return;
 		} else if (options?.deliverAs === "steer") {
 			await this.#queueUserMessage(text, images, "steer", {
-				attribution: options.attribution,
+				...options,
 				producer: options.producer ?? { type: "generated" },
 				originalSubmission,
-				imageLinks: options.imageLinks,
-				compactionOverride: options.compactionOverride,
 			});
 			return;
 		}
@@ -8358,12 +8656,11 @@ export class AgentSession {
 		// tool-batch-aborting steer.
 		await this.prompt(text, {
 			attribution: options?.attribution,
+			expandPromptTemplates: false,
+			originalSubmission: options?.originalSubmission,
 			producer: options?.producer ?? { type: "generated" },
-			originalSubmission,
 			imageLinks: options?.imageLinks,
 			compactionOverride: options?.compactionOverride,
-			expandPromptTemplates: false,
-			producer: options?.producer,
 			images,
 			streamingBehavior: deliveredAsAside ? "aside" : "steer",
 		});
@@ -8882,6 +9179,7 @@ export class AgentSession {
 		this.#cancelOwnAsyncJobs();
 		this.#closeAllProviderSessions("new session");
 		await this.#bash.flushPending();
+		this.#advancePreservedMessagesOwnership();
 		const bashTransition = this.#bash.beginSessionTransition({ persistDetached: options?.drop !== true });
 		let sessionTransitioned = false;
 		try {
@@ -9020,6 +9318,7 @@ export class AgentSession {
 			// Fork keeps the conversation, but still needs a quiet artifact boundary:
 			// stop and settle in-flight advisors before muting their feeds.
 			await this.#advisors.drainAndDetachRecorders();
+			this.#advancePreservedMessagesOwnership();
 			const bashTransition = this.#bash.beginSessionTransition();
 
 			// Fork the session (creates new session file with same entries)
@@ -10145,6 +10444,8 @@ export class AgentSession {
 		// record on success but stays valid if the switch is rolled back to this same session.
 		const previousIrcPending = this.#irc.clearPending();
 		const previousSessionGeneration = this.#sessionGeneration++;
+		const previousCompactionOwnership = this.#compactionOwnership;
+		this.#advancePreservedMessagesOwnership();
 		const generationSettled = Promise.withResolvers<void>();
 		const previousSessionGenerationSettled = this.#sessionGenerationSettled;
 		this.#sessionGenerationSettled = generationSettled.promise;
@@ -10353,6 +10654,8 @@ export class AgentSession {
 			this.agent.replaceQueues(previousSteeringMessages, previousFollowUpMessages);
 			this.#irc.restorePending(previousIrcPending);
 			this.#sessionGeneration = previousSessionGeneration;
+			this.#compactionOwnership = previousCompactionOwnership;
+			this.#publishPreservedMessages();
 			generationSettled.resolve();
 			this.#sessionGenerationSettled = previousSessionGenerationSettled;
 			this.#pendingNextTurnMessages = previousPendingNextTurnMessages;
@@ -10437,6 +10740,7 @@ export class AgentSession {
 	async branch(entryId: string): Promise<{
 		selectedText: string;
 		selectedImages: ImageContent[];
+		sourceInput?: RestoredQueuedMessage;
 		cancelled: boolean;
 	}> {
 		using _transition = this.#beginSessionTransition();
@@ -10447,8 +10751,11 @@ export class AgentSession {
 			throw new Error("Invalid entry ID for branching");
 		}
 
-		const selectedText = this.#extractUserMessageText(selectedEntry.message.content);
-		const selectedImages = this.#extractUserMessageImages(selectedEntry.message.content);
+		const sourceInput = toRestoredQueuedMessage(selectedEntry.message);
+		const selectedText = sourceInput.originalSubmission
+			? sourceInput.text
+			: restoreCompactionOverridePrompt(sourceInput.text, sourceInput.compactionOverride);
+		const selectedImages = sourceInput.images ?? [];
 
 		let skipConversationRestore = false;
 
@@ -10460,7 +10767,7 @@ export class AgentSession {
 			})) as SessionBeforeBranchResult | undefined;
 
 			if (result?.cancel) {
-				return { selectedText, selectedImages, cancelled: true };
+				return { selectedText, selectedImages, sourceInput, cancelled: true };
 			}
 			skipConversationRestore = result?.skipConversationRestore ?? false;
 		}
@@ -10474,6 +10781,7 @@ export class AgentSession {
 		await this.#bash.flushPending();
 		// Flush pending writes before branching
 		await this.sessionManager.flush();
+		this.#advancePreservedMessagesOwnership();
 		const bashTransition = this.#bash.beginSessionTransition();
 		this.#cancelOwnAsyncJobs();
 		this.#abortAutolearnCapture();
@@ -10531,7 +10839,7 @@ export class AgentSession {
 			this.#advisors.reattachRecorderFeeds();
 			advisorRecordersDetached = false;
 			await this.#reconcileModeAfterBranch();
-			return { selectedText, selectedImages, cancelled: false };
+			return { selectedText, selectedImages, sourceInput, cancelled: false };
 		} finally {
 			if (advisorRecordersDetached) {
 				if (sessionTransitioned) this.#advisors.resetSessionState();
@@ -10607,6 +10915,7 @@ export class AgentSession {
 		this.#usagePreflightReadyForNextModelCall = false;
 		await this.#bash.flushPending();
 		await this.sessionManager.flush();
+		this.#advancePreservedMessagesOwnership();
 		const bashTransition = this.#bash.beginSessionTransition();
 		this.#cancelOwnAsyncJobs();
 		this.#abortAutolearnCapture();
@@ -10716,6 +11025,7 @@ export class AgentSession {
 		editorText?: string;
 		/** Image attachments of the target user message, parallel to the positional `[Image #N]` markers in {@link editorText}. */
 		editorImages?: ImageContent[];
+		sourceInput?: RestoredQueuedMessage;
 		cancelled: boolean;
 		aborted?: boolean;
 		summaryEntry?: BranchSummaryEntry;
@@ -10898,6 +11208,7 @@ export class AgentSession {
 		let newLeafId: string | null;
 		let editorText: string | undefined;
 		let editorImages: ImageContent[] | undefined;
+		let sourceInput: RestoredQueuedMessage | undefined;
 		// Set when the second-pass `ask` re-answer branch below actually commits a
 		// new sibling answer — the trigger for resuming the agent afterwards so the
 		// model consumes it, mirroring a live `ask` completion (issue #6483).
@@ -10907,13 +11218,14 @@ export class AgentSession {
 			// User request (plain prompt, or a user-invoked skill/collab prompt): leaf = parent
 			// (null if root), the draft the user typed goes back to the editor with its images.
 			newLeafId = targetEntry.parentId;
-			editorText = userTurnDraft(targetEntry);
 			const request = transcriptEntryMessage(targetEntry);
-			const targetImages =
-				request && (request.role === "user" || request.role === "custom")
-					? this.#extractUserMessageImages(request.content)
-					: [];
-			if (targetImages.length > 0) editorImages = targetImages;
+			if (request) {
+				sourceInput = toRestoredQueuedMessage(request);
+				editorText = sourceInput.originalSubmission
+					? sourceInput.text
+					: restoreCompactionOverridePrompt(sourceInput.text, sourceInput.compactionOverride);
+				editorImages = sourceInput.images;
+			}
 		} else if (targetEntry.type === "custom_message" && targetEntry.customType !== SKILL_PROMPT_MESSAGE_TYPE) {
 			// Other custom message: leaf = parent (null if root), text goes to editor
 			newLeafId = targetEntry.parentId;
@@ -10958,6 +11270,7 @@ export class AgentSession {
 		// Summary is attached at the navigation target position (newLeafId), not the old branch
 		this.requirements.cancelPending("Session tree navigation");
 		this.requirements.releasePendingLive();
+		this.#advancePreservedMessagesOwnership();
 		const bashTransition = this.#bash.beginSessionTransition();
 		let summaryEntry: BranchSummaryEntry | undefined;
 		let branchTransitioned = false;
@@ -11020,6 +11333,7 @@ export class AgentSession {
 			return {
 				editorText,
 				editorImages,
+				sourceInput,
 				cancelled: false,
 				summaryEntry,
 				sessionContext: rawContext,
@@ -11029,6 +11343,7 @@ export class AgentSession {
 		return {
 			editorText,
 			editorImages,
+			sourceInput,
 			cancelled: false,
 			summaryEntry,
 			sessionContext: stateContext,
@@ -11145,14 +11460,6 @@ export class AgentSession {
 				.join("");
 		}
 		return "";
-	}
-
-	/** Image parts of a stored user request, in submission order — index N-1 backs the
-	 *  `[Image #N]` marker in the message text, so restoring them alongside the text keeps
-	 *  positional markers resolvable on resubmit. */
-	#extractUserMessageImages(content: UserMessage["content"] | CustomMessage["content"]): ImageContent[] {
-		if (!Array.isArray(content)) return [];
-		return content.filter((c): c is ImageContent => c.type === "image");
 	}
 
 	/**

@@ -2,6 +2,19 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { customMessageEntryMessage, isUserRequestEntry } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { getAnthropicCompactionPayload, isTurnStartEntry } from "@oh-my-pi/pi-agent-core/compaction";
 import {
+	getCompactionSourceRepresentation,
+	materializeCompactionSourceMessage,
+	type SourceBlockRange,
+} from "@oh-my-pi/pi-agent-core/compaction/source";
+import {
+	bindMessageSource,
+	setSourceOrigin,
+	transferMessageSourceOrigin,
+	transferSourceOrigin,
+	validateNativeItemOrigins,
+} from "@oh-my-pi/pi-ai/utils/source-origin";
+import { compactionSourceKey } from "@oh-my-pi/pi-ai/compaction-source";
+import {
 	coerceServiceTierByFamily,
 	type OpenAIResponsesHistoryPayload,
 	type ServiceTierByFamily,
@@ -12,8 +25,11 @@ import {
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
+	getOriginalSourceMessage,
 	INTERRUPTED_THINKING_MESSAGE_TYPE,
+	isCustomMessageContent,
 	isEmptyErrorTurn,
+	normalizeCustomMessagePayload,
 	PREWALK_PLAN_MESSAGE_TYPE,
 	VIBE_MODE_CONTEXT_MESSAGE_TYPE,
 } from "./messages";
@@ -96,6 +112,10 @@ function snapcompactHistoryBlockOptions(
 
 export interface SessionContext {
 	messages: AgentMessage[];
+	/** Runtime provenance, parallel to messages; aggregates have no source ID. */
+	messageSourceIds?: (string | undefined)[];
+	/** Actual emitted locations in the latest committed source layout. */
+	sourceLocations?: { messageIndex: number; blockIndex?: number; layoutIndex: number }[];
 	thinkingLevel?: string;
 	/** Configured thinking selector (`"auto"` or a concrete level) from the latest change. */
 	configuredThinkingLevel?: string;
@@ -147,6 +167,8 @@ export function getLatestCompactionEntry(entries: SessionEntry[]): CompactionEnt
 }
 
 export interface BuildSessionContextOptions {
+	/** Collect runtime source locations for an explicit diagnostic projection. */
+	diagnostics?: boolean;
 	/**
 	 * Build the display transcript instead of the LLM context. By default this
 	 * preserves every path entry with compactions inline; set
@@ -205,6 +227,7 @@ export function getOpenAiRemoteCompactionPayload(
 		type: "openaiResponsesHistory",
 		provider: candidate.provider,
 		items: candidate.replacementHistory,
+		origins: validateNativeItemOrigins(candidate.replacementOrigins),
 	};
 }
 
@@ -235,6 +258,8 @@ export function buildSessionContext(
 		// Explicitly null - return no messages (navigated to before first entry)
 		return {
 			messages: [],
+			messageSourceIds: options?.diagnostics ? [] : undefined,
+			sourceLocations: options?.diagnostics ? [] : undefined,
 			thinkingLevel: "off",
 			serviceTier: undefined,
 			models: {},
@@ -253,6 +278,8 @@ export function buildSessionContext(
 	if (!leaf) {
 		return {
 			messages: [],
+			messageSourceIds: options?.diagnostics ? [] : undefined,
+			sourceLocations: options?.diagnostics ? [] : undefined,
 			thinkingLevel: "off",
 			serviceTier: undefined,
 			models: {},
@@ -337,11 +364,19 @@ export function applySessionContextControlEntry(state: SessionContextControlStat
 	}
 }
 
+/** Cold journal-index facts needed when omitted ancestry is absent from a bounded path. */
+export interface SessionContextSourceInventory {
+	before: ReadonlyMap<string, number>;
+	orders: ReadonlyMap<string, number>;
+	total: number;
+}
+
 /** Render a resolved chronological path with optional already-folded branch controls. */
 export function buildSessionContextFromPath(
 	path: SessionEntry[],
 	options?: BuildSessionContextOptions,
 	controlState?: SessionContextControlState,
+	sourceInventory?: SessionContextSourceInventory,
 ): SessionContext {
 	const state = controlState ?? createSessionContextControlState();
 	if (!controlState) for (const entry of path) applySessionContextControlEntry(state, entry);
@@ -362,7 +397,28 @@ export function buildSessionContextFromPath(
 	// 2. Emit kept messages (from firstKeptEntryId up to compaction)
 	// 3. Emit messages after compaction
 	const messages: AgentMessage[] = [];
+	const messageSourceIds: SessionContext["messageSourceIds"] = options?.diagnostics ? [] : undefined;
+	const sourceLocations: SessionContext["sourceLocations"] = options?.diagnostics ? [] : undefined;
+	const sourceOrder = new Map<string, number>();
+	for (let index = 0; index < path.length; index++) sourceOrder.set(path[index].id, index);
+	const compactionOrder = compaction ? sourceInventory?.orders.get(compaction.id) : undefined;
+	const journalOrder = (id: string) =>
+		sourceInventory?.orders.get(id) ??
+		(compactionOrder !== undefined
+			? compactionOrder + sourceOrder.get(id)! - sourceOrder.get(compaction!.id)!
+			: (sourceOrder.get(id) ?? 0));
 	const cacheMissExplainedAt: boolean[] = [];
+	const removeMessage = (index: number) => {
+		messages.splice(index, 1);
+		messageSourceIds?.splice(index, 1);
+		if (options?.transcript) cacheMissExplainedAt.splice(index, 1);
+		if (sourceLocations)
+			for (let i = sourceLocations.length - 1; i >= 0; i--) {
+				const location = sourceLocations[i];
+				if (location.messageIndex === index) sourceLocations.splice(i, 1);
+				else if (location.messageIndex > index) location.messageIndex--;
+			}
+	};
 	let pendingReset = false;
 	let currentMode = "none";
 	let lastAssistantModel: string | undefined;
@@ -391,13 +447,14 @@ export function buildSessionContextFromPath(
 		return cacheMissExplained;
 	};
 
-	const pushMessage = (msg: AgentMessage) => {
+	const pushMessage = (msg: AgentMessage, sourceId?: string) => {
 		messages.push(msg);
+		messageSourceIds?.push(sourceId);
 		if (!options?.transcript) return;
 		cacheMissExplainedAt.push(trackMessageCacheState(msg));
 	};
 
-	const appendMessage = (entry: SessionEntry) => {
+	const appendMessage = (entry: SessionEntry, spans?: readonly SourceBlockRange[], projection?: "original") => {
 		handleEntryResetTracking(entry);
 		if (entry.type === "message") {
 			if (
@@ -407,7 +464,19 @@ export function buildSessionContextFromPath(
 			) {
 				return;
 			}
-			pushMessage(entry.message);
+			const sourceMessage =
+				projection === "original" && entry.message.role === "user"
+					? getOriginalSourceMessage(entry.message)
+					: entry.message;
+			if (
+				sourceMessage.role === "user" ||
+				sourceMessage.role === "assistant" ||
+				sourceMessage.role === "toolResult"
+			) {
+				bindMessageSource(sourceMessage, entry.id, journalOrder(entry.id), projection);
+			}
+			const message = materializeCompactionSourceMessage(sourceMessage, spans);
+			if (message) pushMessage(message, entry.id);
 		} else if (entry.type === "custom_message") {
 			if (
 				!options?.transcript &&
@@ -415,8 +484,11 @@ export function buildSessionContextFromPath(
 			) {
 				return;
 			}
-			const message = customMessageEntryMessage(entry);
-			if (message) pushMessage(message);
+			const original = customMessageEntryMessage(entry);
+			if (!original) return;
+			bindMessageSource(original, entry.id, journalOrder(entry.id));
+			const message = materializeCompactionSourceMessage(original, spans);
+			if (message) pushMessage(message, entry.id);
 		} else if (entry.type === "branch_summary" && entry.summary) {
 			pushMessage(createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp));
 		}
@@ -456,6 +528,7 @@ export function buildSessionContextFromPath(
 							warning: entry.warning,
 							method: entry.method,
 							tokensAfter: entry.tokensAfter,
+							diagnostics: entry.diagnostics,
 						},
 					),
 				);
@@ -514,6 +587,227 @@ export function buildSessionContextFromPath(
 		// Re-attach any archived snapcompact frames so the model can keep
 		// reading the archived history after every context rebuild.
 		const snapcompactArchive = snapcompact.getPreservedArchive(compaction.preserveData);
+		const representation = !remoteReplacementHistory
+			? getCompactionSourceRepresentation(compaction.preserveData)
+			: undefined;
+		const rolloverRequest =
+			!options?.transcript &&
+			isRecord(compaction.details) &&
+			compaction.details.kind === "experimental-context-rollover"
+				? state.compactionUserRequest
+				: undefined;
+		const replayCommittedSource = () => {
+			if (!representation) return;
+			const ordinary = new Set<string>();
+			const throughIdx = representation.throughEntryId ? sourceOrder.get(representation.throughEntryId) : undefined;
+			const firstKeptIdx = representation.throughEntryId
+				? throughIdx === undefined
+					? compactionIdx
+					: throughIdx + 1
+				: path.findIndex(entry => entry.id === compaction.firstKeptEntryId);
+			if (firstKeptIdx >= 0 && firstKeptIdx < compactionIdx) {
+				for (let i = Math.max(firstKeptIdx, resetBoundaryIdx + 1); i < compactionIdx; i++) ordinary.add(path[i].id);
+			}
+			if (rolloverRequest) ordinary.add(rolloverRequest.id);
+			type ReplayPart = {
+				order: number;
+				entry?: SessionEntry;
+				spans?: SourceBlockRange[];
+				projection?: "original";
+				layoutIndices: number[];
+				blocks?: ReturnType<typeof snapcompact.historyBlocks>;
+				coveredIds?: string[];
+			};
+			const parts: ReplayPart[] = [];
+			const selected = new Map<string, ReplayPart>();
+			const ordinaryParts = new Map<string, ReplayPart>();
+			for (const id of ordinary) {
+				const index = sourceOrder.get(id);
+				if (index === undefined || index <= resetBoundaryIdx || index >= compactionIdx) continue;
+				const part = { order: index, entry: path[index], layoutIndices: [] };
+				ordinaryParts.set(id, part);
+			}
+			const activeEntry = (id: string) => {
+				const index = sourceOrder.get(id);
+				return index !== undefined && index > resetBoundaryIdx && index < compactionIdx ? path[index] : undefined;
+			};
+			const normalizedCoverage = representation.coverage
+				.filter(run => run.normalized)
+				.sort((left, right) => left.normalized!.start - right.normalized!.start);
+			let coverageCursor = 0;
+			let previousRangeStart = -1;
+			const emitted = new Map<number, number[]>();
+			const blocks = snapcompactArchive
+				? snapcompact.historyBlocks(snapcompactArchive, {
+						...snapcompactHistoryBlockOptions(snapcompactArchive, options),
+						sourceRepresentation: representation,
+						resolveSourceImage: part => {
+							const entry = activeEntry(part.entryId);
+							if (!entry || part.currentBlockIndex === undefined) return undefined;
+							const message =
+								entry.type === "message"
+									? part.projection === "original" && entry.message.role === "user"
+										? getOriginalSourceMessage(entry.message)
+										: entry.message
+									: entry.type === "custom_message" && isCustomMessageContent(entry.content)
+										? { role: "custom" as const, content: normalizeCustomMessagePayload(entry).content }
+										: undefined;
+							if (
+								!message ||
+								(message.role !== "user" &&
+									message.role !== "assistant" &&
+									message.role !== "toolResult" &&
+									message.role !== "custom") ||
+								typeof message.content === "string"
+							)
+								return undefined;
+							bindMessageSource(message, entry.id, journalOrder(entry.id), part.projection);
+							const block = message.content[part.currentBlockIndex];
+							return block?.type === "image" ? block : undefined;
+						},
+						onEmit: (layoutIndex, blockIndex, block) => {
+							if (representation.layout[layoutIndex]?.kind === "frame" && block.type === "image") {
+								setSourceOrigin(block, {
+									kind: "aggregate",
+									compactionEntryId: compaction.id,
+									archiveFrame: { compactionEntryId: compaction.id, layoutIndex },
+								});
+							}
+							const indices = emitted.get(layoutIndex);
+							if (indices) indices.push(blockIndex);
+							else emitted.set(layoutIndex, [blockIndex]);
+						},
+					})
+				: [];
+			for (let layoutIndex = 0; layoutIndex < representation.layout.length; layoutIndex++) {
+				const part = representation.layout[layoutIndex];
+				if (part.kind === "source" || (part.kind === "original-image" && !snapcompactArchive)) {
+					if (part.kind === "original-image" && part.currentBlockIndex === undefined) continue;
+					const spans =
+						part.kind === "source" ? part.spans : [{ blockIndex: part.currentBlockIndex!, start: 0, end: 0 }];
+					const entry = activeEntry(part.entryId);
+					if (!entry) continue;
+					const ordinaryPart = !part.projection ? ordinaryParts.get(entry.id) : undefined;
+					if (ordinaryPart) {
+						ordinaryPart.layoutIndices.push(layoutIndex);
+						continue;
+					}
+					const key = compactionSourceKey(part);
+					const previous = selected.get(key);
+					if (previous) {
+						previous.spans = previous.spans && spans ? [...previous.spans, ...spans] : undefined;
+						previous.layoutIndices.push(layoutIndex);
+					} else {
+						const source = {
+							order: sourceOrder.get(entry.id)!,
+							entry,
+							spans,
+							projection: part.projection,
+							layoutIndices: [layoutIndex],
+						};
+						selected.set(key, source);
+						parts.push(source);
+					}
+					continue;
+				}
+				// Only the actual source inventory can establish whole-message omissions.
+				if (part.kind === "gap") continue;
+				const indices = emitted.get(layoutIndex);
+				if (!indices?.length) continue;
+				const coveredIds: string[] = [];
+				if (part.kind === "original-image") coveredIds.push(part.entryId);
+				else {
+					if (part.range.start < previousRangeStart) coverageCursor = 0;
+					previousRangeStart = part.range.start;
+					while (
+						coverageCursor < normalizedCoverage.length &&
+						normalizedCoverage[coverageCursor].normalized!.end <= part.range.start
+					)
+						coverageCursor++;
+					for (
+						let i = coverageCursor;
+						i < normalizedCoverage.length && normalizedCoverage[i].normalized!.start < part.range.end;
+						i++
+					) {
+						const run = normalizedCoverage[i];
+						if (run.normalized!.end > part.range.start) coveredIds.push(run.entryId);
+					}
+				}
+				let order = Infinity;
+				for (const id of coveredIds) if (activeEntry(id)) order = Math.min(order, sourceOrder.get(id)!);
+				parts.push({
+					order: order === Infinity ? -1 : order,
+					layoutIndices: [layoutIndex],
+					blocks: indices.map(index => blocks[index]),
+					coveredIds,
+				});
+				selected.clear();
+			}
+			for (const part of ordinaryParts.values()) parts.push(part);
+			parts.sort((left, right) => left.order - right.order);
+			const represented = new Set<string>();
+			for (const part of parts) {
+				if (part.entry) represented.add(part.entry.id);
+				for (const id of part.coveredIds ?? []) represented.add(id);
+			}
+			let gapCursor = resetBoundaryIdx + 1;
+			let sourceCountBefore = 0;
+			const emitGapThrough = (end: number) => {
+				const nextSourceCount = sourceInventory
+					? (sourceInventory.before.get(path[end].id) ?? sourceInventory.total)
+					: 0;
+				let wholeMessages = sourceInventory ? nextSourceCount - sourceCountBefore : 0;
+				for (; gapCursor < end; gapCursor++) {
+					const entry = path[gapCursor];
+					if (entry.type !== "message" && entry.type !== "custom_message") continue;
+					if (sourceInventory) {
+						if (represented.has(entry.id)) wholeMessages--;
+					} else if (!represented.has(entry.id)) wholeMessages++;
+				}
+				sourceCountBefore = nextSourceCount;
+				if (wholeMessages > 0)
+					pushMessage(
+						createCustomMessage(
+							"compaction-source-gap",
+							"[" + wholeMessages + " earlier messages omitted]",
+							false,
+							{ wholeMessages },
+							compaction.timestamp,
+						),
+					);
+			};
+			for (const part of parts) {
+				if (part.order >= 0) emitGapThrough(part.order);
+				const messageIndex = messages.length;
+				if (part.entry) {
+					appendMessage(part.entry, part.spans, part.projection);
+					if (messages.length > messageIndex)
+						for (const layoutIndex of part.layoutIndices) sourceLocations?.push({ messageIndex, layoutIndex });
+				} else if (part.blocks?.length) {
+					const previous = messages[messages.length - 1];
+					const archiveMessage = options?.transcript
+						? compactionSummaryMsg
+						: previous?.role === "compactionSummary"
+							? previous
+							: createCompactionSummaryMessage("", compaction.tokensBefore, compaction.timestamp, {
+									blocks: [],
+								});
+					if (!options?.transcript && archiveMessage !== previous)
+						pushMessage(setSourceOrigin(archiveMessage, { kind: "aggregate", compactionEntryId: compaction.id }));
+					const archiveIndex = options?.transcript ? -1 : messages.length - 1;
+					const targetBlocks = (archiveMessage.blocks ??= []);
+					for (const block of part.blocks) {
+						sourceLocations?.push({
+							messageIndex: archiveIndex,
+							blockIndex: targetBlocks.length,
+							layoutIndex: part.layoutIndices[0],
+						});
+						targetBlocks.push(block);
+					}
+				}
+			}
+			emitGapThrough(compactionIdx);
+		};
 		const compactionSummaryMsg = createCompactionSummaryMessage(
 			compaction.summary,
 			compaction.tokensBefore,
@@ -521,38 +815,38 @@ export function buildSessionContextFromPath(
 			{
 				shortSummary: compaction.shortSummary,
 				providerPayload,
-				blocks: snapcompactHistoryBlocksForContext(snapcompactArchive, options),
+				blocks: representation ? undefined : snapcompactHistoryBlocksForContext(snapcompactArchive, options),
 				warning: compaction.warning,
 				method: compaction.method,
 				tokensAfter: compaction.tokensAfter,
+				diagnostics: compaction.diagnostics,
 			},
 		);
 		// Agent context (non-transcript): summary first so the LLM sees the
 		// compacted context before recent messages.
 		if (!options?.transcript) {
-			pushMessage(compactionSummaryMsg);
+			pushMessage(setSourceOrigin(compactionSummaryMsg, { kind: "aggregate", compactionEntryId: compaction.id }));
 		}
 
-		// Keep the request visible at this boundary, not a future request from the
-		// active leaf. The normal branch fold retains it independently of the tail.
-		if (
-			!options?.transcript &&
-			isRecord(compaction.details) &&
-			compaction.details.kind === "experimental-context-rollover"
-		) {
-			const firstKeptIdx = path.findIndex(entry => entry.id === compaction.firstKeptEntryId);
-			const request = state.compactionUserRequest;
-			if (request && firstKeptIdx >= 0 && path.findIndex(entry => entry.id === request.id) < firstKeptIdx) {
-				appendMessage(request);
+		// Saved layout is authoritative; settings do not reselect historical output.
+
+		// The baseline request participates in the same source union as selected
+		// history. Only a legacy boundary without a layout emits it separately.
+		if (!representation && rolloverRequest) {
+			const requestIdx = sourceOrder.get(rolloverRequest.id);
+			const firstKeptIdx = sourceOrder.get(compaction.firstKeptEntryId);
+			if (requestIdx !== undefined && firstKeptIdx !== undefined && requestIdx < firstKeptIdx) {
+				appendMessage(rolloverRequest);
 			}
 		}
-
 		// The remote replacement payload (OpenAI remote compaction) carries the
 		// kept turns for the LLM context only; it is not rendered as visible
 		// messages. The collapsed display transcript must still emit the kept
 		// SessionEntry rows so a remotely-compacted session keeps its recent
 		// turns visible instead of showing only the summary and post-compaction.
-		if (!remoteReplacementHistory || options?.transcript) {
+		if (representation) {
+			replayCommittedSource();
+		} else if (!remoteReplacementHistory || options?.transcript) {
 			// Emit kept messages (before compaction, starting from firstKeptEntryId).
 			const firstKeptIdx = path.findIndex(
 				(entry, index) => index < compactionIdx && entry.id === compaction.firstKeptEntryId,
@@ -599,6 +893,10 @@ export function buildSessionContextFromPath(
 		// pre-compaction one — is marked as a cache miss.
 		if (options?.transcript) handleEntryResetTracking(compaction);
 		if (options?.transcript) {
+			if (sourceLocations)
+				for (const location of sourceLocations) {
+					if (location.messageIndex === -1) location.messageIndex = messages.length;
+				}
 			pushMessage(compactionSummaryMsg);
 		}
 
@@ -614,17 +912,21 @@ export function buildSessionContextFromPath(
 		}
 	}
 
-	if (!options?.transcript) {
-		const notesEntries = state.contextNotesEntry ? [state.contextNotesEntry] : [];
-		const notes = getContextNotes(notesEntries);
-		const renderedNotes = renderContextNotes(notesEntries);
-		if (notes && renderedNotes.length > 0) {
-			const sourceEntry = state.contextNotesEntry;
-			if (sourceEntry) {
-				messages.unshift(
-					createCustomMessage(CONTEXT_NOTES_ENTRY_TYPE, renderedNotes, false, undefined, sourceEntry.timestamp),
-				);
-			}
+	if (!options?.transcript && state.contextNotesEntry) {
+		const renderedNotes = renderContextNotes([state.contextNotesEntry]);
+		if (renderedNotes.length > 0) {
+			messages.unshift(
+				createCustomMessage(
+					CONTEXT_NOTES_ENTRY_TYPE,
+					renderedNotes,
+					false,
+					undefined,
+					state.contextNotesEntry.timestamp,
+				),
+			);
+			// The rendered notebook wrapper is not a retained source-message span.
+			messageSourceIds?.unshift(undefined);
+			if (sourceLocations) for (const location of sourceLocations) location.messageIndex++;
 		}
 	}
 
@@ -673,13 +975,13 @@ export function buildSessionContextFromPath(
 				)
 				.map(block =>
 					block.type === "thinking" && block.thinkingSignature
-						? { ...block, thinkingSignature: undefined }
+						? transferSourceOrigin(block, { ...block, thinkingSignature: undefined })
 						: block,
 				);
 			if (normalized.length === 0 && !options?.transcript) {
-				messages.splice(i, 1);
+				removeMessage(i);
 			} else {
-				const rewritten = { ...message, content: normalized };
+				const rewritten = transferMessageSourceOrigin(message, { ...message, content: normalized });
 				if (options?.transcript) {
 					// Display transcript: keep the turn (even content-less) and mark
 					// how many calls were dropped so the TUI renders a placeholder
@@ -714,12 +1016,12 @@ export function buildSessionContextFromPath(
 			for (const block of message.content) {
 				if (block.type === "toolCall") droppedToolCallIds.add(block.id);
 			}
-			messages.splice(i, 1);
+			removeMessage(i);
 			if (droppedToolCallIds.size > 0) {
 				for (let j = messages.length - 1; j >= i; j--) {
 					const candidate = messages[j];
 					if (candidate?.role === "toolResult" && droppedToolCallIds.has(candidate.toolCallId)) {
-						messages.splice(j, 1);
+						removeMessage(j);
 					}
 				}
 			}
@@ -728,6 +1030,8 @@ export function buildSessionContextFromPath(
 
 	return {
 		messages,
+		messageSourceIds,
+		sourceLocations,
 		cacheMissExplainedAt: options?.transcript ? cacheMissExplainedAt : undefined,
 		thinkingLevel,
 		configuredThinkingLevel,

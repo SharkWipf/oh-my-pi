@@ -58,11 +58,13 @@ function createFakeRedis(): FakeRedis {
 			}
 			if (script.includes("OMP_APPEND")) {
 				const [fileKey, metaKey] = keys;
-				const [line, filePath, mtimeMs] = argv;
+				const [line, filePath, mtimeMs, expected] = argv;
+				const actual = strings.has(fileKey) ? Buffer.byteLength(strings.get(fileKey)!) : -1;
+				if (expected !== "" && expected !== undefined && actual !== Number(expected)) return [0, actual];
 				const next = (strings.get(fileKey) ?? "") + line;
 				strings.set(fileKey, next);
 				getHash(metaKey).set(filePath, mtimeMs);
-				return Buffer.byteLength(next, "utf-8");
+				return [1, Buffer.byteLength(next, "utf-8")];
 			}
 			if (script.includes("OMP_UPDATE_TITLE")) {
 				const [metaKey, titleKey] = keys;

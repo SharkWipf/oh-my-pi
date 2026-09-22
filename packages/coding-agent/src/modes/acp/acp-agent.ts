@@ -858,9 +858,6 @@ export class AcpAgent implements Agent {
 				.filter(block => block.type === "text")
 				.map(block => block.text)
 				.join("\n\n");
-			const originalImages = params.prompt
-				.filter(block => block.type === "image")
-				.map(block => ({ type: "image" as const, data: block.data, mimeType: block.mimeType }));
 			const converted = this.#convertPromptBlocks(params.prompt);
 			const pendingPrompt = Promise.withResolvers<PromptResponse>();
 			record.promptTurn = {
@@ -889,7 +886,7 @@ export class AcpAgent implements Agent {
 				record,
 				converted.text,
 				converted.images,
-				{ text: originalText, images: originalImages },
+				{ text: originalText, images: converted.images },
 				originalText,
 			).catch((error: unknown) => {
 				if (record.promptTurn !== promptTurn || promptTurn.settled) return;

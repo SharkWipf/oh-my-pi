@@ -8,7 +8,12 @@ import {
 	type SessionStorageBackend,
 	type SessionStorageIndexEntry,
 } from "@oh-my-pi/pi-coding-agent/session/indexed-session-storage";
-import { FileSessionStorage, SessionLockError } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import {
+	FileSessionStorage,
+	MemorySessionStorage,
+	SessionLockError,
+	SessionWriteConflictError,
+} from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { type SessionTitleUpdate, serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 
 class ControlledTitleUpdateBackend implements SessionStorageBackend {
@@ -591,5 +596,93 @@ describe("IndexedSessionStorage.writeTextAtomic commitGuard", () => {
 		await write;
 		expect(drained).toBe(true);
 		expect(backend.writeFullCalls.map(call => call.content)).toEqual(["pre-seal body"]);
+	});
+});
+
+describe("SessionStorage.appendTextAtomic", () => {
+	let tempDir: string;
+	beforeEach(async () => {
+		tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-atomic-append-"));
+	});
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		await fsp.rm(tempDir, { recursive: true, force: true });
+	});
+
+	for (const Storage of [FileSessionStorage, MemorySessionStorage]) {
+		it(Storage.name + " publishes the complete batch only after its guard accepts", async () => {
+			const storage = new Storage();
+			const target = path.join(tempDir, "session.jsonl");
+			const prefix = '{"seed":true}\n';
+			const suffix = '{"entry":1}\n{"entry":2}\n';
+			storage.writeTextSync(target, prefix);
+			await storage.appendTextAtomic(target, suffix, { commitGuard: () => false });
+			expect(await storage.readText(target)).toBe(prefix);
+			let observedPrefix: Promise<string> | undefined;
+			await storage.appendTextAtomic(target, suffix, {
+				commitGuard: () => {
+					// File readers must see the old inode; memory readers capture the pre-commit body.
+					observedPrefix =
+						storage instanceof FileSessionStorage
+							? Promise.resolve(fs.readFileSync(target, "utf8"))
+							: storage.readText(target);
+					return true;
+				},
+			});
+			expect(await observedPrefix).toBe(prefix);
+			expect(await storage.readText(target)).toBe(prefix + suffix);
+			expect(storage.statSync(target).size).toBe(Buffer.byteLength(prefix + suffix));
+		});
+
+		it(Storage.name + " rejects a missing prefix without creating a journal", async () => {
+			const storage = new Storage();
+			const target = path.join(tempDir, "missing.jsonl");
+			await expect(storage.appendTextAtomic(target, "batch\n")).rejects.toThrow();
+			expect(storage.existsSync(target)).toBe(false);
+		});
+		it(Storage.name + " rejects one of two simultaneous suffixes without erasing the winner", async () => {
+			const storage = new Storage();
+			const target = path.join(tempDir, "concurrent.jsonl");
+			storage.writeTextSync(target, "seed\n");
+			const outcomes = await Promise.allSettled([
+				storage.appendTextAtomic(target, "first-é\n", { expectedSize: 5 }),
+				storage.appendTextAtomic(target, "second-猫\n", { expectedSize: 5 }),
+			]);
+			expect(outcomes.filter(result => result.status === "fulfilled")).toHaveLength(1);
+			const rejected = outcomes.find(result => result.status === "rejected");
+			expect(rejected?.status === "rejected" && rejected.reason).toBeInstanceOf(SessionWriteConflictError);
+			const content = await storage.readText(target);
+			expect(content).toBe(outcomes[0].status === "fulfilled" ? "seed\nfirst-é\n" : "seed\nsecond-猫\n");
+			await expect(
+				Promise.resolve().then(() => storage.writeTextAtomic(target, "stale", { expectedSize: 5 })),
+			).rejects.toBeInstanceOf(SessionWriteConflictError);
+			expect(await storage.readText(target)).toBe(content);
+			await storage.writeTextAtomic(target, "fresh", { expectedSize: Buffer.byteLength(content) });
+			expect(await storage.readText(target)).toBe("fresh");
+		});
+	}
+
+	it("preserves opaque prefix bytes without UTF-8 decoding", async () => {
+		const storage = new FileSessionStorage();
+		const target = path.join(tempDir, "opaque.jsonl");
+		const prefix = Buffer.from([0xff, 0x00, 0xc0, 0xaf, 0x0a]);
+		fs.writeFileSync(target, prefix);
+		await storage.appendTextAtomic(target, "one\ntwo\n");
+		expect(fs.readFileSync(target)).toEqual(Buffer.concat([prefix, Buffer.from("one\ntwo\n")]));
+	});
+
+	it("keeps partial staged suffix bytes invisible when the suffix write fails", async () => {
+		const storage = new FileSessionStorage();
+		const target = path.join(tempDir, "session.jsonl");
+		fs.writeFileSync(target, "seed\n");
+		const failure = new Error("suffix disk full");
+		const appendFile = fsp.appendFile;
+		vi.spyOn(fsp, "appendFile").mockImplementation(async stagedPath => {
+			await appendFile(stagedPath, "one\npar");
+			throw failure;
+		});
+		await expect(storage.appendTextAtomic(target, "one\npartial\n")).rejects.toBe(failure);
+		expect(fs.readFileSync(target, "utf8")).toBe("seed\n");
+		expect(await fsp.readdir(tempDir)).toEqual(["session.jsonl"]);
 	});
 });

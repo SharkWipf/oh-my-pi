@@ -8,10 +8,9 @@ function queuedTextContent(message: AgentMessage): string | undefined {
 	if (!("content" in message)) return undefined;
 	const content = message.content;
 	if (typeof content === "string") return content;
-	for (const part of content) {
-		if (part.type === "text") return part.text;
-	}
-	return undefined;
+	let text = "";
+	for (const part of content) if (part.type === "text") text += part.text;
+	return text || undefined;
 }
 
 function queuedImageContent(message: AgentMessage): ImageContent[] | undefined {
@@ -94,7 +93,7 @@ export function toRestoredQueuedMessage(message: AgentMessage): RestoredQueuedMe
 	const original = message.role === "user" || message.role === "custom" ? message.originalSubmission : undefined;
 	return {
 		text: original?.text ?? queueChipText(message),
-		images: original?.images ?? queuedImageContent(message),
+		images: original ? original.images : queuedImageContent(message),
 		...(message.role === "user" || message.role === "custom"
 			? {
 					originalSubmission: original,

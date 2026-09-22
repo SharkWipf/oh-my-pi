@@ -214,11 +214,9 @@ describe("AgentSession historical image prompts", () => {
 
 			const result = await ctx.session.branch(entryId);
 
-			expect(result).toMatchObject({
-				selectedText: text,
-				selectedImages: [HISTORICAL_IMAGE],
-				cancelled: false,
-			});
+			expect(result.cancelled).toBe(false);
+			expect(result.selectedText).toBe(text);
+			expect(result.selectedImages).toEqual([HISTORICAL_IMAGE]);
 			expect(ctx.sessionManager.getSessionId()).not.toBe(sessionId);
 			expect(ctx.session.messages).toEqual([]);
 			expect(ctx.sessionManager.buildSessionContext().messages).toEqual([]);

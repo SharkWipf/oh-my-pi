@@ -4,7 +4,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { recoverOrphanedBackups } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { FileSessionStorage, MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import {
+	FileSessionStorage,
+	MemorySessionStorage,
+	SessionWriteConflictError,
+} from "@oh-my-pi/pi-coding-agent/session/session-storage";
 
 class FsCodeError extends Error {
 	code: string;
@@ -162,7 +166,6 @@ describe("FileSessionStorage.writeTextAtomic commitGuard cleanup", () => {
 
 	it("discards the staged temp when the EPERM move-aside fallback's commitGuard rejects", async () => {
 		let epermAttempted = false;
-		let guardCalls = 0;
 		class EpermThenGuardStorage extends FileSessionStorage {
 			override renameSync(source: string, targetPath: string): void {
 				if (source.includes(".tmp") && targetPath.endsWith(".jsonl") && !epermAttempted) {
@@ -177,16 +180,10 @@ describe("FileSessionStorage.writeTextAtomic commitGuard cleanup", () => {
 		await fsp.writeFile(target, "seed\n");
 
 		await storage.writeTextAtomic(target, "next\n", {
-			commitGuard: () => {
-				guardCalls += 1;
-				// First call (before primary rename): pass so we hit EPERM.
-				// Second call (inside EPERM fallback, after move-aside): reject.
-				return guardCalls === 1;
-			},
+			commitGuard: () => !epermAttempted,
 		});
 
 		expect(epermAttempted).toBe(true);
-		expect(guardCalls).toBe(2);
 		expect(await listTempFiles()).toEqual([]);
 		// Backup was restored, so target still holds the seed content.
 		expect(await Bun.file(target).text()).toBe("seed\n");
@@ -196,7 +193,6 @@ describe("FileSessionStorage.writeTextAtomic commitGuard cleanup", () => {
 
 	it("discards the staged temp when the ENOENT move-aside branch's commitGuard rejects", async () => {
 		let epermAttempted = false;
-		let guardCalls = 0;
 		class EpermMissingTargetStorage extends FileSessionStorage {
 			override renameSync(source: string, targetPath: string): void {
 				if (source.includes(".tmp") && targetPath.endsWith(".jsonl") && !epermAttempted) {
@@ -210,14 +206,10 @@ describe("FileSessionStorage.writeTextAtomic commitGuard cleanup", () => {
 		const target = path.join(sessionDir, "session.jsonl");
 		// Target does not exist, so the move-aside step raises ENOENT.
 		await storage.writeTextAtomic(target, "next\n", {
-			commitGuard: () => {
-				guardCalls += 1;
-				return guardCalls === 1;
-			},
+			commitGuard: () => !epermAttempted,
 		});
 
 		expect(epermAttempted).toBe(true);
-		expect(guardCalls).toBe(2);
 		expect(await listTempFiles()).toEqual([]);
 		expect(await Bun.file(target).exists()).toBe(false);
 	});
@@ -267,5 +259,95 @@ describe("recoverOrphanedBackups", () => {
 
 		expect(storage.existsSync(primary)).toBe(true);
 		expect(await storage.readText(primary)).toBe("newer");
+	});
+});
+
+describe("FileSessionStorage.appendTextAtomic EPERM recovery", () => {
+	let sessionDir: string;
+	beforeEach(async () => {
+		sessionDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-append-eperm-"));
+	});
+	afterEach(async () => {
+		await fsp.rm(sessionDir, { recursive: true, force: true });
+	});
+
+	it("publishes the complete suffix through the move-aside fallback", async () => {
+		const storage = new RenameEpermOnceStorage();
+		const target = path.join(sessionDir, "session.jsonl");
+		await fsp.writeFile(target, "seed\n");
+		storage.failNextSessionReplace = true;
+		await storage.appendTextAtomic(target, "one\ntwo\n");
+		expect(await storage.readText(target)).toBe("seed\none\ntwo\n");
+		expect(await fsp.readdir(sessionDir)).toEqual(["session.jsonl"]);
+	});
+
+	it("restores the prefix if the fallback guard rejects", async () => {
+		const storage = new RenameEpermOnceStorage();
+		const target = path.join(sessionDir, "session.jsonl");
+		await fsp.writeFile(target, "seed\n");
+		storage.failNextSessionReplace = true;
+		await storage.appendTextAtomic(target, "one\ntwo\n", { commitGuard: () => storage.backupPath === undefined });
+		expect(await storage.readText(target)).toBe("seed\n");
+		expect(await fsp.readdir(sessionDir)).toEqual(["session.jsonl"]);
+	});
+
+	it("restores the prefix and surfaces a failed replacement without a partial batch", async () => {
+		const failure = new FsCodeError("EPERM", "atomic suffix replacement denied");
+		class FailedReplaceStorage extends FileSessionStorage {
+			override renameSync(source: string, target: string): void {
+				if (source.endsWith(".tmp")) throw failure;
+				super.renameSync(source, target);
+			}
+		}
+		const storage = new FailedReplaceStorage();
+		const target = path.join(sessionDir, "session.jsonl");
+		await fsp.writeFile(target, "seed\n");
+		await expect(storage.appendTextAtomic(target, "one\ntwo\n")).rejects.toBe(failure);
+		expect(await storage.readText(target)).toBe("seed\n");
+		expect(await fsp.readdir(sessionDir)).toEqual(["session.jsonl"]);
+	});
+
+	it("surfaces a failed guard-rejection restore and retains the recoverable prefix", async () => {
+		const original = new FsCodeError("EPERM", "original replacement denied");
+		const rollback = new FsCodeError("EIO", "backup restore failed");
+		class FailedGuardRestoreStorage extends FileSessionStorage {
+			backupPath: string | undefined;
+			override renameSync(source: string, target: string): void {
+				if (source.endsWith(".tmp")) throw original;
+				if (source.endsWith(".bak")) throw rollback;
+				if (target.endsWith(".bak")) this.backupPath = target;
+				super.renameSync(source, target);
+			}
+		}
+		const storage = new FailedGuardRestoreStorage();
+		const target = path.join(sessionDir, "session.jsonl");
+		await fsp.writeFile(target, "seed\n");
+		const error = await storage
+			.appendTextAtomic(target, "one\ntwo\n", {
+				commitGuard: () => storage.backupPath === undefined,
+			})
+			.then(
+				() => undefined,
+				error => error,
+			);
+		expect(error).toBeInstanceOf(Error);
+		expect(error.cause).toBe(original);
+		expect(error.message).toContain(rollback.message);
+		if (!storage.backupPath) throw new Error("Expected recoverable backup");
+		expect(await storage.readText(storage.backupPath)).toBe("seed\n");
+		expect(storage.existsSync(target)).toBe(false);
+		expect((await fsp.readdir(sessionDir)).filter(name => name.endsWith(".tmp"))).toEqual([]);
+	});
+
+	it("rejects a stale suffix when a peer publishes during staging", async () => {
+		const storage = new FileSessionStorage();
+		const target = path.join(sessionDir, "session.jsonl");
+		await fsp.writeFile(target, "seed\n");
+		const publication = storage.appendTextAtomic(target, "one\ntwo\n");
+		// Staging yields before the publish lock: a real peer can replace the prefix here.
+		storage.writeTextSync(target, "fresh\n");
+		await expect(publication).rejects.toBeInstanceOf(SessionWriteConflictError);
+		expect(await storage.readText(target)).toBe("fresh\n");
+		expect(await fsp.readdir(sessionDir)).toEqual(["session.jsonl"]);
 	});
 });

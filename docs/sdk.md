@@ -257,6 +257,10 @@ Behavior:
    - appends user message
    - starts agent turn
 
+Normal input accepts optional `originalSubmission: { text, images?, imageLinks?, compactionOverride? }` metadata for hosts that transform input before delivery. `text` is the exact typed text, including a literal `/keep` or `/once` prefix when present; the override separately records its parsed meaning. Prompt, steer, follow-up and custom human input retain original image bytes and links through queue restoration. Accepted transformed originals are persisted with the ordinary journal message; an undelivered queued draft creates no source entry. Identical originals reuse the delivered content. This path does not capture, index or flush requirements memory when V2 is disabled.
+
+`producer` is host provenance, independent of wire role and billing attribution. Normal operator prompts default to `{ type: "human" }`; generated, extension and tool input retain their explicit producers. Hosts invoking `promptCustomMessage` for human input must pass the human producer explicitly. Branch and tree-navigation results include optional rich `sourceInput` metadata for draft restoration; when an original is present its text is already exact and must not receive another preservation-command prefix.
+
 Related APIs:
 
 - `sendUserMessage(content, { deliverAs?, attribution? })`
@@ -285,6 +289,26 @@ The model returns one JSON object containing all eleven canonical category names
 Classification reads the current durable source message and its entry ID, not immutable V2 capture evidence. Source identities and inputs are revalidated before successful v1 facts are appended. Branch/reset/session changes interrupt stale work without appending to another branch; vetoed transitions resume the original scope. Failure is not an all-false classification. Restart never resumes requests automatically: explicitly launch missing-only backfill.
 
 Cold source capture cooperates with the event loop; backfill projects its prior-user/two-assistant neighborhood in one forward pass. Before and after each request, validation reads only the captured current and auxiliary source IDs. Ordinary later appends cannot change those preceding neighbors. The existing source-rewrite callback invalidates dependent targets when content or eligibility changes, including affected rows not yet admitted by an active backfill; those rows require explicit retry while unaffected rows continue.
+
+## Preserved source state
+
+`await session.preparePreservedMessages()` establishes durable source IDs and the active post-reset query. `session.getPreservedMessageQuery()` returns the current query when prepared; it never starts an asynchronous rebuild. Rows and manual actions identify current source entries, not equal text or immutable V2 capture evidence. Selected image blocks use the complete atomic source interval `[0, 1)`, not an empty text interval.
+
+Invalidated source preparation rejects with `CompactionCancelledError`. Automatic pruning treats this as cancellation and retains the initiating ownership across both pruning passes, so a stale attempt cannot continue on a new branch or session. Storage failures still propagate as errors.
+
+Human `prompt`, `steer`, `followUp`, and explicitly human-produced `sendUserMessage` inputs recognize `/keep <message>` and `/once <message>` once at the original input boundary. The remaining body is literal, not another extension/template command. Empty directives are rejected. Explicit `compactionOverride` and restored `sourceCaptureId` inputs preserve their existing decision instead of reinterpreting the body; generated messages do not acquire user policy from directive-looking text. Queue restoration retains the manual state, source capture, image attachments, and attachment links. Initial manual state is persisted with the delivered source entry.
+
+Ordinary compaction and handoff do not capture or render a separate requirements snapshot. Active pending delivery IDs join the existing selection synchronously and invalidate the normal publication fence when their generation changes. Unresolved requirements deliveries remain ordinary, fully charged retained history until acknowledged; this mandatory source visibility is independent of user-preservation policy. The same active pending delivery IDs protect original content from automatic pruning and shaking.
+
+- `session.getPreservedMessageSelection()` exposes the current policy result, including selected user sources, admitted non-user atoms, reasons, quota totals, blockers, and `unavailableLimits`. An unavailable model-relative percentage is not zero or unlimited.
+- `session.subscribePreservedMessages(affectedIds => ...)` returns an unsubscribe function. An omitted ID list signals a scope/policy-wide refresh; saved classification changes publish affected source IDs.
+- `session.getPreservedMessagesOwnership()` identifies the active session/branch/reset scope. Ordinary same-branch appends and policy changes do not replace this identity.
+- `await session.setPreservedMessageOverride(sourceId, "auto" | "keep" | "exclude")` writes the complete manageable source atom through the journal durability boundary. Auto removes the manual override; it does not erase classifier facts or disable automatic protection.
+- `await session.capturePreservedMessageOverrideReset(sourceIds?)` captures a finite, durable confirmation snapshot, including the selected IDs, their current override revisions, and source/group counts. Omitting IDs captures every non-Auto group in the active scope; UI filters must not narrow reset-all. Large captures yield cooperatively.
+- `await session.resetPreservedMessageOverrides(snapshot)` returns `{ reset, skipped }`. Same-branch suffixes are allowed but excluded from the captured targets; newer manual edits are skipped instead of overwritten. Branch/reset/session changes reject stale confirmation. Reusing a completed snapshot is idempotent, and durable-write recovery reuses its committed journal transition.
+- `await session.recoverCompactionPersistence()` retries durable publication of the same frozen compaction event. It never appends a duplicate or installs an old result onto a different active branch.
+
+Append-only metadata batches preserve the existing journal bytes and serialize only their new entries. `SessionStorage` implementations must provide `appendTextAtomic(path, suffix, options?)`: publish the complete suffix as one operation against an existing file and honor the same commit guard as `writeTextAtomic`. File storage stages an asynchronous copy of the opaque prefix plus the suffix before guarded replacement; memory and indexed backends append the complete suffix without materializing the old journal in the session manager. Actual source rewrites and authoritative failure recovery still use full atomic replacement.
 
 ## `AgentSession` lifecycle and disposal
 

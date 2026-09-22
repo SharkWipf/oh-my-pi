@@ -47,8 +47,6 @@ function makeSession() {
 		getAsyncJobSnapshot: () => ({ running: [] }),
 		modelRegistry: { isUsingOAuth: () => false },
 		sessionManager: {
-			getSessionName: () => "footer-sanitize test",
-			getEntries: () => [],
 			getAssistantUsageStatistics: () => ({
 				input: 0,
 				output: 0,
