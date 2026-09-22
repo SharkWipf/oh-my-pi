@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { AssistantMessage } from "../src/types";
-import { getOpenAIResponsesHistoryPayload } from "../src/utils";
+import { getOpenAIResponsesHistoryPayload, visitOpenAIResponsesLogicalContent } from "../src/utils";
 import { bindMessageSource, exportItemOrigins, importItemOrigins } from "../src/utils/source-origin";
 
 function assistant(): AssistantMessage {
@@ -67,5 +67,31 @@ describe("read-only native source binding", () => {
 		expect(JSON.stringify(message)).toBe(before);
 		importItemOrigins(payload.items, [{ kind: "unknown", reason: "externally-mutated" }]);
 		expect(exportItemOrigins(payload.items)).toEqual([{ kind: "unknown", reason: "externally-mutated" }]);
+	});
+});
+
+describe("logical source serialization", () => {
+	it("preserves exact bigint arguments as decimal strings without mutating logical content", () => {
+		const args = Object.freeze({
+			rowId: 9_007_199_254_740_993n,
+			nested: Object.freeze({ offset: -9_007_199_254_740_995n }),
+			limit: 2,
+		});
+		const item = { type: "toolCall", id: "call_bigint", name: "lookup", arguments: args };
+		const fragments: string[] = [];
+		let logical: Record<string, unknown> | undefined;
+		visitOpenAIResponsesLogicalContent(item, {
+			sourceText: text => fragments.push(text),
+			text: value => {
+				logical = value;
+			},
+		});
+		expect(fragments).toEqual([
+			"lookup",
+			'{"rowId":"9007199254740993","nested":{"offset":"-9007199254740995"},"limit":2}',
+		]);
+		expect(logical?.arguments).toBe(args);
+		expect(item.arguments.rowId).toBe(9_007_199_254_740_993n);
+		expect(item.arguments.nested.offset).toBe(-9_007_199_254_740_995n);
 	});
 });
