@@ -19,6 +19,11 @@
 
 - Exported the existing per-image `IMAGE_TOKEN_ESTIMATE` baseline so source projections can replace it with representation-specific estimates without counting images twice.
 
+### Fixed
+
+- Fixed ordinary source token estimates omitting assistant images and known current native text, code, logs, search context, and computer metadata. Normalized native mirrors are charged once, including after controlled source rewrites and JSON reload.
+- Fixed metadata-only computer screenshots counting as zero before source allocation. Their single image baseline replaces content-image mirrors, matching computer-result serialization.
+
 ## [18.2.5] - 2026-09-17
 
 ### Fixed
