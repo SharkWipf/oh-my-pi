@@ -7342,6 +7342,7 @@ export class AgentSession {
 		},
 	): Promise<void> {
 		const attribution = options?.attribution ?? "user";
+		const producer = options?.producer;
 		const timestamp = options?.timestamp;
 		const preprocessed = options?.preprocessed;
 		const producer = options?.producer;
@@ -7904,6 +7905,7 @@ export class AgentSession {
 			attribution: options?.attribution,
 			producer: options?.producer,
 			expandPromptTemplates: false,
+			producer: options?.producer,
 			images,
 			streamingBehavior: deliveredAsAside ? "aside" : "steer",
 		});

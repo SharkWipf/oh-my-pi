@@ -21,6 +21,14 @@ Count the transformed system-prompt stub and emitted text, not the replaced prom
 
 Facts use the existing source-origin sidecar and survive explicit image-normalization and blob-decoration clones. Arbitrary untracked clones, changed image/text fields, invalidated hook output, and persisted/reloaded origin maps do not provide current inline facts. Inspect the actual prepared pre-hook context; do not infer ownership from equal text or treat missing facts as a known zero cost.
 
+## Goal objective delivery
+
+`goal.injectAsUserMessage` (default `false`) is available under Settings → Tasks → Modes. When enabled, each successful `goal` tool `create` queues only the trimmed objective as an ordinary user follow-up. Budget, status, and progress remain in the existing goal runtime; they are not added to the user message.
+
+Delivery uses the normal session queue: a streaming run consumes the follow-up after its current work, while an idle session follows ordinary queue-drain rules. The message becomes durable when delivered, not when queued; restarting does not reconstruct undelivered objectives from saved goal state. Delivered messages keep their journal identity and tool-producer metadata on reload, with unchanged user-role rendering and billing attribution.
+
+`get`, `resume`, `complete`, `drop`, and direct `/goal` commands do not inject another objective. Turning the setting off affects future creates only; it does not rewrite history or add special goal retention. SDK tool hosts outside `createAgentSession` must provide `ToolSession.sendUserMessage` when enabling this option.
+
 ## Memory backends
 
 The agent supports three mutually-exclusive memory backends, selected via the `memory.backend` setting (Settings → Memory tab, or `~/.omp/config.yml`):
