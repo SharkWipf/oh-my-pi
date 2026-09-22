@@ -54,6 +54,8 @@ export type CompactionQueuedMessage = {
 	text: string;
 	mode: "steer" | "followUp";
 	images?: ImageContent[];
+	imageLinks?: (string | undefined)[];
+	compactionOverride?: "keep" | "exclude";
 };
 
 export type SubmittedUserInput = {
@@ -62,8 +64,6 @@ export type SubmittedUserInput = {
 	text: string;
 	images?: ImageContent[];
 	imageLinks?: (string | undefined)[];
-	originalSubmission?: OriginalSubmission;
-	compactionOverride?: "keep" | "exclude";
 	customType?: string;
 	/** Route through `session.prompt(text, { synthetic: true })` so the text lands
 	 *  as a hidden agent-authored `developer` message rather than a visible user
@@ -328,8 +328,10 @@ export interface InteractiveModeContext {
 		text: string,
 		mode: "steer" | "followUp",
 		images?: ImageContent[],
+		imageLinks?: (string | undefined)[],
+		compactionOverride?: "keep" | "exclude",
 		originalSubmission?: OriginalSubmission,
-	): void;
+	): Promise<void>;
 	flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void>;
 	flushPendingBashComponents(): void;
 	flushPendingModelSwitch(): Promise<void>;
@@ -432,7 +434,7 @@ export interface InteractiveModeContext {
 	handleChangelogCommand(showFull?: boolean): Promise<void>;
 	handleHotkeysCommand(): void;
 	handleToolsCommand(): void;
-	handleContextCommand(argument?: "usage" | "details"): void;
+	handleContextCommand(view?: "usage" | "details"): void;
 	handleDumpCommand(): Promise<void>;
 	handleAdvisorDumpCommand(isRaw?: boolean): void;
 	handleDebugTranscriptCommand(): Promise<void>;

@@ -3,6 +3,7 @@ import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import { isQueuedMessageList, splitQueuedMessages } from "@oh-my-pi/pi-tui/prompt/queue-input";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 
 // Drives the real editor submit handler through the builtin slash dispatch
@@ -14,8 +15,8 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 function makeCtx(isStreaming = false) {
 	const addToHistory = vi.fn();
 	const handleMCPCommand = vi.fn(async () => {});
-	const followUp = vi.fn(async (_text: string, _images?: ImageContent[]) => {});
-	const steer = vi.fn(async (_text: string, _images?: ImageContent[]) => {});
+	const followUp = vi.fn(async (..._args: Parameters<AgentSession["followUp"]>) => {});
+	const steer = vi.fn(async (..._args: Parameters<AgentSession["steer"]>) => {});
 	const prompt = vi.fn(async () => false);
 	const onInputCallback = vi.fn();
 	let text = "";

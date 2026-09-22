@@ -8,7 +8,7 @@
 import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent, OriginalSubmission, TextContent } from "@oh-my-pi/pi-ai";
+import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -48,7 +48,7 @@ type PromptCustomMessage = Mock<
 			attribution?: string;
 			details: SkillPromptDetails;
 		},
-		options?: { streamingBehavior?: "steer" | "followUp"; queueChipText?: string; queueOnly?: boolean },
+		options?: Parameters<AgentSession["promptCustomMessage"]>[1],
 	) => Promise<void>
 >;
 
@@ -100,11 +100,8 @@ function createStubInputControllerContext(opts: {
 	const reconcileOptimisticSkillMessage = vi.fn();
 	const clearOptimisticSkillMessage = vi.fn();
 	const compactionQueuedMessages: CompactionQueuedMessage[] = [];
-	const queueCompactionMessage = vi.fn(
-		(text: string, mode: "steer" | "followUp", images?: ImageContent[], originalSubmission?: OriginalSubmission) => {
-			compactionQueuedMessages.push({ text, mode, images, originalSubmission });
-		},
-	);
+	const queueCompactionMessage = (...args: Parameters<UiHelpers["queueCompactionMessage"]>): Promise<void> =>
+		new UiHelpers(ctx).queueCompactionMessage(...args);
 	const sessionManager = SessionManager.inMemory();
 	const setLoopPrompt = vi.fn((_prompt: string) => {});
 	const armLoopAutoSubmit = vi.fn();
@@ -127,6 +124,7 @@ function createStubInputControllerContext(opts: {
 			return (this as typeof ctx).session;
 		},
 		showError,
+		showStatus: vi.fn(),
 		handleGoalModeCommand,
 		goalModeEnabled: false,
 		updatePendingMessagesDisplay,
@@ -367,8 +365,8 @@ describe("compaction skill re-invocation", () => {
 			promptCustomMessageCalled.resolve();
 		});
 		const prompt = vi.fn(async (_text: string, _options?: { streamingBehavior?: "steer" | "followUp" }) => {});
-		const steer = vi.fn(async (_text: string, _images?: ImageContent[]) => {});
-		const followUp = vi.fn(async (_text: string, _images?: ImageContent[]) => {});
+		const steer = vi.fn(async (..._args: Parameters<AgentSession["steer"]>) => {});
+		const followUp = vi.fn(async (..._args: Parameters<AgentSession["followUp"]>) => {});
 		const sessionManager = SessionManager.inMemory();
 		const armLoopAutoSubmit = vi.fn();
 		const ctx = {
@@ -427,7 +425,12 @@ describe("compaction skill re-invocation", () => {
 		await uiHelpers.flushCompactionQueue({ willRetry: false });
 		await promptCustomMessageCalled;
 
-		const [message] = firstPromptCustomCall(promptCustomMessage);
+		const [message, options] = firstPromptCustomCall(promptCustomMessage);
+		expect(options?.originalSubmission).toEqual({
+			text: "/skill:test-skill arg1 arg2",
+			images: [image],
+			imageLinks: undefined,
+		});
 		expect(message.customType).toBe(SKILL_PROMPT_MESSAGE_TYPE);
 		expect(message.attribution).toBe("user");
 		if (!Array.isArray(message.content)) {
@@ -444,7 +447,6 @@ describe("compaction skill re-invocation", () => {
 		expect(renderedText.text).toContain("arg1 arg2");
 		expect(message.content[1]).toEqual(image);
 		expect(message.details).toMatchObject({ name: "test-skill", args: "arg1 arg2", lineCount: 1 });
-
 		expect(prompt).not.toHaveBeenCalled();
 		expect(steer).not.toHaveBeenCalled();
 		expect(followUp).not.toHaveBeenCalled();

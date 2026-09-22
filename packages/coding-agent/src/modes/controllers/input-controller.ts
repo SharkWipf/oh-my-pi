@@ -36,6 +36,10 @@ import manualContinuePrompt from "../../prompts/system/manual-continue.md" with 
 import { AgentRegistry } from "../../registry/agent-registry";
 import type { RestoredQueuedMessage } from "../../session/agent-session-types";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
+import {
+	parseCompactionOverridePrompt,
+	restoreCompactionOverridePrompt,
+} from "../../session/preserved-message-settings";
 import { PINNED_HUD_TOGGLE_ID } from "@oh-my-pi/pi-tui/prompt/composer";
 import { pickRecentFocusableAgentId } from "./session-focus-controller";
 import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
@@ -893,23 +897,68 @@ export class InputController {
 		return compacted.text.trim();
 	}
 
+	#restoredOriginalSubmission(
+		text: string,
+		images: readonly ImageContent[] | undefined,
+		imageLinks: readonly (string | undefined)[] | undefined,
+		compactionOverride: "keep" | "exclude" | undefined,
+		index = 0,
+	): OriginalSubmission | undefined {
+		const source = this.ctx.editor.restoredOriginalSubmissions?.[index];
+		if (
+			!source?.originalSubmission ||
+			(source.compactionOverride
+				? (parseCompactionOverridePrompt(source.text)?.text ?? source.text)
+				: source.text) !== text ||
+			source.compactionOverride !== compactionOverride ||
+			(source.images?.length ?? 0) !== (images?.length ?? 0)
+		)
+			return undefined;
+		for (let i = 0; i < (images?.length ?? 0); i++) {
+			if (source.images?.[i] !== images?.[i] || source.imageLinks?.[i] !== imageLinks?.[i]) return undefined;
+		}
+		return source.originalSubmission;
+	}
+
 	setupEditorSubmitHandler(): void {
 		this.ctx.editor.onSubmit = async (text: string) => {
 			text = this.#compactDraftImages(text.trim());
-			const originalSubmission: OriginalSubmission = {
+			let originalText = text;
+			const directive = parseCompactionOverridePrompt(text);
+			let compactionOverride = directive?.compactionOverride;
+			text = directive?.text ?? text;
+			if (compactionOverride && !text) {
+				this.ctx.editor.setCollapsedText(restoreCompactionOverridePrompt(text, compactionOverride));
+				this.ctx.showWarning(`Usage: /${compactionOverride === "keep" ? "keep" : "once"} <message>`);
+				return;
+			}
+			const restoredSubmission = this.#restoredOriginalSubmission(
 				text,
-				images: this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined,
-				imageLinks:
-					this.ctx.editor.pendingImageLinks.length > 0 ? [...this.ctx.editor.pendingImageLinks] : undefined,
+				this.ctx.editor.pendingImages,
+				this.ctx.editor.pendingImageLinks,
+				compactionOverride,
+			);
+			if (restoredSubmission) {
+				originalText = restoredSubmission.text;
+				text = parseCompactionOverridePrompt(originalText)?.text ?? originalText;
+			}
+			const originalSubmission = restoredSubmission ?? {
+				text: originalText,
+				images: this.ctx.editor.pendingImages.length ? [...this.ctx.editor.pendingImages] : undefined,
+				imageLinks: this.ctx.editor.pendingImageLinks.length ? [...this.ctx.editor.pendingImageLinks] : undefined,
+				compactionOverride,
 			};
+			const restoredOriginalSubmissions = this.ctx.editor.restoredOriginalSubmissions;
 			const hasPendingImages = this.ctx.editor.pendingImages.length > 0;
-			if ((!isSettingsInitialized() || settings.get("emojiAutocomplete")) && text) text = expandEmoticons(text);
+			if (!compactionOverride && (!isSettingsInitialized() || settings.get("emojiAutocomplete")) && text) {
+				text = expandEmoticons(text);
+			}
 
 			// Focused subagent session: the editor is a plain chat box for it.
 			// Everything below (continue shortcuts, slash/bash/python, loop,
 			// compaction queueing) is main-session-only.
 			if (this.ctx.focusedAgentId) {
-				await this.#submitToFocusedSession(text, "steer", originalSubmission);
+				await this.#submitToFocusedSession(text, "steer", compactionOverride, originalSubmission);
 				return;
 			}
 
@@ -930,7 +979,7 @@ export class InputController {
 			// Continue shortcuts: "." or "c" resume the agent with a hidden agent-authored
 			// developer directive (no visible user message) instead of an empty turn, so the
 			// model continues the prior intent rather than second-guessing the interrupt.
-			if (text === "." || text === "c") {
+			if (!compactionOverride && (text === "." || text === "c")) {
 				if (this.ctx.onInputCallback) {
 					this.ctx.editor.clearDraft();
 					this.ctx.onInputCallback({
@@ -950,6 +999,16 @@ export class InputController {
 			let hasInputImages = (inputImages?.length ?? 0) > 0;
 			const submittedText = text;
 			const submittedImages = inputImages;
+			const restoreDraft = () => {
+				const original = originalSubmission;
+				this.ctx.editor.pendingImages = original.images ? [...original.images] : [];
+				this.ctx.editor.pendingImageLinks = original.imageLinks
+					? [...original.imageLinks]
+					: this.ctx.editor.pendingImages.map(() => undefined);
+				this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
+				this.ctx.editor.setCollapsedText(original.text);
+				this.ctx.editor.restoredOriginalSubmissions = restoredOriginalSubmissions;
+			};
 
 			if (runner?.hasHandlers("input")) {
 				const result = await runner.emitInput(text, inputImages, "interactive");
@@ -969,7 +1028,7 @@ export class InputController {
 				}
 				hasInputImages = (inputImages?.length ?? 0) > 0;
 			}
-			const transformedCommand = parseSlashCommand(text);
+			const transformedCommand = compactionOverride ? undefined : parseSlashCommand(text);
 			if (
 				text !== submittedText &&
 				transformedCommand?.name === "memory" &&
@@ -999,7 +1058,7 @@ export class InputController {
 
 			if (!text && !hasInputImages) return;
 
-			const queueBody = parseQueueShorthand(text);
+			const queueBody = compactionOverride ? undefined : parseQueueShorthand(text);
 			if (queueBody !== undefined) {
 				await this.#queueForYield(queueBody, {
 					historyText: text,
@@ -1010,20 +1069,26 @@ export class InputController {
 				return;
 			}
 
-			// Handle built-in slash commands
-			if (text) {
+			// A semantic directive makes its entire body literal.
+			if (text && !compactionOverride) {
 				this.#recordSlashCommandUsage(text);
 				const input = { images: inputImages, imageLinks: inputImageLinks, originalSubmission };
 				const slashResult = await executeBuiltinSlashCommand(text, { ctx: this.ctx, input, draftDetached });
 				if (slashResult === true) {
-					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
+					if (!shouldSkipHistory(restoreCompactionOverridePrompt(text, compactionOverride)))
+						this.ctx.editor.addToHistory(text);
 					return;
+				}
+				if (typeof slashResult === "object") {
+					text = slashResult.prompt;
+					compactionOverride = slashResult.compactionOverride;
 				}
 				if (typeof slashResult === "string") {
 					// Command handled but returned remaining text to use as prompt.
 					// Record the original slash command text so Up Arrow recalls
 					// "/loop 10 fix bug" rather than just "fix bug".
-					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
+					if (!shouldSkipHistory(restoreCompactionOverridePrompt(text, compactionOverride)))
+						this.ctx.editor.addToHistory(text);
 					text = slashResult;
 				}
 			}
@@ -1032,12 +1097,12 @@ export class InputController {
 			// python execution is host-only (builtins are gated inside
 			// executeBuiltinSlashCommand, which already consumed allowed ones).
 			if (this.ctx.collabGuest) {
-				if (text.startsWith("/")) {
+				if (!compactionOverride && text.startsWith("/")) {
 					this.ctx.showStatus(`${text.split(/\s+/, 1)[0]} is host-only during a collab session`);
 					this.ctx.editor.setText("");
 					return;
 				}
-				if (text.startsWith("!") || parsePythonCommandInput(text)) {
+				if (!compactionOverride && (text.startsWith("!") || parsePythonCommandInput(text))) {
 					this.ctx.showStatus("Local execution is host-only during a collab session");
 					this.ctx.editor.setText("");
 					return;
@@ -1048,10 +1113,10 @@ export class InputController {
 					return;
 				}
 				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
-				this.ctx.editor.clearDraft(text);
+				this.ctx.editor.clearDraft(restoreCompactionOverridePrompt(text, compactionOverride));
 				// No local render: the prompt comes back from the host as a
 				// collab-prompt event/entry and renders with the author badge.
-				this.ctx.collabGuest.sendPrompt(text, images);
+				this.ctx.collabGuest.sendPrompt(text, images, inputImageLinks, compactionOverride);
 				return;
 			}
 
@@ -1059,7 +1124,7 @@ export class InputController {
 			// free-text Enter semantics below); Ctrl+Enter routes through `handleFollowUp`.
 			// During compaction, queue immediately so bash/python/loop-mode branches do
 			// not consume the skill before the compaction-resume path re-parses it.
-			if (text && isKnownSkillCommand(this.ctx, text)) {
+			if (!compactionOverride && text && isKnownSkillCommand(this.ctx, text)) {
 				// Capture here too: this branch's own early returns below would
 				// otherwise skip the non-skill capture further down.
 				if (this.ctx.loopModeEnabled) {
@@ -1067,7 +1132,14 @@ export class InputController {
 				}
 				if (this.ctx.session.isCompacting) {
 					const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
-					this.ctx.queueCompactionMessage(text, "steer", images, originalSubmission);
+					await this.ctx.queueCompactionMessage(
+						text,
+						"steer",
+						images,
+						inputImageLinks,
+						compactionOverride,
+						originalSubmission,
+					);
 					return;
 				}
 				if (await this.#invokeSkillCommand(text, "steer", inputImages, inputImageLinks, originalSubmission)) {
@@ -1082,7 +1154,7 @@ export class InputController {
 			}
 
 			// Handle bash command (! for normal, !! for excluded from context)
-			if (text.startsWith("!")) {
+			if (!compactionOverride && text.startsWith("!")) {
 				const isExcluded = text.startsWith("!!");
 				const command = isExcluded ? text.slice(2).trim() : text.slice(1).trim();
 				if (command) {
@@ -1091,7 +1163,7 @@ export class InputController {
 						this.ctx.editor.setText(text);
 						return;
 					}
-					this.ctx.editor.addToHistory(text);
+					this.ctx.editor.addToHistory(restoreCompactionOverridePrompt(text, compactionOverride));
 					await this.ctx.handleBashCommand(command, isExcluded);
 					this.ctx.isBashMode = false;
 					this.ctx.updateEditorBorderColor();
@@ -1101,7 +1173,7 @@ export class InputController {
 
 			// Handle python command (`$ <code>` for normal, `$$ <code>` for excluded from context).
 			// Shell-style variables such as `$HOME` are normal prose unless a space follows the sigil.
-			const pythonCommand = parsePythonCommandInput(text);
+			const pythonCommand = compactionOverride ? undefined : parsePythonCommandInput(text);
 			if (pythonCommand) {
 				const { code, isExcluded } = pythonCommand;
 				if (code) {
@@ -1110,7 +1182,7 @@ export class InputController {
 						this.ctx.editor.setText(text);
 						return;
 					}
-					this.ctx.editor.addToHistory(text);
+					this.ctx.editor.addToHistory(restoreCompactionOverridePrompt(text, compactionOverride));
 					await this.ctx.handlePythonCommand(code, isExcluded);
 					this.ctx.isPythonMode = false;
 					this.ctx.updateEditorBorderColor();
@@ -1121,32 +1193,34 @@ export class InputController {
 			// Queue input during compaction
 			if (this.ctx.session.isCompacting) {
 				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
-				this.ctx.queueCompactionMessage(text, "steer", images, originalSubmission);
+				await this.ctx.queueCompactionMessage(
+					text,
+					"steer",
+					images,
+					inputImageLinks,
+					compactionOverride,
+					originalSubmission,
+				);
 				// An inline `/loop` body queued here arms the loop only when it is
 				// an actual model prompt. Skill/bash/python bodies never reach this
 				// branch, but an extension-command body would otherwise be retained
 				// as loopPrompt while the drain executes it locally — and idle
 				// submissions never arm commands.
-				if (submittedMode === "loop" && !this.#isLocalExtensionCommand(text)) this.ctx.setLoopPrompt(text);
+				if (submittedMode === "loop" && (compactionOverride || !this.#isLocalExtensionCommand(text))) {
+					this.ctx.setLoopPrompt(restoreCompactionOverridePrompt(text, compactionOverride));
+				}
 				return;
 			}
 
 			// Extension commands are local actions. Execute them before the normal
 			// submission path creates an optimistic user message; otherwise a
 			// consumed command remains rendered like a prompt sent to the model.
-			if (this.#isLocalExtensionCommand(text)) {
-				this.ctx.editor.clearDraft(text);
+			if (!compactionOverride && this.#isLocalExtensionCommand(text)) {
+				this.ctx.editor.clearDraft(restoreCompactionOverridePrompt(text, compactionOverride));
 				try {
 					await this.ctx.session.prompt(text, { images: inputImages, originalSubmission });
 				} catch (error) {
-					if (inputImages && inputImages.length > 0) {
-						this.ctx.editor.pendingImages = [...inputImages];
-						this.ctx.editor.pendingImageLinks = inputImageLinks
-							? [...inputImageLinks]
-							: inputImages.map(() => undefined);
-						this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
-					}
-					this.ctx.editor.setCollapsedText(text);
+					restoreDraft();
 					this.ctx.showError(error instanceof Error ? error.message : String(error));
 				}
 				return;
@@ -1155,7 +1229,7 @@ export class InputController {
 			// If streaming, use prompt() with steer behavior
 			// This handles extension commands (execute immediately), prompt template expansion, and queueing
 			if (this.ctx.session.isStreaming) {
-				this.ctx.editor.addToHistory(text);
+				this.ctx.editor.addToHistory(restoreCompactionOverridePrompt(text, compactionOverride));
 				this.ctx.editor.setText("");
 				this.ctx.editor.imageLinks = undefined;
 				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
@@ -1168,7 +1242,14 @@ export class InputController {
 				try {
 					const forwarded = await this.ctx.withLocalSubmission(
 						text,
-						() => this.ctx.session.prompt(text, { streamingBehavior: "steer", images, originalSubmission }),
+						() =>
+							this.ctx.session.prompt(text, {
+								streamingBehavior: "steer",
+								images,
+								imageLinks: inputImageLinks,
+								compactionOverride,
+								originalSubmission,
+							}),
 						{ imageCount: images?.length ?? 0 },
 					);
 					// An inline `/loop` body arms the loop only after dispatch
@@ -1176,18 +1257,11 @@ export class InputController {
 					// retain a body whose dispatch rejects, resubmitting a failed
 					// prompt after every yield. A rejection leaves prior loop
 					// state untouched, so the previous body (if any) survives.
-					if (submittedMode === "loop" && forwarded) this.ctx.setLoopPrompt(text);
-				} catch (error) {
-					// Don't lose the queued steer draft: restore images then the collapsed
-					// text so chip tokens (and band cards) survive the retry.
-					if (images && images.length > 0) {
-						this.ctx.editor.pendingImages = [...images];
-						this.ctx.editor.pendingImageLinks = inputImageLinks
-							? [...inputImageLinks]
-							: images.map(() => undefined);
-						this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
+					if (submittedMode === "loop" && forwarded) {
+						this.ctx.setLoopPrompt(restoreCompactionOverridePrompt(text, compactionOverride));
 					}
-					this.ctx.editor.setCollapsedText(text);
+				} catch (error) {
+					restoreDraft();
 					this.ctx.showError(error instanceof Error ? error.message : String(error));
 				}
 				this.ctx.updatePendingMessagesDisplay();
@@ -1202,7 +1276,7 @@ export class InputController {
 			// consume, rejection) park the loop at their own dispatch sites, so a
 			// failed body degrades to idle instead of looping errors.
 			if (this.ctx.loopModeEnabled) {
-				this.ctx.setLoopPrompt(text);
+				this.ctx.setLoopPrompt(restoreCompactionOverridePrompt(text, compactionOverride));
 			}
 			// First, move any pending bash components to chat
 			this.ctx.flushPendingBashComponents();
@@ -1221,10 +1295,11 @@ export class InputController {
 				// streaming-branch Enter (above) and keeps the message from throwing
 				// AgentBusyError on that race.
 				const submission = this.ctx.startPendingSubmission({
-					originalSubmission,
 					text,
 					images,
 					imageLinks: inputImageLinks,
+					compactionOverride,
+					originalSubmission,
 					streamingBehavior: "steer",
 				});
 				// Start titling only after the optimistic row painted, so the local
@@ -1248,7 +1323,14 @@ export class InputController {
 				try {
 					const forwarded = await this.ctx.withLocalSubmission(
 						text,
-						() => this.ctx.session.prompt(text, { streamingBehavior: "steer", images, originalSubmission }),
+						() =>
+							this.ctx.session.prompt(text, {
+								streamingBehavior: "steer",
+								images,
+								imageLinks: inputImageLinks,
+								compactionOverride,
+								originalSubmission,
+							}),
 						{
 							imageCount: images?.length ?? 0,
 						},
@@ -1256,28 +1338,21 @@ export class InputController {
 					// The idle block above already armed this body synchronously.
 					// A locally-consumed dispatch starts no turn: park the armed
 					// loop instead of resubmitting a local action on next idle.
-					if (!forwarded && this.ctx.loopPrompt === text) this.ctx.pauseLoop();
-				} catch (error) {
-					// Don't lose the message: hand images then collapsed text back to the
-					// editor so the user can retry (e.g. prompt dispatch rejecting an
-					// extension command).
-					if (images && images.length > 0) {
-						this.ctx.editor.pendingImages = [...images];
-						this.ctx.editor.pendingImageLinks = inputImageLinks
-							? [...inputImageLinks]
-							: images.map(() => undefined);
-						this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
+					if (!forwarded && this.ctx.loopPrompt === restoreCompactionOverridePrompt(text, compactionOverride)) {
+						this.ctx.pauseLoop();
 					}
-					this.ctx.editor.setCollapsedText(text);
+				} catch (error) {
+					restoreDraft();
 					this.ctx.showError(error instanceof Error ? error.message : String(error));
 					// Dispatch rejected after the body was armed: park it so the
 					// failed prompt is not resubmitted on next idle.
-					if (this.ctx.loopPrompt === text) this.ctx.pauseLoop();
+					if (this.ctx.loopPrompt === restoreCompactionOverridePrompt(text, compactionOverride))
+						this.ctx.pauseLoop();
 				}
 				this.ctx.updatePendingMessagesDisplay();
 				this.ctx.ui.requestRender();
 			}
-			this.ctx.editor.addToHistory(text);
+			this.ctx.editor.addToHistory(restoreCompactionOverridePrompt(text, compactionOverride));
 		};
 	}
 
@@ -1310,9 +1385,11 @@ export class InputController {
 	async #submitToFocusedSession(
 		text: string,
 		streamingBehavior: "steer" | "followUp",
+		compactionOverride?: "keep" | "exclude",
 		originalSubmission?: OriginalSubmission,
 	): Promise<void> {
 		const target = this.ctx.viewSession;
+		const restoredOriginalSubmissions = this.ctx.editor.restoredOriginalSubmissions;
 		const images = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
 		const imageLinks =
 			images && this.ctx.editor.pendingImageLinks.length > 0 ? [...this.ctx.editor.pendingImageLinks] : undefined;
@@ -1325,7 +1402,11 @@ export class InputController {
 			}
 			return;
 		}
-		if (text && (text.startsWith("/") || text.startsWith("!") || parsePythonCommandInput(text))) {
+		if (
+			!compactionOverride &&
+			text &&
+			(text.startsWith("/") || text.startsWith("!") || parsePythonCommandInput(text))
+		) {
 			this.ctx.showStatus("Commands run in the main session — press ←← to return first");
 			return; // editor text not cleared: Editor does not auto-clear on submit
 		}
@@ -1334,7 +1415,8 @@ export class InputController {
 			// prompt() handles idle (new turn) and streaming (queues per streamingBehavior).
 			await this.ctx.withLocalSubmission(
 				text,
-				() => target.prompt(text, { streamingBehavior, images, originalSubmission }),
+				() =>
+					target.prompt(text, { streamingBehavior, images, imageLinks, compactionOverride, originalSubmission }),
 				{
 					imageCount: images?.length ?? 0,
 				},
@@ -1347,7 +1429,10 @@ export class InputController {
 				this.ctx.editor.pendingImageLinks = imageLinks ? [...imageLinks] : images.map(() => undefined);
 				this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
 			}
-			this.ctx.editor.setCollapsedText(text);
+			this.ctx.editor.setCollapsedText(
+				originalSubmission?.text ?? restoreCompactionOverridePrompt(text, compactionOverride),
+			);
+			this.ctx.editor.restoredOriginalSubmissions = restoredOriginalSubmissions;
 			this.ctx.showError(error instanceof Error ? error.message : String(error));
 		}
 		this.ctx.updatePendingMessagesDisplay();
@@ -1531,15 +1616,13 @@ export class InputController {
 		const draftImages = images && images.length > 0 ? [...images] : undefined;
 		const draftImageLinks = draftImages && imageLinks && imageLinks.length > 0 ? [...imageLinks] : undefined;
 		const restoreDraft = () => {
-			if (draftImages && draftImages.length > 0) {
-				this.ctx.editor.pendingImages = [...draftImages];
-				this.ctx.editor.pendingImageLinks = draftImageLinks
-					? [...draftImageLinks]
-					: draftImages.map(() => undefined);
-				this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
-			}
-			// Images first: collapsing reads `pendingImages.length` to decide which markers become chips.
-			this.ctx.editor.setCollapsedText(text);
+			const original = originalSubmission ?? { text, images: draftImages, imageLinks: draftImageLinks };
+			this.ctx.editor.pendingImages = original.images ? [...original.images] : [];
+			this.ctx.editor.pendingImageLinks = original.imageLinks
+				? [...original.imageLinks]
+				: this.ctx.editor.pendingImages.map(() => undefined);
+			this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
+			this.ctx.editor.setCollapsedText(original.text);
 		};
 
 		this.ctx.editor.clearDraft(text);
@@ -1602,8 +1685,53 @@ export class InputController {
 			return;
 		}
 
-		const messages = splitMessages.length > 0 ? splitMessages : [""];
+		const rawMessages = splitMessages.length > 0 ? splitMessages : [""];
+		const wholeImages = compactImageMarkers(text, options.images?.length ?? 0);
+		const hasImageMarkers = !!options.images?.length && (!wholeImages || wholeImages.keep.length > 0);
+		const messages = rawMessages.map((rawText, index) => {
+			const directive = parseCompactionOverridePrompt(rawText);
+			const body = directive?.text ?? rawText;
+			const compacted = hasImageMarkers ? compactImageMarkers(body, options.images!.length) : undefined;
+			const messageImages = hasImageMarkers
+				? compacted
+					? compacted.keep.map(i => options.images![i])
+					: options.images
+				: index === 0
+					? options.images
+					: undefined;
+			const messageLinks = hasImageMarkers
+				? compacted
+					? compacted.keep.map(i => options.imageLinks?.[i])
+					: options.imageLinks
+				: index === 0
+					? options.imageLinks
+					: undefined;
+			return {
+				text: compacted?.text ?? body,
+				compactionOverride: directive?.compactionOverride,
+				images: messageImages,
+				imageLinks: messageLinks,
+				originalSubmission: this.#restoredOriginalSubmission(
+					compacted?.text ?? body,
+					messageImages,
+					messageLinks,
+					directive?.compactionOverride,
+					index,
+				) ??
+					(rawMessages.length === 1 ? options.originalSubmission : undefined) ?? {
+						text: compacted ? rawText.replace(body, compacted.text) : rawText,
+						images: messageImages,
+						imageLinks: messageLinks,
+						compactionOverride: directive?.compactionOverride,
+					},
+			};
+		});
+		if (messages.some(message => message.compactionOverride && !message.text.trim())) {
+			this.ctx.showWarning("Usage: /keep <message> or /once <message>");
+			return;
+		}
 		const originalDraft = this.ctx.editor.getText();
+		const restoredOriginalSubmissions = this.ctx.editor.restoredOriginalSubmissions;
 		const images = options.images?.length ? [...options.images] : undefined;
 		const imageLinks = options.imageLinks
 			? [...options.imageLinks]
@@ -1613,13 +1741,8 @@ export class InputController {
 		this.ctx.editor.clearDraft(options.historyText);
 
 		if (this.ctx.session.isCompacting) {
-			for (let index = 0; index < messages.length; index++) {
-				this.ctx.compactionQueuedMessages.push({
-					text: messages[index] ?? "",
-					mode: "followUp",
-					images: index === 0 ? images : undefined,
-					originalSubmission: options.originalSubmission,
-				});
+			for (const message of messages) {
+				this.ctx.compactionQueuedMessages.push({ ...message, mode: "followUp" });
 			}
 			this.ctx.updatePendingMessagesDisplay();
 			this.ctx.showStatus(
@@ -1635,49 +1758,52 @@ export class InputController {
 		let queuedCount = 0;
 		try {
 			if (startImmediately && this.ctx.onInputCallback) {
-				const first = messages[0] ?? "";
 				const submission = this.ctx.startPendingSubmission({
-					text: first,
-					images,
-					imageLinks,
-					originalSubmission: options.originalSubmission,
+					...messages[0],
 					streamingBehavior: "followUp",
 				});
 				this.ctx.onInputCallback(submission);
 				queuedCount = 1;
 			}
 			while (queuedCount < messages.length) {
-				const message = messages[queuedCount] ?? "";
-				const queuedImages = queuedCount === 0 ? images : undefined;
+				const message = messages[queuedCount];
 				await this.ctx.withLocalSubmission(
-					message,
+					message.text,
 					async () => {
 						if (startImmediately && queuedCount === 0) {
-							await this.ctx.session.prompt(message, {
-								images: queuedImages,
+							await this.ctx.session.prompt(message.text, {
+								images: message.images,
+								imageLinks: message.imageLinks,
+								compactionOverride: message.compactionOverride,
+								originalSubmission: message.originalSubmission,
 								streamingBehavior: "followUp",
-								originalSubmission: options.originalSubmission,
 							});
 						} else {
-							await this.ctx.session.followUp(message, queuedImages, {
-								originalSubmission: options.originalSubmission,
+							await this.ctx.session.followUp(message.text, message.images, {
+								imageLinks: message.imageLinks,
+								compactionOverride: message.compactionOverride,
+								originalSubmission: message.originalSubmission,
 							});
 						}
 					},
-					{ imageCount: queuedImages?.length ?? 0 },
+					{ imageCount: message.images?.length ?? 0 },
 				);
 				queuedCount++;
 			}
 		} catch (error) {
 			if (queuedCount === 0) {
 				this.ctx.editor.setText(originalDraft);
+				this.ctx.editor.restoredOriginalSubmissions = restoredOriginalSubmissions;
 				if (images) {
 					this.ctx.editor.pendingImages = images;
 					this.ctx.editor.pendingImageLinks = imageLinks ?? images.map(() => undefined);
 					this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
 				}
 			} else {
-				const remaining = messages.slice(queuedCount);
+				const remaining = rawMessages.slice(queuedCount);
+				this.ctx.editor.pendingImages = images ?? [];
+				this.ctx.editor.pendingImageLinks = imageLinks ?? [];
+				this.ctx.editor.imageLinks = imageLinks;
 				const restored =
 					remaining.length === 1
 						? `=> ${remaining[0]}`
@@ -1685,6 +1811,7 @@ export class InputController {
 								.map((message, index) => `${index + 1}. ${message.replaceAll("\n", "\n   ")}`)
 								.join("\n")}`;
 				this.ctx.editor.setText(restored);
+				this.ctx.editor.restoredOriginalSubmissions = restoredOriginalSubmissions?.slice(queuedCount);
 			}
 			this.ctx.showError(error instanceof Error ? error.message : String(error));
 		}
@@ -1707,18 +1834,41 @@ export class InputController {
 	/** Send editor text as a follow-up message (queued behind current stream). */
 	async handleFollowUp(): Promise<void> {
 		let text = this.#compactDraftImages(this.ctx.editor.getExpandedText().trim());
+		let originalText = text;
+		const directive = parseCompactionOverridePrompt(text);
+		let compactionOverride = directive?.compactionOverride;
+		text = directive?.text ?? text;
+		if (compactionOverride && !text) {
+			this.ctx.showWarning(`Usage: /${compactionOverride === "keep" ? "keep" : "once"} <message>`);
+			return;
+		}
 		const images = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
 		const imageLinks =
 			images && this.ctx.editor.pendingImageLinks.length > 0 ? [...this.ctx.editor.pendingImageLinks] : undefined;
-		const originalSubmission: OriginalSubmission = { text, images, imageLinks };
 		if (!text && !images) return;
+		const restoredSubmission = this.#restoredOriginalSubmission(text, images, imageLinks, compactionOverride);
+		if (restoredSubmission) {
+			originalText = restoredSubmission.text;
+			text = parseCompactionOverridePrompt(originalText)?.text ?? originalText;
+		}
+		const originalSubmission = restoredSubmission ?? { text: originalText, images, imageLinks, compactionOverride };
+		const restoredOriginalSubmissions = this.ctx.editor.restoredOriginalSubmissions;
 
 		// Focused subagent session: follow-ups go to it; non-chat input is gated.
 		if (this.ctx.focusedAgentId) {
-			await this.#submitToFocusedSession(text, "followUp", originalSubmission);
+			await this.#submitToFocusedSession(text, "followUp", compactionOverride, originalSubmission);
 			return;
 		}
 
+		if (this.ctx.collabGuest && compactionOverride) {
+			if (this.ctx.collabGuest.readOnly) {
+				this.ctx.showStatus("This collab link is read-only — prompting is disabled");
+				return;
+			}
+			this.ctx.editor.clearDraft(restoreCompactionOverridePrompt(text, compactionOverride));
+			this.ctx.collabGuest.sendPrompt(text, images, imageLinks, compactionOverride);
+			return;
+		}
 		// Compaction first: while compacting, free text gets queued via
 		// `queueCompactionMessage`, and `/skill:*` rides the same queue so a
 		// skill typed during compaction is not lost or short-circuited through
@@ -1726,16 +1876,27 @@ export class InputController {
 		// queued text into a user-attributed skill invocation before delivery.
 		if (this.ctx.session.isCompacting) {
 			const images = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
-			this.ctx.queueCompactionMessage(text, "followUp", images, originalSubmission);
+			await this.ctx.queueCompactionMessage(
+				text,
+				"followUp",
+				images,
+				imageLinks,
+				compactionOverride,
+				originalSubmission,
+			);
 			return;
 		}
 
-		if (text) {
+		if (text && !compactionOverride) {
 			const input = { images, imageLinks, originalSubmission };
 			const slashResult = await executeBuiltinSlashCommand(text, { ctx: this.ctx, input });
 			if (slashResult === true) {
 				if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
 				return;
+			}
+			if (typeof slashResult === "object") {
+				text = slashResult.prompt;
+				compactionOverride = slashResult.compactionOverride;
 			}
 			if (typeof slashResult === "string") {
 				// Command handled but returned remaining text to use as prompt.
@@ -1748,7 +1909,11 @@ export class InputController {
 		// Skill commands invoke through the custom-message path regardless of
 		// which keybinding submitted them. Enter routes them as `steer`;
 		// Ctrl+Enter (this handler) routes them as `followUp`.
-		if (text && (await this.#invokeSkillCommand(text, "followUp", images, imageLinks, originalSubmission))) {
+		if (
+			!compactionOverride &&
+			text &&
+			(await this.#invokeSkillCommand(text, "followUp", images, imageLinks, originalSubmission))
+		) {
 			return;
 		}
 
@@ -1762,16 +1927,24 @@ export class InputController {
 				this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
 			}
 			// Collapse restores the chip tokens (and their band cards) for the failed draft.
-			this.ctx.editor.setCollapsedText(text);
+			this.ctx.editor.setCollapsedText(originalSubmission.text);
+			this.ctx.editor.restoredOriginalSubmissions = restoredOriginalSubmissions;
 			this.ctx.showError(error instanceof Error ? error.message : String(error));
 		};
 
 		if (this.ctx.session.isStreaming) {
-			this.ctx.editor.clearDraft(text);
+			this.ctx.editor.clearDraft(restoreCompactionOverridePrompt(text, compactionOverride));
 			try {
 				await this.ctx.withLocalSubmission(
 					text,
-					() => this.ctx.session.prompt(text, { streamingBehavior: "followUp", images, originalSubmission }),
+					() =>
+						this.ctx.session.prompt(text, {
+							streamingBehavior: "followUp",
+							images,
+							imageLinks,
+							compactionOverride,
+							originalSubmission,
+						}),
 					{ imageCount: images?.length ?? 0 },
 				);
 			} catch (error) {
@@ -1783,11 +1956,15 @@ export class InputController {
 		}
 
 		// Not streaming — just submit normally
-		this.ctx.editor.clearDraft(text);
+		this.ctx.editor.clearDraft(restoreCompactionOverridePrompt(text, compactionOverride));
 		try {
-			await this.ctx.withLocalSubmission(text, () => this.ctx.session.prompt(text, { images, originalSubmission }), {
-				imageCount: images?.length ?? 0,
-			});
+			await this.ctx.withLocalSubmission(
+				text,
+				() => this.ctx.session.prompt(text, { images, imageLinks, compactionOverride, originalSubmission }),
+				{
+					imageCount: images?.length ?? 0,
+				},
+			);
 		} catch (error) {
 			restoreOnError(error);
 		}
@@ -1807,9 +1984,9 @@ export class InputController {
 		this.ctx.compactionQueuedMessages = [];
 		const allQueued = [
 			...steering,
-			...compactionQueued.filter(e => e.mode === "steer").map(e => ({ text: e.text, images: e.images })),
+			...compactionQueued.filter(e => e.mode === "steer"),
 			...followUp,
-			...compactionQueued.filter(e => e.mode === "followUp").map(e => ({ text: e.text, images: e.images })),
+			...compactionQueued.filter(e => e.mode === "followUp"),
 		];
 		const restored = this.#restoreEntriesToEditor(allQueued, options?.currentText);
 		if (options?.abort) {
@@ -1829,6 +2006,7 @@ export class InputController {
 			this.ctx.updatePendingMessagesDisplay();
 			return 0;
 		}
+		entries = entries.map(entry => (entry.originalSubmission ? { ...entry, ...entry.originalSubmission } : entry));
 		// Image markers are positional: `[Image #N]` ↔ `pendingImages[N-1]`
 		// (legacy drafts may still carry a trailing `attachment://N`). Each queued
 		// message numbered its references against its own local image list
@@ -1840,30 +2018,39 @@ export class InputController {
 		// `pendingImages` order; draft markers stay valid because draft images
 		// keep their original positions.
 		const queuedImages = entries.flatMap(e => e.images ?? []);
-		let queuedText: string;
-		if (queuedImages.length > 0) {
-			const parts: string[] = [];
-			let imageOffset = this.ctx.editor.pendingImages.length;
-			for (const entry of entries) {
-				parts.push(shiftImageMarkers(entry.text, imageOffset));
-				if (entry.images && entry.images.length > 0) imageOffset += entry.images.length;
-			}
-			queuedText = parts.join("\n\n");
-		} else {
-			queuedText = entries.map(e => e.text).join("\n\n");
+		const parts: string[] = [];
+		let imageOffset = this.ctx.editor.pendingImages.length;
+		for (const entry of entries) {
+			parts.push(
+				shiftImageMarkers(
+					entry.originalSubmission
+						? entry.text
+						: restoreCompactionOverridePrompt(entry.text, entry.compactionOverride),
+					imageOffset,
+				),
+			);
+			imageOffset += entry.images?.length ?? 0;
 		}
 		const current = currentText ?? this.ctx.editor.getText();
-		const combinedText = [queuedText, current].filter(t => t.trim()).join("\n\n");
+		if (current.trim()) parts.push(current);
+		// Separate queued directives remain separate user sources on resubmit.
+		const combinedText =
+			parts.length > 1 && entries.some(entry => entry.compactionOverride || entry.originalSubmission)
+				? `=>\n${parts.map((text, index) => `${index + 1}. ${text.replaceAll("\n", "\n   ")}`).join("\n")}`
+				: parts.join("\n\n");
 		// Hand queued images back to the pending-image buffer first (links are
 		// re-materialized lazily), then set the text: setCollapsedText folds the
 		// renumbered `[Image #N, WxH]` references back into chip tokens, and the
 		// collapse only recognizes indices within the merged pendingImages range.
 		if (queuedImages.length > 0) {
 			this.ctx.editor.pendingImages.push(...queuedImages);
-			this.ctx.editor.pendingImageLinks.push(...queuedImages.map(() => undefined));
+			this.ctx.editor.pendingImageLinks.push(
+				...entries.flatMap(entry => entry.images?.map((_, index) => entry.imageLinks?.[index]) ?? []),
+			);
 			this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
 		}
 		this.ctx.editor.setCollapsedText(combinedText);
+		this.ctx.editor.restoredOriginalSubmissions = entries;
 		this.ctx.updatePendingMessagesDisplay();
 		return entries.length;
 	}

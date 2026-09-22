@@ -126,6 +126,10 @@ export type AnyUiMetadata = UiBase & {
 
 /** Structural schema entries supplied by the application host. */
 export interface SettingsDisplayEntry {
+	/** Application-owned custom preservation control. */
+	control?: PreservationControl;
+	/** Explicit opt-in for Context boolean assignment shortcuts. */
+	menuconfig?: boolean;
 	path: string;
 	type: string;
 	defaultValue: unknown;
@@ -135,7 +139,32 @@ export interface SettingsDisplayEntry {
 	condition?: () => boolean;
 }
 
+export type PreservationControl =
+	| "preservationLimit"
+	| "preservationCap"
+	| "categoryDispositions"
+	| "regexRules"
+	| "modelSelector"
+	| "positiveTokens";
+export type PreservationAction = "auto" | "keep" | "exclude";
+export type PreservationLimit =
+	| { mode: "off" | "all" }
+	| { mode: "messages" | "tokens" | "context-percent"; value: number };
+export interface PreservationRegexRule {
+	state: PreservationAction;
+	caseInsensitive: boolean;
+	final?: boolean;
+}
+
+/** Policy parsing/validation remains application-owned; the overlay only edits display values. */
+export interface PreservationSettingsHost {
+	categories: readonly { path: string; label: string; description: string }[];
+	parseLimit(value: unknown): PreservationLimit | undefined;
+	serializeLimit(value: PreservationLimit): string;
+	validateRegexCondition(condition: string, caseInsensitive?: boolean): void;
+}
 export interface SettingsHost {
+	preservation?: PreservationSettingsHost;
 	entries: readonly SettingsDisplayEntry[];
 	get(path: string): unknown;
 	set(path: string, value: unknown): void;
@@ -147,6 +176,7 @@ export interface SettingsHost {
 export type SettingsDisplayValue = boolean | string;
 
 interface BaseSettingDef {
+	menuconfig?: boolean;
 	path: string;
 	defaultValue: unknown;
 	schemaType: string;
@@ -200,6 +230,7 @@ export interface MultiSelectSettingDef extends BaseSettingDef {
 }
 
 export type SettingDef =
+	| (BaseSettingDef & { type: PreservationControl })
 	| BooleanSettingDef
 	| EnumSettingDef
 	| SubmenuSettingDef
@@ -220,6 +251,7 @@ function entryToSettingDef(entry: SettingsDisplayEntry): SettingDef | null {
 	const schemaType = entry.type;
 	const condition = entry.condition;
 	const base = {
+		menuconfig: entry.menuconfig,
 		path,
 		defaultValue: entry.defaultValue,
 		schemaType,
@@ -230,6 +262,8 @@ function entryToSettingDef(entry: SettingsDisplayEntry): SettingDef | null {
 		group: ui.group,
 		condition,
 	};
+
+	if (entry.control) return { ...base, type: entry.control };
 
 	if (schemaType === "boolean") {
 		return { ...base, type: "boolean" };

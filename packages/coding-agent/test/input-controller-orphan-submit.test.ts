@@ -149,6 +149,19 @@ function createContext(sessionOverride?: InteractiveModeContext["session"]) {
 }
 
 describe("InputController orphaned submit", () => {
+	it("restores exact directive syntax and original attachments when durable submission rejects", async () => {
+		const { ctx, editor, spies } = createContext();
+		const image: ImageContent = { type: "image", data: "aGVsbG8=", mimeType: "image/png" };
+		editor.pendingImages = [image];
+		editor.pendingImageLinks = ["clipboard-original"];
+		spies.prompt.mockRejectedValue(new Error("Journal publication rejected"));
+		new InputController(ctx).setupEditorSubmitHandler();
+		await editor.onSubmit?.("/once    /keep [Image #1]");
+		expect(editor.getText()).toBe("/once    /keep [Image #1]");
+		expect(editor.pendingImages).toEqual([image]);
+		expect(editor.pendingImageLinks).toEqual(["clipboard-original"]);
+		expect(ctx.locallySubmittedUserSignatures.size).toBe(0);
+	});
 	it("starts an idle submit with no input waiter instead of queueing it forever", async () => {
 		const { ctx, editor, spies } = createContext();
 		const controller = new InputController(ctx);

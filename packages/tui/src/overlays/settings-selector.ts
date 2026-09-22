@@ -19,6 +19,7 @@ import {
 	type SgrMouseEvent,
 	type Tab,
 	TabBar,
+	Text,
 	truncateToWidth,
 	visibleWidth,
 } from "../index";
@@ -48,6 +49,16 @@ import { SnapcompactShapePreview } from "./snapcompact-shape-preview";
 import { getPreset } from "../status-line/presets";
 import { FormField, SelectFormField, TextFormField } from "../components/form";
 import { formTheme } from "../chrome/form-theme";
+import { SettingsFormField } from "../components/settings-list";
+import type { PreservationAction, PreservationLimit, PreservationRegexRule } from "./settings-defs";
+import {
+	ModelBrowser,
+	buildBrowserItems,
+	resolveRoleAssignments,
+	sortModelItems,
+	type ModelBrowserSource,
+	type ModelBrowserRegistry,
+} from "./model-browser";
 
 /**
  * Free-text string setting field backed by the shared text form field.
@@ -110,6 +121,231 @@ function createSettingsSelectField(
 		footer,
 		requestRender,
 	});
+}
+
+type PreservationSettingItem = SettingItem & {
+	assignment?:
+		| { kind: "boolean"; get(): boolean; set(value: boolean): void }
+		| { kind: "action"; get(): PreservationAction; set(value: PreservationAction): void };
+};
+
+function actionKey(data: string): PreservationAction | undefined {
+	if (data === "y" || data === "*") return "keep";
+	if (data === "n") return "exclude";
+	if (data === "-" || matchesKey(data, "backspace")) return "auto";
+	return undefined;
+}
+
+function assignPreservationItem(item: SettingItem | undefined, data: string): boolean {
+	const assignment = (item as PreservationSettingItem | undefined)?.assignment;
+	if (!assignment || item?.heading) return false;
+	if (assignment.kind === "boolean") {
+		const current = assignment.get();
+		const value = data === " " ? !current : data === "y" ? true : data === "n" ? false : undefined;
+		if (value === undefined) return false;
+		if (value !== current) assignment.set(value);
+	} else {
+		const current = assignment.get();
+		const value =
+			data === " " ? (current === "exclude" ? "auto" : current === "auto" ? "keep" : "exclude") : actionKey(data);
+		if (value === undefined) return false;
+		if (value !== current) assignment.set(value);
+	}
+	return true;
+}
+
+/** Native nested forms, with assignment only on explicitly typed preservation rows. */
+class SettingsSubmenu extends SettingsFormField {
+	readonly list: SettingsList;
+	constructor(
+		title: string,
+		items: PreservationSettingItem[],
+		onChange: (id: string, value: string) => void,
+		onCancel: () => void,
+		private readonly getHeight: () => number,
+		private readonly onRender?: () => void,
+		private readonly onHint?: (hint: string) => void,
+	) {
+		super({
+			items,
+			maxVisible: 3,
+			settingsTheme: getSettingsListTheme(),
+			fieldTheme: formTheme,
+			label: title,
+			onChange,
+			onCancel,
+			spaceBeforeControl: false,
+			spaceAfterControl: false,
+			listOptions: { layout: "flat", typeToSearch: false, hint: "" },
+		});
+		this.list = this.settingsList;
+	}
+	override render(width: number): readonly string[] {
+		if (this.list.hasOpenSubmenu()) return this.list.render(width);
+		const assignment = (this.list.getSelectedItem() as PreservationSettingItem | undefined)?.assignment;
+		this.onHint?.(
+			assignment?.kind === "boolean"
+				? "Space toggle · y on · n off · Enter toggle · Esc back"
+				: assignment?.kind === "action"
+					? "Space cycle · y/* Keep · n Never · -/Backspace Auto · Enter choices · Esc back"
+					: "Enter choose · Esc back",
+		);
+		this.onRender?.();
+		this.list.setMaxVisible(Math.max(1, this.getHeight() - 5));
+		return super.render(width);
+	}
+	override handleInput(data: string): void {
+		try {
+			if (!this.list.hasOpenSubmenu() && assignPreservationItem(this.list.getSelectedItem(), data)) {
+				this.setError(undefined);
+				return;
+			}
+			super.handleInput(data);
+		} catch (error) {
+			this.setError(error instanceof Error ? error.message : String(error));
+		}
+	}
+	override routeMouse(event: SgrMouseEvent, line: number, col: number): void {
+		if (this.list.hasOpenSubmenu()) {
+			this.list.routeSubmenuMouse(event, line, col);
+			return;
+		}
+		const controlLine = this.controlLineAt(line);
+		if (controlLine === undefined) return;
+		if (event.wheel !== null) {
+			this.list.handleWheel(event.wheel);
+			return;
+		}
+		const id = this.list.hitTest(controlLine, col);
+		if (event.motion) {
+			this.list.setHoverItem(id ?? null);
+			return;
+		}
+		if (event.leftClick && id !== undefined) {
+			const activate = this.list.getSelectedItem()?.id === id;
+			this.list.selectItem(id);
+			if (activate) this.list.handleInput("\n");
+		}
+	}
+}
+
+/** Keep native controls above explanatory prose when the viewport is short. */
+class PreservationSelectField extends SelectFormField {
+	constructor(
+		options: ConstructorParameters<typeof SelectFormField>[0],
+		private readonly onHint: () => void,
+		private readonly getHeight: () => number,
+	) {
+		super({
+			...options,
+			description: undefined,
+			spaceBeforeControl: false,
+			spaceAfterControl: false,
+			summary: options.description ? [new Text(theme.fg("muted", options.description), 0, 0)] : undefined,
+		});
+	}
+	override render(width: number): readonly string[] {
+		this.onHint();
+		this.selectList.setMaxVisible(Math.max(3, this.getHeight() - 4));
+		return super.render(width);
+	}
+}
+
+/** Only the explicit three-way policy chooser accepts assignment/Space confirmation. */
+class PreservationActionField extends PreservationSelectField {
+	override handleInput(data: string): void {
+		const value = actionKey(data);
+		if (value !== undefined) {
+			this.selectList.setSelectedIndex(value === "auto" ? 0 : value === "keep" ? 1 : 2);
+			super.handleInput("\n");
+		} else super.handleInput(data === " " ? "\n" : data);
+	}
+}
+
+class PreservationTextField extends TextFormField {
+	constructor(
+		options: ConstructorParameters<typeof TextFormField>[0],
+		private readonly onHint: () => void,
+	) {
+		super({
+			...options,
+			description: undefined,
+			spaceBeforeControl: false,
+			spaceAfterControl: false,
+			summary: options.description ? [new Text(theme.fg("muted", options.description), 0, 0)] : undefined,
+		});
+	}
+	override render(width: number): readonly string[] {
+		this.onHint();
+		return super.render(width);
+	}
+}
+
+class ModelSelectorSubmenu implements Component {
+	#active: SelectFormField | ModelBrowser;
+	constructor(
+		source: ModelBrowserSource,
+		registry: ModelBrowserRegistry | undefined,
+		current: string,
+		onSelect: (selector: string) => void,
+		onCancel: () => void,
+		private readonly getHeight: () => number,
+	) {
+		const roles = (): SelectFormField =>
+			createSettingsSelectField(
+				"Classifier Model",
+				"Automatic uses @tiny; no active-model fallback.",
+				[
+					{ value: "", label: "Automatic (@tiny)" },
+					...source.knownRoleIds.map(role => ({
+						value: "@" + role,
+						label: "@" + role,
+						description: source.getRoleInfo(role).name,
+					})),
+					{ value: "__browse", label: "Browse models…" },
+				],
+				current,
+				value => {
+					if (value !== "__browse") {
+						onSelect(value);
+						return;
+					}
+					const browser = new ModelBrowser(source, {
+						emptyText: () => "No models available — configure provider credentials.",
+					});
+					const available = registry?.getAvailable() ?? [];
+					const assignments = resolveRoleAssignments(source, registry?.getAll() ?? [], available);
+					const items = buildBrowserItems(available);
+					sortModelItems(items, { roles: assignments, mruOrder: source.mruOrder });
+					browser.setItems(items);
+					browser.setRoles(assignments);
+					browser.setMruOrder(source.mruOrder);
+					browser.setPerfStats(source.modelPerf);
+					browser.onActivate = item => onSelect(item.selector);
+					browser.onCancel = () => {
+						this.#active = roles();
+					};
+					this.#active = browser;
+				},
+				onCancel,
+			);
+		this.#active = roles();
+	}
+	render(width: number): readonly string[] {
+		if (this.#active instanceof ModelBrowser) this.#active.setMaxVisible(Math.max(1, this.getHeight() - 5));
+		else this.#active.selectList.setMaxVisible(Math.max(1, this.getHeight() - 5));
+		return this.#active.render(width);
+	}
+	handleInput(data: string): void {
+		this.#active.handleInput(data);
+	}
+	routeMouse(event: SgrMouseEvent, line: number, col: number): void {
+		if (this.#active instanceof ModelBrowser) this.#active.routeMouse(event, line);
+		else this.#active.routeMouse(event, line, col);
+	}
+	invalidate(): void {
+		this.#active.invalidate();
+	}
 }
 
 /**
@@ -440,7 +676,16 @@ function getSettingsTabs(): Tab[] {
  * Dynamic context for settings that need runtime data.
  * Some settings (like thinking level) are managed by the session, not Settings.
  */
+export interface SettingsSelectorOptions {
+	initialTab?: SettingTab;
+	initialSettingPath?: string;
+}
+
 export interface SettingsRuntimeContext {
+	modelSource?: ModelBrowserSource;
+	modelRegistry?: ModelBrowserRegistry;
+	maxContextTokens?: number;
+	getPreservationLimitUsage?: (path: string) => string | undefined;
 	settings: SettingsHost;
 	plugins: PluginSettingsHost;
 	/** Available thinking levels (from session) */
@@ -516,8 +761,9 @@ export class SettingsSelectorComponent implements Component {
 	#sidebarWidth: number;
 	readonly #context: SettingsRuntimeContext;
 	readonly #callbacks: SettingsCallbacks;
+	#submenuHint = "";
 
-	constructor(context: SettingsRuntimeContext, callbacks: SettingsCallbacks) {
+	constructor(context: SettingsRuntimeContext, callbacks: SettingsCallbacks, options: SettingsSelectorOptions = {}) {
 		this.#context = context;
 		this.#callbacks = callbacks;
 		this.#sidebarWidth = settingsSidebarWidth(context.settings.entries);
@@ -536,8 +782,17 @@ export class SettingsSelectorComponent implements Component {
 			this.#switchToTab(tabId);
 		};
 
-		// Initialize with first tab
-		this.#switchToTab("appearance");
+		const path = options.initialSettingPath;
+		const categoryPath = context.settings.preservation?.categories.some(category => category.path === path)
+			? context.settings.preservation.categories[0]?.path
+			: path;
+		const initialTab =
+			options.initialTab ??
+			(categoryPath ? getSettingDef(context.settings.entries, categoryPath)?.tab : undefined) ??
+			"appearance";
+		this.#tabBar.setActiveById(initialTab);
+		this.#switchToTab(initialTab);
+		if (categoryPath) this.#currentList?.selectItem(categoryPath);
 	}
 
 	invalidate(): void {
@@ -567,6 +822,8 @@ export class SettingsSelectorComponent implements Component {
 	}
 
 	#footerHintText(): string {
+		const list = this.#searchList ?? this.#currentList;
+		if (list?.hasOpenSubmenu()) return this.#submenuHint || "Enter select · Esc back";
 		if (this.#searchList) {
 			return "Enter to change · Tab to jump tabs · Esc to exit search";
 		}
@@ -577,7 +834,10 @@ export class SettingsSelectorComponent implements Component {
 			return "↑/↓ to jump sections · Tab/Enter to settings · ←/→ to switch tabs · Esc to close";
 		}
 		const nav = this.#hasSectionJump ? "Tab to jump sections · ←/→ to switch tabs" : "Tab to switch tabs";
-		return `Enter/Space to change · ${nav} · Type to search · Esc to close`;
+		const assignment = (this.#currentList?.getSelectedItem() as PreservationSettingItem | undefined)?.assignment;
+		return assignment
+			? `Space toggle · y on · n off · ${nav} · / search · Esc close`
+			: `Enter/Space to change · ${nav} · Type or / to search · Esc to close`;
 	}
 
 	/** Single-line search banner: accent icon, editable query with live cursor, right-aligned match count. */
@@ -599,6 +859,7 @@ export class SettingsSelectorComponent implements Component {
 	 * then a footer hint pinned above the bottom border.
 	 */
 	render(width: number): readonly string[] {
+		this.#submenuHint = "";
 		const height = Math.max(14, process.stdout.rows || 40);
 		const innerWidth = Math.max(1, width - 4);
 
@@ -750,10 +1011,7 @@ export class SettingsSelectorComponent implements Component {
 	 */
 	#setSearchQuery(query: string): void {
 		if (!this.#searchList) return;
-		if (query.length === 0) {
-			this.#endSearch(false);
-			return;
-		}
+
 		this.#searchQuery = query;
 
 		const counts = new Map<SettingTab, number>();
@@ -884,7 +1142,7 @@ export class SettingsSelectorComponent implements Component {
 	/**
 	 * Convert a setting definition to a SettingItem for the UI.
 	 */
-	#defToItem(def: SettingDef): SettingItem | null {
+	#defToItem(def: SettingDef): PreservationSettingItem | null {
 		// Check condition: applies to every variant — booleans, enums, submenus, text inputs.
 		if (def.condition && !def.condition()) {
 			return null;
@@ -894,14 +1152,76 @@ export class SettingsSelectorComponent implements Component {
 		const item = {
 			id: def.path,
 			label: def.label,
-			description: def.description,
+			description:
+				def.path === "compaction.keepUserMessagesLlm" && !this.#context.settings.get("compaction.keepUserMessages")
+					? `Live tagging inactive while Remember User Messages is off. Saved toggle is preserved. ${def.description}`
+					: def.description,
 			warning: def.warning,
 			changed: this.#isChanged(def, currentValue),
 		};
 
 		switch (def.type) {
+			case "preservationLimit":
+				return {
+					...item,
+					currentValue: this.#limitLabel(currentValue),
+					submenu: (_cv, done) => this.#createLimit(def, done),
+				};
+			case "preservationCap":
+				return { ...item, currentValue: this.#capSummary(), submenu: (_cv, done) => this.#createCap(done) };
+			case "categoryDispositions":
+				return {
+					...item,
+					currentValue: this.#categorySummary(),
+					submenu: (_cv, done) => this.#createCategories(done),
+				};
+			case "regexRules":
+				return {
+					...item,
+					currentValue: `${Object.keys(this.#regexRules()).length} rules`,
+					submenu: (_cv, done) => this.#createRegexRules(done),
+				};
+			case "modelSelector":
+				return {
+					...item,
+					currentValue: String(currentValue || "Automatic (@tiny)"),
+					submenu: (_cv, done) => this.#createModelSelector(def, done),
+				};
+			case "positiveTokens":
+				return {
+					...item,
+					currentValue: String(currentValue),
+					submenu: (_cv, done) =>
+						this.#validatedInput(
+							def.label,
+							"Positive safe integer; no arbitrary maximum.",
+							String(currentValue),
+							value => {
+								if (!Number.isSafeInteger(Number(value)) || Number(value) <= 0)
+									throw new Error("Enter a positive safe integer");
+								this.#save(def.path, Number(value));
+								done(value);
+							},
+							() => done(),
+						),
+				};
+
 			case "boolean":
-				return { ...item, currentValue: currentValue ? "true" : "false", values: ["true", "false"] };
+				return {
+					...item,
+					currentValue: currentValue ? "true" : "false",
+					values: ["true", "false"],
+					assignment: def.menuconfig
+						? {
+								kind: "boolean",
+								get: () => this.#context.settings.get(def.path) === true,
+								set: value => {
+									this.#save(def.path, value);
+									this.#refreshCurrentTabItems(getSettingsForTab(this.#context.settings.entries, def.tab));
+								},
+							}
+						: undefined,
+				};
 
 			case "enum":
 				return { ...item, currentValue: String(currentValue ?? ""), values: [...def.values] };
@@ -934,6 +1254,617 @@ export class SettingsSelectorComponent implements Component {
 					submenu: (_cv, done) => this.#createMultiSelect(def, done),
 				};
 		}
+	}
+
+	#save(path: string, value: unknown): void {
+		this.#context.settings.set(path, value);
+		this.#callbacks.onChange(path, value);
+	}
+
+	#settingsMenu(
+		title: string,
+		items: PreservationSettingItem[],
+		onChange: (id: string, value: string) => void,
+		onCancel: () => void,
+		getHeight: () => number,
+		onRender?: () => void,
+	): SettingsSubmenu {
+		return new SettingsSubmenu(title, items, onChange, onCancel, getHeight, onRender, hint => {
+			this.#submenuHint = hint;
+		});
+	}
+
+	#preservationSelectField(
+		label: string,
+		description: string,
+		items: ReadonlyArray<SelectItem>,
+		currentValue: string,
+		onSubmit: (value: string) => void,
+		onCancel: () => void,
+	): PreservationSelectField {
+		return new PreservationSelectField(
+			{
+				theme: formTheme,
+				label,
+				description,
+				items,
+				currentValue,
+				selectTheme: getSelectListTheme(),
+				onSubmit,
+				onCancel,
+				requestRender: this.#context.requestRender,
+			},
+			() => {
+				this.#submenuHint = "Enter select · Esc back";
+			},
+			() => this.#contentRowCount,
+		);
+	}
+
+	#validatedInput(
+		label: string,
+		description: string,
+		current: string,
+		submit: (value: string) => void,
+		cancel: () => void,
+	): TextFormField {
+		return new PreservationTextField(
+			{
+				theme: formTheme,
+				label,
+				description,
+				initialValue: current,
+				empty: "submit",
+				hint: "Enter to save · Esc to cancel",
+				onSubmit: submit,
+				onCancel: cancel,
+				requestRender: this.#context.requestRender,
+			},
+			() => {
+				this.#submenuHint = "Enter save · Esc cancel";
+			},
+		);
+	}
+
+	#regexRules(): Record<string, PreservationRegexRule> {
+		return this.#context.settings.get("compaction.keepUserMessagesRegexRules") as Record<
+			string,
+			PreservationRegexRule
+		>;
+	}
+
+	#limitLabel(value: unknown): string {
+		const limit = this.#context.settings.preservation!.parseLimit(value);
+		if (!limit) return `Invalid: ${String(value)}`;
+		if (!("value" in limit)) return limit.mode === "off" ? "Off" : "All";
+		return limit.mode === "context-percent" ? `${limit.value}%` : `${limit.value} ${limit.mode}`;
+	}
+
+	#limitSummary(value: unknown): string {
+		const limit = this.#context.settings.preservation!.parseLimit(value);
+		if (!limit) return "Invalid limit — choose a valid mode/value.";
+		if (limit.mode !== "context-percent")
+			return `Effective limit: ${this.#limitLabel(value)}. Keep whole messages; stop before the first one that exceeds the budget.`;
+		const maximum = this.#context.maxContextTokens;
+		return maximum !== undefined && Number.isFinite(maximum) && maximum > 0
+			? `${limit.value}% of the model maximum (${maximum} tokens) = ${Math.floor((maximum * limit.value) / 100)} tokens. Not a percentage of current usage or free space.`
+			: `${limit.value}% configured; the token budget needs the active model's maximum context size.`;
+	}
+
+	#createLimit(def: SettingDef, done: (value?: string) => void): SettingsSubmenu {
+		let displayedValue: unknown;
+		let displayedMaximum: number | undefined;
+		const usage: SettingItem = {
+			id: "usage",
+			label: "Current selection",
+			currentValue: "Unavailable",
+			description: "Current selection counts appear once message retention has been calculated for this session.",
+		};
+		const save = (limit: PreservationLimit) => {
+			this.#save(def.path, this.#context.settings.preservation!.serializeLimit(limit));
+			menu.list.setItems(items());
+		};
+		const items = (): SettingItem[] => {
+			const raw = this.#context.settings.get(def.path);
+			displayedValue = raw;
+			displayedMaximum = this.#context.maxContextTokens;
+			const limit = this.#context.settings.preservation!.parseLimit(raw);
+			const rows: SettingItem[] = [
+				{
+					id: "mode",
+					label: "Mode",
+					currentValue: limit?.mode ?? "Invalid",
+					description: def.description,
+					submenu: (_cv, close) =>
+						this.#preservationSelectField(
+							"Limit Mode",
+							"Off selects none here; All removes this limit. Messages counts whole messages; Tokens budgets their content; % uses the model maximum, not current usage. Linked Rule / Manual Keep treats Off and All as uncapped.",
+							[
+								{ value: "off", label: "Off", description: "No messages from this selection" },
+								{ value: "all", label: "All", description: "Every eligible message" },
+								{ value: "messages", label: "Messages", description: "A positive whole-message count" },
+								{ value: "tokens", label: "Tokens", description: "A token allowance, including zero" },
+								{
+									value: "context-percent",
+									label: "% maximum context",
+									description: "0–100% of the model context size",
+								},
+							],
+							limit?.mode ?? "",
+							mode => {
+								if (mode === "off" || mode === "all") save({ mode });
+								else if (mode === "messages" || mode === "tokens" || mode === "context-percent") {
+									save({
+										mode,
+										value:
+											limit && "value" in limit && limit.mode === mode
+												? limit.value
+												: mode === "messages"
+													? 1
+													: 0,
+									});
+								}
+								close(mode);
+							},
+							() => close(),
+						),
+				},
+			];
+			if (limit && "value" in limit) {
+				const mode = limit.mode;
+				const description =
+					mode === "messages"
+						? "Maximum number of whole messages to keep; enter a positive whole number."
+						: mode === "tokens"
+							? "Token allowance for kept messages; enter a whole number of zero or more. Zero is a zero-token allowance, not Off or All."
+							: "Percentage of the model maximum context size: 0–100, decimals allowed. 0% is a zero-token allowance.";
+				rows.push({
+					id: "value",
+					label: "Value",
+					currentValue: String(limit.value),
+					description,
+					submenu: (_cv, close) => {
+						const presets =
+							mode === "context-percent"
+								? [0, 1, 3, 5, 10, 15, 25, 30, 50, 75, 100]
+								: mode === "messages"
+									? [1, 3, 5, 10, 15, 25, 50, 100, 250, 500, 1000]
+									: [0, 1, 3, 5, 10, 15, 25, 1000, 2000, 4000, 8000, 16000, 32000];
+						return this.#settingsMenu(
+							"Limit Value",
+							[
+								{
+									id: "custom",
+									label: "Custom number…",
+									currentValue: String(limit.value),
+									description,
+									submenu: (_v, finish) =>
+										this.#validatedInput(
+											"Limit Value",
+											description,
+											String(limit.value),
+											value => {
+												const parsed = this.#context.settings.preservation!.parseLimit(
+													`${mode}:${value.trim()}`,
+												);
+												if (!parsed) throw new Error(description);
+												save(parsed);
+												finish(value);
+												close(value);
+											},
+											() => finish(),
+										),
+								},
+								...presets.map(value => ({
+									id: String(value),
+									label: String(value),
+									currentValue: "",
+									values: [String(value)],
+								})),
+							],
+							(id, value) => {
+								if (id !== "custom") {
+									save({ mode, value: Number(value) });
+									close(value);
+								}
+							},
+							() => close(),
+							() => this.#contentRowCount,
+						);
+					},
+				});
+			}
+			rows.push({
+				id: "effective",
+				label: "Effective",
+				currentValue: this.#limitLabel(raw),
+				description: this.#limitSummary(raw),
+			});
+			rows.push(usage);
+			return rows;
+		};
+		const menu: SettingsSubmenu = this.#settingsMenu(
+			def.label,
+			items(),
+			() => {},
+			() => done(this.#limitLabel(this.#context.settings.get(def.path))),
+			() => this.#contentRowCount,
+			() => {
+				if (
+					displayedValue !== this.#context.settings.get(def.path) ||
+					displayedMaximum !== this.#context.maxContextTokens
+				)
+					menu.list.setItems(items());
+				const summary = this.#context.getPreservationLimitUsage?.(def.path);
+				usage.currentValue = summary ?? "Unavailable";
+				usage.description =
+					summary ??
+					"Current selection counts appear once message retention has been calculated for this session.";
+			},
+		);
+		return menu;
+	}
+
+	#capSummary(): string {
+		const cap = this.#context.settings.get("compaction.keepUserMessagesFilterKeepCap");
+		if (cap === "uncapped") return "No cap";
+		const raw = this.#context.settings.get(
+			cap === "keep-first" ? "compaction.keepFirstLimit" : "compaction.keepLastLimit",
+		);
+		const limit = this.#context.settings.preservation!.parseLimit(raw);
+		return `${cap === "keep-first" ? "First" : "Recent"}: ${limit?.mode === "off" || limit?.mode === "all" ? "no cap" : this.#limitLabel(raw)}`;
+	}
+
+	#createCap(done: (value?: string) => void): SettingsSubmenu {
+		let displayedSummary: string;
+		const usage: SettingItem = { id: "usage", label: "Current selection", currentValue: "Unavailable" };
+		const items = (): SettingItem[] => {
+			displayedSummary = this.#capSummary();
+			const cap = this.#context.settings.get("compaction.keepUserMessagesFilterKeepCap");
+			const rows: SettingItem[] = [
+				{
+					id: "direction",
+					label: "Selection order",
+					currentValue: cap === "keep-last" ? "Newest first" : cap === "keep-first" ? "Oldest first" : "No cap",
+					description:
+						"Extra retention for filter Keep or manual Always messages. Newest/Oldest first uses the Recent/First limit value separately; overlap is kept once. No cap keeps all marked messages.",
+					submenu: (_cv, close) =>
+						this.#preservationSelectField(
+							"Rule / Manual Keep Order",
+							"Uses the First/Recent limit value as a separate Keep/Always allowance, not the window's remaining budget or an overall cap. Messages may also qualify through First/Recent or recent protection; duplicates are kept once.",
+							[
+								{ value: "keep-last", label: "Newest first", description: "Use Keep Recent Limit" },
+								{ value: "keep-first", label: "Oldest first", description: "Use Keep First Limit" },
+								{ value: "uncapped", label: "No cap", description: "Keep all Keep/Always messages" },
+							],
+							String(cap),
+							value => {
+								this.#save("compaction.keepUserMessagesFilterKeepCap", value);
+								close(value);
+								menu.list.setItems(items());
+							},
+							() => close(),
+						),
+				},
+			];
+			if (cap !== "uncapped") {
+				const path = cap === "keep-first" ? "compaction.keepFirstLimit" : "compaction.keepLastLimit";
+				const def = getSettingDef(this.#context.settings.entries, path)!;
+				rows.push({
+					id: "edge",
+					label: cap === "keep-first" ? "Edit Keep First Limit…" : "Edit Keep Recent Limit…",
+					currentValue: this.#limitLabel(this.#context.settings.get(path)),
+					description:
+						"Changes the ordinary Keep First/Recent Limit too. Off or All means no cap here; 0 tokens or 0% is a zero-token allowance. Assistant/tool exchanges stay together; each message counts toward the allowance.",
+					submenu: (_cv, close) =>
+						this.#createLimit(def, value => {
+							close(value);
+							menu.list.setItems(items());
+						}),
+				});
+			}
+			rows.push({
+				id: "effective",
+				label: "Effective",
+				currentValue: this.#capSummary(),
+				description:
+					"This limits the Keep/Always selection, not the total retained context. A message beyond this cap can still qualify through First/Recent or recent protection. Overlapping selections keep one copy.",
+			});
+			rows.push(usage);
+			return rows;
+		};
+		const menu: SettingsSubmenu = this.#settingsMenu(
+			"Rule / Manual Keep Limit",
+			items(),
+			() => {},
+			() => done(this.#capSummary()),
+			() => this.#contentRowCount,
+			() => {
+				if (displayedSummary !== this.#capSummary()) menu.list.setItems(items());
+				const summary = this.#context.getPreservationLimitUsage?.("compaction.keepUserMessagesFilterKeepCap");
+				usage.currentValue = summary ?? "Unavailable";
+				usage.description =
+					summary ??
+					"Current selection counts appear once message retention has been calculated for this session.";
+			},
+		);
+		return menu;
+	}
+
+	#categorySummary(): string {
+		let keep = 0,
+			never = 0;
+		const categories = this.#context.settings.preservation!.categories;
+		for (const { path } of categories) {
+			const value = this.#context.settings.get(path);
+			if (value === "keep") keep++;
+			if (value === "exclude") never++;
+		}
+		return keep + " Keep · " + never + " Never · " + (categories.length - keep - never) + " Auto";
+	}
+
+	#createCategories(done: (value?: string) => void): SettingsSubmenu {
+		const items = (): PreservationSettingItem[] =>
+			this.#context.settings.preservation!.categories.map(({ path, label, description }) => {
+				const current = () => this.#context.settings.get(path) as PreservationAction;
+				const save = (value: PreservationAction) => {
+					if (current() !== value) this.#save(path, value);
+					menu.list.setItems(items());
+				};
+				return {
+					id: path,
+					label,
+					currentValue: this.#actionLabel(current()),
+					description: description + " Auto defers. Keep > Never > Auto within categories; no category priority.",
+					assignment: { kind: "action", get: current, set: save },
+					submenu: (_cv, close) =>
+						this.#actionSelector(
+							current(),
+							value => {
+								save(value);
+								close(this.#actionLabel(value));
+							},
+							() => close(),
+						),
+				};
+			});
+		const menu = this.#settingsMenu(
+			"Category Rules — stored tags only",
+			items(),
+			() => {},
+			() => done(this.#categorySummary()),
+			() => this.#contentRowCount,
+		);
+		return menu;
+	}
+
+	#actionLabel(value: PreservationAction): string {
+		return value === "exclude" ? "Never" : value === "keep" ? "Keep" : "Auto";
+	}
+
+	#actionSelector(
+		currentValue: string,
+		save: (value: PreservationAction) => void,
+		onCancel: () => void,
+	): PreservationActionField {
+		return new PreservationActionField(
+			{
+				theme: formTheme,
+				label: "Action",
+				description:
+					"Auto leaves the decision to other rules and First/Recent limits. Keep requests extra retention within Rule / Manual Keep Limit. Never rejects extra retention, not normal recent history. Manual choices and recent protection take precedence.",
+				items: [
+					{ value: "auto", label: "Auto", description: "No decision from this rule" },
+					{ value: "keep", label: "Keep", description: "Request extra retention" },
+					{ value: "exclude", label: "Never", description: "Reject extra retention" },
+				],
+				currentValue,
+				selectTheme: getSelectListTheme(),
+				onSubmit: value => save(value as PreservationAction),
+				onCancel,
+				hint: "Enter/Space select · y/* Keep · n Never · -/Backspace Auto · Esc back",
+				requestRender: this.#context.requestRender,
+			},
+			() => {
+				this.#submenuHint = "Enter/Space select · y/* Keep · n Never · -/Backspace Auto · Esc back";
+			},
+			() => this.#contentRowCount,
+		);
+	}
+
+	#createRegexRules(done: (value?: string) => void): SettingsSubmenu {
+		const refresh = () => menu.list.setItems(items());
+		const items = (): SettingItem[] => [
+			{
+				id: "add",
+				label: "Add regex…",
+				currentValue: "",
+				description: "RE2 condition. Auto starts disabled; ordinary and Final stages each use Keep > Never > Auto.",
+				submenu: (_cv, close) =>
+					this.#validatedInput(
+						"New Regex Condition",
+						"RE2 syntax; must compile before saving.",
+						"",
+						condition => {
+							this.#context.settings.preservation!.validateRegexCondition(condition);
+							const rules = this.#regexRules();
+							if (Object.hasOwn(rules, condition)) throw new Error("A rule with this condition already exists");
+							this.#save("compaction.keepUserMessagesRegexRules", {
+								...rules,
+								[condition]: { state: "auto", caseInsensitive: true, final: false },
+							});
+							close();
+							refresh();
+							menu.list.selectItem(`rule:${condition}`);
+						},
+						() => close(),
+					),
+			},
+			...Object.entries(this.#regexRules()).map(([condition, rule]) => ({
+				id: `rule:${condition}`,
+				label: condition,
+				currentValue: `${this.#actionLabel(rule.state)} ${rule.caseInsensitive ? "i" : ""}${rule.final ? " Final" : ""}`,
+				submenu: (_cv: string, close: (value?: string) => void) =>
+					this.#createRegexRuleEditor(condition, selectedCondition => {
+						close();
+						refresh();
+						menu.list.selectItem(`rule:${selectedCondition}`);
+					}),
+			})),
+		];
+		const menu: SettingsSubmenu = this.#settingsMenu(
+			"Custom Regex Rules",
+			items(),
+			() => {},
+			() => done(`${Object.keys(this.#regexRules()).length} rules`),
+			() => this.#contentRowCount,
+		);
+		return menu;
+	}
+
+	#createRegexRuleEditor(initialCondition: string, done: (condition: string) => void): SettingsSubmenu {
+		let condition = initialCondition;
+		const current = () => this.#regexRules()[condition]!;
+		const save = (rule: PreservationRegexRule) => {
+			const previous = current();
+			if (
+				rule.state === previous.state &&
+				rule.caseInsensitive === previous.caseInsensitive &&
+				(rule.final ?? false) === (previous.final ?? false)
+			)
+				return;
+			this.#context.settings.preservation!.validateRegexCondition(condition, rule.caseInsensitive);
+			this.#save("compaction.keepUserMessagesRegexRules", {
+				...this.#regexRules(),
+				[condition]: rule,
+			});
+			menu.list.setItems(items());
+		};
+		const items = (): PreservationSettingItem[] => {
+			const rule = current();
+			return [
+				{
+					id: "condition",
+					label: "Condition",
+					currentValue: condition,
+					submenu: (_cv, close) =>
+						this.#validatedInput(
+							"Regex Condition",
+							"RE2 syntax. Invalid expressions are never saved.",
+							condition,
+							value => {
+								this.#context.settings.preservation!.validateRegexCondition(value, current().caseInsensitive);
+								const rules = this.#regexRules();
+								if (value !== condition && Object.hasOwn(rules, value))
+									throw new Error("A rule with this condition already exists");
+								const renamed = Object.fromEntries(
+									Object.entries(rules).map(([key, entry]) => [key === condition ? value : key, entry]),
+								);
+								this.#save("compaction.keepUserMessagesRegexRules", renamed);
+								condition = value;
+								close(value);
+								menu.list.setItems(items());
+							},
+							() => close(),
+						),
+				},
+				{
+					id: "state",
+					label: "Action",
+					assignment: {
+						kind: "action",
+						get: () => current().state,
+						set: value => save({ ...current(), state: value }),
+					},
+					currentValue: this.#actionLabel(rule.state),
+					description:
+						"Auto disables this rule. Keep wins same-stage conflicts; Never leaves ordinary vanilla treatment unchanged.",
+					submenu: (_cv, close) =>
+						this.#actionSelector(
+							current().state,
+							value => {
+								save({ ...current(), state: value });
+								close(this.#actionLabel(value));
+							},
+							() => close(),
+						),
+				},
+				{
+					id: "case",
+					label: "Case insensitive",
+					assignment: {
+						kind: "boolean",
+						get: () => current().caseInsensitive,
+						set: value => save({ ...current(), caseInsensitive: value }),
+					},
+					currentValue: String(rule.caseInsensitive),
+					values: ["true", "false"],
+				},
+				{
+					id: "final",
+					label: "Final",
+					assignment: {
+						kind: "boolean",
+						get: () => current().final ?? false,
+						set: value => save({ ...current(), final: value }),
+					},
+					currentValue: String(rule.final ?? false),
+					values: ["false", "true"],
+					description: "Final runs after stored classifier policy, before manual state. Auto remains neutral.",
+				},
+				{
+					id: "delete",
+					label: "Delete rule…",
+					currentValue: "",
+					submenu: (_cv, close) =>
+						this.#preservationSelectField(
+							"Delete this regex rule?",
+							condition,
+							[
+								{ value: "no", label: "No — keep rule" },
+								{ value: "yes", label: "Yes — delete rule" },
+							],
+							"no",
+							value => {
+								if (value === "yes") {
+									const rules = { ...this.#regexRules() };
+									delete rules[condition];
+									this.#save("compaction.keepUserMessagesRegexRules", rules);
+									close();
+									done(condition);
+								} else close();
+							},
+							() => close(),
+						),
+				},
+			];
+		};
+		const menu: SettingsSubmenu = this.#settingsMenu(
+			"Regex Rule",
+			items(),
+			(id, value) => {
+				if (id === "case") save({ ...current(), caseInsensitive: value === "true" });
+				if (id === "final") save({ ...current(), final: value === "true" });
+			},
+			() => done(condition),
+			() => this.#contentRowCount,
+		);
+		return menu;
+	}
+
+	#createModelSelector(def: SettingDef, done: (value?: string) => void): ModelSelectorSubmenu {
+		if (!this.#context.modelSource) throw new Error("Classifier model selection requires a model browser source");
+		return new ModelSelectorSubmenu(
+			this.#context.modelSource,
+			this.#context.modelRegistry,
+			String(this.#context.settings.get(def.path) ?? ""),
+			value => {
+				this.#save(def.path, value || undefined);
+				done(value || "Automatic (@tiny)");
+			},
+			() => done(),
+			() => this.#contentRowCount,
+		);
 	}
 
 	/**
@@ -1347,6 +2278,12 @@ export class SettingsSelectorComponent implements Component {
 
 		if (this.#searchList) {
 			this.#handleSearchModeInput(data, this.#searchList);
+			return;
+		}
+
+		if (!activeList?.sectionFocused && assignPreservationItem(activeList?.getSelectedItem(), data)) return;
+		if (this.#currentTabId !== "plugins" && data === "/") {
+			this.#startSearch("");
 			return;
 		}
 

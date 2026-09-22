@@ -1,6 +1,7 @@
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { AgentSession } from "../session/agent-session";
 import type { SessionOAuthAccountList } from "../session/agent-session-types";
+import { parseCompactionOverridePrompt } from "../session/preserved-message-settings";
 import {
 	getChangelogPath,
 	parseChangelog,
@@ -173,6 +174,21 @@ async function handleSessionPinCommand(
 }
 
 export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
+	...(["keep", "once"] as const).map((name): SlashCommandSpec => ({
+		name,
+		description:
+			name === "keep"
+				? "Send a literal message with Always preservation (subject to the Always limit)"
+				: "Send a literal message with Never preservation (ordinary retention still applies)",
+		allowArgs: true,
+		inlineHint: "<message>",
+		acpInputHint: "<message>",
+		handle: (command, runtime) => {
+			const directive = parseCompactionOverridePrompt(command.text);
+			if (!directive?.text) return usage(`Usage: /${name} <message>`, runtime);
+			return { prompt: directive.text, compactionOverride: directive.compactionOverride };
+		},
+	})),
 	{
 		name: "todo",
 		icon: "todo",
@@ -465,7 +481,8 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "context",
 		icon: "context",
-		description: "Show estimated context usage breakdown",
+		description: "Manage source preservation; usage and detailed context inventory",
+		inlineHint: "[usage|details]",
 		acpDescription: "Show context usage",
 		acpInputHint: "[usage|details]",
 		subcommands: [
@@ -475,7 +492,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
 			const usage = runtime.ctx.session.getContextUsage();
-			if (!usage) return "Context: unavailable";
+			if (!usage) return "Manage source policy; Usage unavailable without a model";
 			return `Context: ${Math.round(usage.percent)}% (${formatTokenCount(usage.tokens)}/${formatTokenCount(usage.contextWindow)})`;
 		},
 		handle: async (command, runtime) => {
@@ -488,10 +505,10 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 		handleTui: (command, runtime) => {
 			const { verb, rest } = parseSubcommand(command.args);
-			if (rest || (verb && verb !== "usage" && verb !== "details")) {
+			if (rest || (verb !== "" && verb !== "usage" && verb !== "details")) {
 				runtime.ctx.showStatus("Usage: /context [usage|details]");
 			} else {
-				runtime.ctx.handleContextCommand(verb === "details" ? "details" : "usage");
+				runtime.ctx.handleContextCommand(verb || undefined);
 			}
 			runtime.ctx.editor.setText("");
 		},

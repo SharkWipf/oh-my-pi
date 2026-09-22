@@ -7,9 +7,9 @@
  * and `flushCompactionQueue` forwards them to the session on delivery.
  *
  * Contracts defended here:
- *   - `queueCompactionMessage(text, mode, images)` stores the images on the
- *     queued entry and consumes the pending-image state (so the next message
- *     does not resend them).
+ *   - Accepted native queue entries restore exact original commands and image drafts
+ *     without depending on a requirements-capture service. Closed sessions leave
+ *     those drafts available rather than accepting an undeliverable queue entry.
  *   - On flush, the first queued prompt forwards its images via `session.prompt`.
  *   - On a `willRetry` flush, a queued follow-up forwards its images via
  *     `session.followUp` (the `#deliverQueuedMessage` path).
@@ -26,7 +26,7 @@ import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/inp
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { CompactionQueuedMessage, InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
-import type { RestoredQueuedMessage } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AgentSession, RestoredQueuedMessage } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 
 beforeAll(() => {
 	initTheme();
@@ -40,6 +40,7 @@ function makeCtx(initialQueue: CompactionQueuedMessage[] = []) {
 	const followUpCalls: Array<{ text: string; images?: ImageContent[] }> = [];
 
 	const session = {
+		isDisposed: false,
 		isStreaming: false,
 		isCompacting: false,
 		extensionRunner: undefined,
@@ -49,10 +50,10 @@ function makeCtx(initialQueue: CompactionQueuedMessage[] = []) {
 		prompt: mock(async (text: string, opts?: PromptOpts): Promise<void> => {
 			promptCalls.push({ text, opts });
 		}),
-		steer: mock(async (text: string, images?: ImageContent[]): Promise<void> => {
+		steer: mock(async (text: string, images?: Parameters<AgentSession["steer"]>[1]): Promise<void> => {
 			steerCalls.push({ text, images });
 		}),
-		followUp: mock(async (text: string, images?: ImageContent[]): Promise<void> => {
+		followUp: mock(async (text: string, images?: Parameters<AgentSession["followUp"]>[1]): Promise<void> => {
 			followUpCalls.push({ text, images });
 		}),
 	};
@@ -102,28 +103,42 @@ function makeCtx(initialQueue: CompactionQueuedMessage[] = []) {
 const img = (data: string): ImageContent => ({ type: "image", mimeType: "image/png", data });
 
 describe("compaction queue image forwarding", () => {
-	test("queueCompactionMessage stores images and consumes pending-image state", () => {
+	test("native queue accepts and restores a rich original without a requirements capture service", async () => {
 		const image = img("aGVsbG8=");
 		const { ctx } = makeCtx();
+		const originalSubmission = {
+			text: "/once /skill:inspect [Image #1]",
+			images: [image],
+			imageLinks: ["clipboard"],
+			compactionOverride: "exclude" as const,
+		};
+		ctx.editor.pendingImages = [image];
+		ctx.editor.pendingImageLinks = ["clipboard"];
+		await new UiHelpers(ctx).queueCompactionMessage("expanded skill", "steer", [], [], "exclude", originalSubmission);
+		expect(ctx.editor.pendingImages).toEqual([]);
+		new InputController(ctx).restoreQueuedMessagesToEditor();
+		expect(ctx.editor.getText()).toBe("/once /skill:inspect [Image #1]");
+		expect(ctx.editor.pendingImages).toEqual([image]);
+		expect(ctx.editor.pendingImageLinks).toEqual(["clipboard"]);
+	});
+
+	test("a closed session keeps the full directive and image draft unaccepted", async () => {
+		const image = img("aGVsbG8=");
+		const { ctx, session } = makeCtx();
+		session.isDisposed = true;
 		ctx.editor.pendingImages = [image];
 		ctx.editor.pendingImageLinks = ["clipboard"];
 		ctx.editor.imageLinks = ["clipboard"];
-
-		new UiHelpers(ctx).queueCompactionMessage("look at this screenshot", "steer", [image]);
-
-		expect(ctx.compactionQueuedMessages).toEqual([
-			{ text: "look at this screenshot", mode: "steer", images: [image] },
-		]);
-		// Pending state is consumed so the next message does not resend the image.
-		expect(ctx.editor.pendingImages).toEqual([]);
-		expect(ctx.editor.pendingImageLinks).toEqual([]);
-		expect(ctx.editor.imageLinks).toBeUndefined();
-	});
-
-	test("empty image list is normalized to undefined on the queued entry", () => {
-		const { ctx } = makeCtx();
-		new UiHelpers(ctx).queueCompactionMessage("no images here", "followUp", []);
-		expect(ctx.compactionQueuedMessages).toEqual([{ text: "no images here", mode: "followUp", images: undefined }]);
+		await new UiHelpers(ctx).queueCompactionMessage(
+			"/once /keep screenshot [Image #1]",
+			"followUp",
+			[image],
+			["clipboard"],
+		);
+		expect(ctx.compactionQueuedMessages).toEqual([]);
+		expect(ctx.editor.getText()).toBe("/once /keep screenshot [Image #1]");
+		expect(ctx.editor.pendingImages).toEqual([image]);
+		expect(ctx.editor.pendingImageLinks).toEqual(["clipboard"]);
 	});
 
 	test("flush forwards the first queued prompt's images via session.prompt", async () => {
