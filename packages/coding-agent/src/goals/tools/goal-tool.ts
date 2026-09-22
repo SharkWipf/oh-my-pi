@@ -67,7 +67,7 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 	}
 
 	async execute(
-		_toolCallId: string,
+		toolCallId: string,
 		params: GoalToolInput,
 		_signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<GoalToolDetails>,
@@ -80,7 +80,19 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 
 		let response: GoalToolResponse;
 		if (params.op === "create") {
-			const created = await runtime.createGoal(validateCreateParams(params));
+			const input = validateCreateParams(params);
+			const inject = this.#session.settings.get("goal.injectAsUserMessage");
+			const sendUserMessage = this.#session.sendUserMessage;
+			if (inject && !sendUserMessage) {
+				throw new ToolError("Goal objective delivery is not available in this session.");
+			}
+			const created = await runtime.createGoal(input);
+			if (inject && sendUserMessage) {
+				await sendUserMessage(created.goal.objective, {
+					deliverAs: "followUp",
+					producer: { type: "tool", name: "goal", toolCallId },
+				});
+			}
 			response = buildGoalToolResponse(created.goal);
 		} else if (params.op === "get") {
 			const state = this.#session.getGoalModeState?.();
