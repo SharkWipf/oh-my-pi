@@ -12,6 +12,16 @@
 ### Fixed
 
 - Killing a subagent cancels its assignment and provider requests before asynchronous shutdown hooks finish, while keeping upstream disposal idempotency, accepted-yield handling, and wake-failure notifications. Disposed sessions reject late prompts; killed or replaced workers cannot deliver late success, but the executor still notifies the original waker of cancellation.
+### Fixed
+
+- Abandoned tool previews no longer leave later messages stuck as collapsed Eval/Todo rows when a streamed response replaces or removes a tool call.
+- `/compact` no longer leaves retained tool cards reduced to bare Eval/Todo labels; their details remain available immediately after the transcript rebuild.
+- Streaming updates no longer cross queued message boundaries, which could lose assistant text and leave an orphaned running tool card that squeezed subsequent transcript entries into collapsed rows.
+- Interleaved reasoning and text no longer freeze native-scrollback progress when an earlier block grows after later text or a tool preview appears; only explicit content-end events seal the preceding prose.
+- TODO changes made inside Eval now refresh the TODO pane; subagent completion reconciliation no longer restores an older displayed plan over the current session plan.
+- Reconcile tool-call ids first finalized at message end, preventing stale previews from pinning subsequent normal Eval/Todo results into bare labels across turns and resizes.
+- Project explicit text/thinking closure into split post-tool segments without freezing interleaved growth, while retaining mid-stream text retirement and revisable-wire protection.
+- Keep done-only prose between reads in chronological order instead of merging its surrounding tool cards into one shared anchor.
 
 ### Added
 

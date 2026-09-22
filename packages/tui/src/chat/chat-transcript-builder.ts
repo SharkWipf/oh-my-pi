@@ -657,6 +657,8 @@ export class ChatTranscriptBuilder {
 		const errorMessage = hasErrorStop ? errorPresentation.text : null;
 		const appendAssistantSegment = (segment: Extract<AgentMessage, { role: "assistant" }> | undefined) => {
 			if (!segment || !assistantHasVisibleContent(segment)) return;
+			// A visible segment belongs between its surrounding tool groups, not
+			// after a group that later accretes another read across the prose.
 			this.#readGroup?.finalize();
 			this.#readGroup = null;
 			this.#addComponent(() => {

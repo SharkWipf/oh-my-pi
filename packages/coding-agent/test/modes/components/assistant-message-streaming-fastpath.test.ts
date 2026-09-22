@@ -91,23 +91,26 @@ describe("AssistantMessageComponent streaming fast path", () => {
 		expect(component.getTranscriptStableRows().map(row => row.key)).toEqual(keys);
 	});
 
-	it("keeps earlier block boundaries immutable when later thinking blocks grow or revise", () => {
+	it("keeps explicitly closed block boundaries immutable when later thinking blocks grow or revise", () => {
 		const component = new AssistantMessageComponent();
 		const first = "First reasoning paragraph.\n\nSecond paragraph.\n\nStill thinking";
 		component.updateContent(msg([{ type: "thinking", thinking: first }]), { transient: true });
 		component.render(W);
 		const firstCount = component.getTranscriptStableRows().length;
-		expect(firstCount).toBeGreaterThan(0);
 		const firstRows = [...component.renderTranscriptStableRows(firstCount, 40)];
+		expect(Bun.stripANSI(firstRows.join("\n"))).toContain("First reasoning paragraph.");
+		expect(Bun.stripANSI(firstRows.join("\n"))).not.toContain("Still thinking");
 		const content: AssistantMessage["content"] = [
 			{ type: "thinking", thinking: first },
 			{ type: "thinking", thinking: "Another block.\n\nMore reasoning.\n\nPending" },
 		];
+		component.markContentBlockClosed(0);
 		component.updateContent(msg(content), { transient: true });
 		component.render(W);
 		const count = component.getTranscriptStableRows().length;
-		expect(count).toBeGreaterThan(firstCount);
 		const rows = [...component.renderTranscriptStableRows(count, 40)];
+		expect(Bun.stripANSI(rows.join("\n"))).toContain("Still thinking");
+		expect(Bun.stripANSI(rows.join("\n"))).toContain("Another block.");
 		component.updateContent(msg([{ type: "thinking", thinking: `Rewritten ${first}` }]), { transient: true });
 		component.render(W);
 		expect(component.getTranscriptStableRows()).toHaveLength(count);

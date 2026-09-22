@@ -3,9 +3,8 @@ import { type } from "@oh-my-pi/omptype";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ToolCall, ToolResultMessage, Usage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { ChatTranscriptBuilder } from "@oh-my-pi/pi-tui/chat/chat-transcript-builder";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-tui/chat/read-tool-group";
-import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
@@ -106,9 +105,11 @@ describe("EventController mixed assistant text/tool rendering", () => {
 			AgentSessionEvent,
 			{ type: "message_start" }
 		>);
+		const partial = assistantMessage([{ type: "thinking", thinking: "**dead attempt**" }]);
 		await controller.handleEvent({
 			type: "message_update",
-			message: assistantMessage([{ type: "thinking", thinking: "**dead attempt**" }]),
+			message: partial,
+			assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "**dead attempt**", partial },
 		} as Extract<AgentSessionEvent, { type: "message_update" }>);
 		const orphan = chatContainer.children.at(-1) as Component & {
 			isTranscriptBlockFinalized(): boolean;
@@ -363,6 +364,113 @@ describe("EventController mixed assistant text/tool rendering", () => {
 		expect(rendered).not.toContain(HIDDEN_READ_PATH_MARKER);
 	});
 
+	it("keeps late inter-read text between separate read results instead of grouping across its empty start", async () => {
+		const { controller, chatContainer, ctx } = createFixture();
+		const firstPath = "first-delayed-read.ts";
+		const secondPath = "second-delayed-read.ts";
+		const readA: ToolCall = {
+			type: "toolCall",
+			id: TOOL_CALL_A_ID,
+			name: "read",
+			arguments: { path: firstPath },
+		};
+		const readB: ToolCall = {
+			type: "toolCall",
+			id: TOOL_CALL_B_ID,
+			name: "read",
+			arguments: { path: secondPath },
+		};
+		const intro = { type: "text" as const, text: INTRO_MARKER };
+		try {
+			await controller.handleEvent({ type: "message_start", message: assistantMessage([]) });
+			const firstRead = assistantMessage([intro, readA]);
+			await controller.handleEvent({
+				type: "message_update",
+				message: firstRead,
+				assistantMessageEvent: { type: "toolcall_end", contentIndex: 1, toolCall: readA, partial: firstRead },
+			});
+			const emptyMiddle = assistantMessage([intro, readA, { type: "text", text: "" }]);
+			await controller.handleEvent({
+				type: "message_update",
+				message: emptyMiddle,
+				assistantMessageEvent: { type: "text_start", contentIndex: 2, partial: emptyMiddle },
+			});
+			const bothReads = assistantMessage([...emptyMiddle.content, readB]);
+			await controller.handleEvent({
+				type: "message_update",
+				message: bothReads,
+				assistantMessageEvent: { type: "toolcall_end", contentIndex: 3, toolCall: readB, partial: bothReads },
+			});
+			for (const read of [readA, readB]) {
+				await controller.handleEvent({
+					type: "tool_execution_start",
+					toolCallId: read.id,
+					toolName: read.name,
+					args: read.arguments,
+				});
+				await controller.handleEvent({
+					type: "tool_execution_end",
+					toolCallId: read.id,
+					toolName: read.name,
+					isError: false,
+					result: { content: [{ type: "text", text: "file contents" }] },
+				});
+			}
+			// The separator acquires visible content only after both read cards exist.
+			const middle = assistantMessage([intro, readA, { type: "text", text: MIDDLE_MARKER }, readB]);
+			await controller.handleEvent({
+				type: "message_update",
+				message: middle,
+				assistantMessageEvent: { type: "text_end", contentIndex: 2, content: MIDDLE_MARKER, partial: middle },
+			});
+			const completed = assistantMessage([...middle.content, { type: "text", text: FINAL_MARKER }]);
+			await controller.handleEvent({
+				type: "message_update",
+				message: completed,
+				assistantMessageEvent: { type: "text_end", contentIndex: 4, content: FINAL_MARKER, partial: completed },
+			});
+			await controller.handleEvent({ type: "message_end", message: completed });
+
+			const replay = new ChatTranscriptBuilder({ ui: ctx.ui, cwd: process.cwd(), requestRender: () => {} });
+			try {
+				replay.rebuild([
+					{ type: "message", id: "assistant", parentId: null, timestamp: "2026-09-15", message: completed },
+					...[readA, readB].map(read => ({
+						type: "message" as const,
+						id: read.id,
+						parentId: null,
+						timestamp: "2026-09-15",
+						message: {
+							role: "toolResult" as const,
+							toolCallId: read.id,
+							toolName: read.name,
+							content: [{ type: "text" as const, text: "file contents" }],
+							isError: false,
+							timestamp: 1,
+						},
+					})),
+				]);
+				for (const container of [chatContainer, replay.container]) {
+					const lines = container.render(120).map(line => Bun.stripANSI(line));
+					const transcript = lines.join("\n");
+					const markers = [INTRO_MARKER, firstPath, MIDDLE_MARKER, secondPath, FINAL_MARKER];
+					let previous = -1;
+					for (const marker of markers) {
+						expect(transcript.split(marker).length - 1, marker).toBe(1);
+						const position = lineContaining(lines, marker);
+						expect(position).toBeGreaterThan(previous);
+						previous = position;
+					}
+				}
+			} finally {
+				replay.dispose();
+			}
+		} finally {
+			controller.dispose();
+			chatContainer.dispose();
+		}
+	});
+
 	it("does not recreate a completed grouped read when later thinking arrives", async () => {
 		const { controller, chatContainer, ctx } = createFixture();
 		const readCall: ToolCall = {
@@ -465,6 +573,17 @@ describe("EventController mixed assistant text/tool rendering", () => {
 
 		const content: AssistantMessage["content"] = [{ type: "thinking", thinking: "REASONING_BEFORE_TOOLS" }];
 		for (const grep of greps) {
+			const preceding = assistantMessage([...content]);
+			await controller.handleEvent({
+				type: "message_update",
+				message: preceding,
+				assistantMessageEvent: {
+					type: "thinking_end",
+					contentIndex: content.length - 1,
+					content: "",
+					partial: preceding,
+				},
+			} as Extract<AgentSessionEvent, { type: "message_update" }>);
 			content.push(grep.call);
 			const withTool = assistantMessage([...content]);
 			await controller.handleEvent({
@@ -499,21 +618,6 @@ describe("EventController mixed assistant text/tool rendering", () => {
 		}
 
 		expect(ctx.pendingTools.size).toBe(0);
-		const assistants = chatContainer.children.filter(
-			(child): child is AssistantMessageComponent => child instanceof AssistantMessageComponent,
-		);
-		const tools = chatContainer.children.filter(
-			(child): child is ToolExecutionComponent => child instanceof ToolExecutionComponent,
-		);
-		expect(tools).toHaveLength(3);
-		for (const tool of tools) {
-			expect(tool.isTranscriptBlockFinalized()).toBe(true);
-		}
-		expect(assistants.length).toBeGreaterThanOrEqual(3);
-		for (const assistant of assistants.slice(0, -1)) {
-			expect(assistant.isTranscriptBlockFinalized()).toBe(true);
-		}
-		expect(assistants.at(-1)!.isTranscriptBlockFinalized()).toBe(false);
 
 		const flushed = Bun.stripANSI(chatContainer.peekFlushBatch(120)?.rows.join("\n") ?? "");
 		expect(flushed).toContain("GREP_RESULT_1_UNIQUE");

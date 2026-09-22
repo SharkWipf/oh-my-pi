@@ -4,8 +4,8 @@ This document maps terminal input and rendering ownership in interactive mode. S
 
 ## Ownership
 
-- **`packages/tui`** owns terminal lifecycle, input normalization, focus, overlays, image protocols, cursor placement, scheduling, explicit history writes, and mutable viewport painting.
-- **`packages/coding-agent`** owns transcript order, block finality, tool allocation, editor/status chrome, and the `TerminalFrameProvider` implementation in `modes/composer.ts`.
+- **`packages/tui`** owns terminal lifecycle, input normalization, focus, overlays, image protocols, cursor placement, scheduling, explicit history writes, and mutable viewport painting. Its `chat` and `chrome` modules own transcript blocks and layout; `prompt/composer.ts` implements `TerminalFrameProvider` and editor/status chrome.
+- **`packages/coding-agent`** owns session event ordering, streaming content closure, tool execution lifecycle, and canonical TODO state; its mode controllers drive the shared TUI components.
 
 The terminal core never interprets messages, tools, transcript blocks, or finality.
 
@@ -24,7 +24,7 @@ Each normal frame:
 Graceful shutdown switches the provider to Flush policy and synchronously drains
 every currently eligible finalized prefix before terminal handoff.
 
-The welcome header follows the same ordered retirement model but is composer-owned: it stays live viewport chrome while its intro animates and while the screen has room, then retires once — before any transcript batch — when content first overflows.
+The welcome header follows the same ordered retirement model but is composer-owned: it stays live viewport chrome while its intro animates and while the screen has room, then retires once — before any transcript batch — when content first overflows. After a compaction rebuild, its atomic replay also retires the fresh transcript’s overflowing settled prefix; otherwise a header-only replay would leave retained tool cards squeezed into activity labels until another paint.
 
 ## Input and focus
 
@@ -47,6 +47,10 @@ Optimistic user submissions call `renderNow()` before agent dispatch so synchron
 - **committed** — acknowledged by the terminal writer and released from render caches.
 
 Finalizing a later block never bypasses an active predecessor. `peekFinalizedBatch(width, capacity)` retires the shortest settled prefix that lets the remaining live tail fit `capacity`, stops at the first active block, and reoffers the same id until `acknowledgeFinalizedBatch()` succeeds. `peekFlushBatch(width)` takes the whole eligible prefix during graceful shutdown. While the screen has room nothing retires during ordinary operation, so a submitted message is visible immediately and recent blocks keep reflowing on resize.
+
+Streaming assistant blocks may publish finished text and thinking through Markdown's frozen prefix without finalizing the whole message. Revisable wires withhold mid-stream publication. A later text or tool block does not prove that earlier content is closed: providers can interleave their deltas. Explicit `thinking_end` and `text_end` events survive update coalescing with their arrival-time snapshot and establish the closed content frontier. Unclosed blocks stay transient even before later content. Once all prose before the first tool call has closed and its reveal has completed, that assistant prefix can finalize immediately. Post-tool segments use the same rule: closure indices from the full message are projected into each local segment, and a subsequent tool bounds the segment before it can finalize. This preserves native-scrollback progress without freezing interleaved growth.
+
+Tool-card identity is reconciled against both streamed updates and the final assistant snapshot. A canonical tool id arriving only at `message_end` must replace its provisional preview id before normal execution starts; otherwise the abandoned preview remains active after the canonical result settles and pins every subsequent turn. Every observed streamed id remains tracked across provider replay and content-index collisions until the final call set arrives. Final-omitted, never-executed previews are retracted when they have no committed history, including their argument-reveal state; executed/background calls and surviving grouped-read siblings remain active until their real completion. Resize reflows this semantic state but never completes a running tool; real completion or terminal unwind releases it. Read groups also stop at intervening content-block boundaries, including initially empty prose that arrives only at `text_end`, so later middle/final segments retain distinct chronological anchors.
 
 Display replay has an independent cursor over committed entries. It never changes
 `committed` states or the logical frontier, and an offered replay never removes

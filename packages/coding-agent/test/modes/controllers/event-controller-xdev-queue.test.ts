@@ -6,7 +6,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
-import type { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
+import type { ToolExecutionHandle } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -49,7 +49,7 @@ function deviceWrite(id: string, name: string, inner: Record<string, unknown>) {
 }
 
 function createFixture(streamingMessage: AssistantMessage) {
-	const pendingTools = new Map<string, ToolExecutionComponent>();
+	const pendingTools = new Map<string, ToolExecutionHandle>();
 	const ctx = createInteractiveModeContext({
 		streamingComponent: new AssistantMessageComponent(),
 		streamingMessage,
@@ -61,7 +61,7 @@ function createFixture(streamingMessage: AssistantMessage) {
 	return { controller, pendingTools };
 }
 
-function cardText(pendingTools: Map<string, ToolExecutionComponent>, id: string): string {
+function cardText(pendingTools: Map<string, ToolExecutionHandle>, id: string): string {
 	const component = pendingTools.get(id);
 	if (!component) throw new Error(`expected pending tool ${id}`);
 	return Bun.stripANSI(component.render(120).join("\n"));
@@ -88,7 +88,7 @@ describe("EventController queues exclusive device writes until execution starts"
 		await controller.handleEvent({
 			type: "message_update",
 			message: streaming,
-			assistantMessageEvent: undefined as never,
+			assistantMessageEvent: { type: "toolcall_delta", contentIndex: 1, delta: "", partial: streaming },
 		} as Extract<AgentSessionEvent, { type: "message_update" }>);
 		expect(pendingTools.size).toBe(2);
 		expect(cardText(pendingTools, "write-1")).toContain("queued");
