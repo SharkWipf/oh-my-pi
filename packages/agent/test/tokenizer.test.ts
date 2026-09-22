@@ -3,6 +3,7 @@ import type { AssistantMessage, ImageContent, TextContent, ToolResultMessage } f
 import { createOpenAIResponsesHistoryPayload } from "@oh-my-pi/pi-ai/utils";
 import { bindMessageSource, remapNativeItemOrigins } from "@oh-my-pi/pi-ai/utils/source-origin";
 import * as natives from "@oh-my-pi/pi-natives";
+import { createCustomMessage } from "../src/compaction/messages";
 import { Tokenizer, tokenizerEncodingForModel } from "../src/tokenizer";
 import type { AgentMessage } from "../src/types";
 
@@ -32,6 +33,28 @@ describe("tokenizerEncodingForModel", () => {
 });
 
 describe("Tokenizer", () => {
+	test("charges normalized custom source text and images an ordinary baseline", () => {
+		const tokenizer = new Tokenizer();
+		const text = "A durable custom source.";
+		const scalar = createCustomMessage("notice", text, false, undefined, "2026-09-07", "agent");
+		const illustrated = createCustomMessage(
+			"manual",
+			[
+				{ type: "text", text },
+				{ type: "image", data: "cG5n", mimeType: "image/png", detail: "high" },
+			],
+			true,
+			undefined,
+			"2026-09-07",
+			"user",
+		);
+		const textTokens = tokenizer.countTokens(text);
+		expect(tokenizer.countMessage(scalar)).toBe(textTokens);
+		expect(tokenizer.countMessage(illustrated)).toBe(textTokens + 1200);
+		expect(tokenizer.countMessage(illustrated, { excludeEncryptedReasoning: true })).toBe(textTokens + 1200);
+		expect(tokenizer.countMessages([scalar, illustrated])).toBe(2 * textTokens + 1200);
+	});
+
 	test("counts each original image once across user, developer, tool, custom and hook content", () => {
 		const tokenizer = new Tokenizer();
 		const content: (TextContent | ImageContent)[] = [
