@@ -1,23 +1,32 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-
-// Browser global read inside page.evaluate callbacks; absent from bun-types.
-declare const devicePixelRatio: number;
-
+import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import { daemonRuntimeDir } from "@oh-my-pi/pi-coding-agent/launch/paths";
+import * as launch from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
+import { forgetSharedTarget } from "@oh-my-pi/pi-coding-agent/tools/browser/orphan-registry";
 import {
 	acquireBrowser,
 	type BrowserHandle,
+	getBrowsersMapForTest,
 	holdBrowser,
 	releaseBrowser,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import type { ReadyInfo, WorkerInbound, WorkerOutbound } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-protocol";
 import {
 	acquireTab,
+	cancelIdleCloseForOwner,
+	getTabsMapForTest,
 	initializeTabWorkerForTest,
+	releaseIdleTabsForOwner,
 	releaseTab,
 	runInTab,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
+import type { Browser } from "puppeteer-core";
 import { chromiumAvailable, visibleBrowserAvailable } from "./chromium-probe";
+
+// Browser global read inside page.evaluate callbacks; absent from bun-types.
+declare const devicePixelRatio: number;
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
 // Headful launches additionally need a display; `CHROMIUM_AVAILABLE` only
@@ -136,6 +145,180 @@ describe("browser tab worker startup", () => {
 		// A fresh (un-carried) budget would guard for 10 s.
 		expect(performance.now() - startedAt).toBeLessThan(8_000);
 	});
+});
+
+describe("browser init abandonment", () => {
+	for (const outcome of ["init failure", "post-ready abort"] as const) {
+		it(`retains a created target after ${outcome} until the owner can close it`, async () => {
+			const id = crypto.randomUUID();
+			const name = `init-abandon-${id}`;
+			const owner = `init-owner-${id}`;
+			const targetId = `failed-${id}`;
+			const replacementId = `replacement-${id}`;
+			const scope = { projectDir: path.join("/tmp", name), daemonName: "omp.browser.headless" };
+			const ownershipDir = path.join(daemonRuntimeDir(scope.projectDir), `${scope.daemonName}.targets`);
+			const targets = new Set<string>();
+			const attempts: string[] = [];
+			let blocked = true;
+			const transport = {
+				connected: true,
+				wsEndpoint: () => initPayload.browserWSEndpoint,
+				disconnect() {
+					this.connected = false;
+				},
+				target: () => ({
+					createCDPSession: async () => ({
+						send: async (method: string, params?: { targetId: string }) => {
+							if (method === "Target.getTargets") {
+								return { targetInfos: [...targets].map(targetId => ({ targetId })) };
+							}
+							if (method !== "Target.closeTarget" || !params) throw new Error(`Unexpected CDP call: ${method}`);
+							attempts.push(params.targetId);
+							if (blocked && params.targetId === targetId) return { success: false };
+							return { success: targets.delete(params.targetId) };
+						},
+						detach: async () => undefined,
+					}),
+				}),
+			};
+			const launchSpy = spyOn(launch, "launchHeadlessBrowser").mockResolvedValue({
+				browser: transport as unknown as Browser,
+			});
+			const browser = await acquireBrowser({ kind: "headless", headless: true }, { cwd: scope.projectDir }).finally(
+				() => launchSpy.mockRestore(),
+			);
+			if ("client" in browser) throw new Error("Expected a Puppeteer browser");
+			browser.sharedDaemon = { projectDir: scope.projectDir, name: scope.daemonName };
+			const initialized = Promise.withResolvers<void>();
+			class StartupTransport extends EventTarget {
+				postMessage(message: WorkerInbound): void {
+					if (message.type === "init") initialized.resolve();
+					if (message.type === "close") queueMicrotask(() => this.emit({ type: "closed" }));
+				}
+				terminate(): void {}
+				emit(message: WorkerOutbound): void {
+					this.dispatchEvent(new MessageEvent("message", { data: message }));
+				}
+			}
+			const worker = new StartupTransport();
+			const originalWorkerDescriptor = Object.getOwnPropertyDescriptor(globalThis, "Worker");
+			let nextWorker = worker;
+			Object.defineProperty(globalThis, "Worker", {
+				configurable: true,
+				value: function () {
+					return nextWorker;
+				},
+			});
+			const controller = new AbortController();
+			let pending: Promise<unknown> | undefined;
+			try {
+				pending = acquireTab(name, browser, {
+					timeoutMs: 1_000,
+					ownerSessionId: owner,
+					signal: controller.signal,
+				});
+				void pending.catch(() => undefined);
+				await initialized.promise;
+				targets.add(targetId);
+				worker.emit({ type: "setup" });
+				worker.emit({ type: "page-created", targetId });
+				// Ownership must become durable before init settles, not just in its failure handler.
+				let ownershipFile: string | undefined;
+				for (let attempt = 0; attempt < 100 && !ownershipFile; attempt++) {
+					const files = await fs.readdir(ownershipDir).catch((error: NodeJS.ErrnoException) => {
+						if (error.code !== "ENOENT") throw error;
+						return [];
+					});
+					const file = files.find(file => file.endsWith(".json"));
+					if (file) ownershipFile = path.join(ownershipDir, file);
+					else await Bun.sleep(10);
+				}
+				if (!ownershipFile) throw new Error("Created target was not durably recorded during initialization");
+				expect((await Bun.file(ownershipFile).json()).targets).toEqual([targetId]);
+				if (outcome === "init failure") {
+					worker.emit({
+						type: "init-failed",
+						error: {
+							name: "Error",
+							message: "Navigation failed after page creation",
+							isToolError: false,
+							isAbort: false,
+						},
+					});
+					await expect(pending).rejects.toThrow("Navigation failed after page creation");
+				} else {
+					worker.emit({
+						type: "ready",
+						info: { targetId, url: "about:blank", viewport: { width: 800, height: 600 } },
+					});
+					controller.abort();
+					await expect(pending).rejects.toThrow("Browser tab open aborted");
+				}
+				const abandoned = [...getTabsMapForTest().values()].find(tab => tab.targetId === targetId);
+				expect(abandoned?.state).toBe("dead");
+				expect(getTabsMapForTest().has(name)).toBe(false);
+				if (!abandoned) throw new Error("Lost abandoned target cleanup entry");
+				// Join the detached initial close so assertions observe its confirmed failure.
+				await expect(releaseTab(abandoned.name)).rejects.toThrow();
+				expect(getTabsMapForTest().get(abandoned.name)).toBe(abandoned);
+				expect(targets.has(targetId)).toBe(true);
+				expect(browser.refCount).toBe(1);
+				expect(transport.connected).toBe(true);
+				expect(getBrowsersMapForTest().get(browser.key)).toBe(browser);
+				expect((await Bun.file(ownershipFile).json()).targets).toEqual([targetId]);
+
+				// A later successful open may reuse the requested name while cleanup is pending.
+				const replacementWorker = new StartupTransport();
+				nextWorker = replacementWorker;
+				replacementWorker.postMessage = message => {
+					if (message.type === "close") queueMicrotask(() => replacementWorker.emit({ type: "closed" }));
+					if (message.type !== "init") return;
+					targets.add(replacementId);
+					replacementWorker.emit({ type: "setup" });
+					replacementWorker.emit({ type: "page-created", targetId: replacementId });
+					replacementWorker.emit({
+						type: "ready",
+						info: {
+							targetId: replacementId,
+							url: "about:blank",
+							viewport: { width: 800, height: 600 },
+						},
+					});
+				};
+				await acquireTab(name, browser, { timeoutMs: 1_000, ownerSessionId: owner });
+				const replacement = getTabsMapForTest().get(name);
+				expect(replacement?.targetId).toBe(replacementId);
+				blocked = false;
+				expect(await releaseIdleTabsForOwner(owner, { idleMs: Number.POSITIVE_INFINITY })).toBe(1);
+				expect(getTabsMapForTest().has(abandoned.name)).toBe(false);
+				expect(getTabsMapForTest().get(name)).toBe(replacement);
+				expect([...targets]).toEqual([replacementId]);
+				expect(new Set(attempts)).toEqual(new Set([targetId]));
+				expect((await Bun.file(ownershipFile).json()).targets).toEqual([replacementId]);
+				expect(browser.refCount).toBe(1);
+				expect(transport.connected).toBe(true);
+			} finally {
+				controller.abort();
+				worker.emit({
+					type: "init-failed",
+					error: { name: "Error", message: "Test cleanup", isToolError: false, isAbort: false },
+				});
+				await pending?.catch(() => undefined);
+				if (originalWorkerDescriptor) Object.defineProperty(globalThis, "Worker", originalWorkerDescriptor);
+				else Reflect.deleteProperty(globalThis, "Worker");
+				blocked = false;
+				// oxlint-disable-next-line unicorn/no-useless-spread -- releasing tabs mutates the map
+				for (const tab of [...getTabsMapForTest().values()]) {
+					if (tab.browser === browser) await releaseTab(tab.name);
+				}
+				cancelIdleCloseForOwner(owner);
+				await forgetSharedTarget(scope, targetId);
+				await forgetSharedTarget(scope, replacementId);
+				if (getBrowsersMapForTest().get(browser.key) === browser) await releaseBrowser(browser, { kill: false });
+				await fs.rm(daemonRuntimeDir(scope.projectDir), { recursive: true, force: true });
+			}
+		}, 10_000);
+	}
 });
 
 describe("browser init budget exhaustion", () => {

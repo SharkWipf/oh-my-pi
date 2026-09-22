@@ -45,7 +45,7 @@ Application modes:
 - `app.cdp_url`: attach to an existing CDP endpoint.
 - `app.relay: true`: drive the user's Chrome through the omp relay. `app.target` selects a tab by URL/title substring; without it, the visible tab is adopted. Opening with `url` navigates that adopted tab.
 - Relay sessions are the user's real logged-in browser. Sites attribute actions to the user. Name a target or create a dedicated tab; NEVER navigate the visible tab without authorization.
-- Closing releases the managed tab. It never closes relay/CDP-attached pages. `kill: true` terminates only applications spawned by this process, never reused browser processes.
+- Closing releases the managed tab only after its target close is confirmed. An unconfirmed owned-tab close fails and remains tracked for retry by the owner's existing idle cleanup, even after an explicit close of a persistent tab or a failed open. Shared-browser ownership survives same-process `/restart`, so the replacement host can reclaim prior targets without touching current or unrecorded pages. Closing never closes relay/CDP-attached pages. `kill: true` terminates only applications spawned by this process, never reused browser processes.
 - Idle tabs auto-freeze at turn settle (animated pages stop burning CPU/GPU) and unfreeze on next use; tabs idle past the idle-close timeout are closed. Pass `persist: true` on `open` to keep a tab live across turns (e.g. multi-step login); `browser.close` still releases explicitly.
  </instruction>
 

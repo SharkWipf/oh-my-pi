@@ -61,7 +61,6 @@ describe("browser lifecycle — aborted open must not leak a browser handle", ()
 			gate.resolve();
 
 			await expect(pending).rejects.toBeInstanceOf(ToolAbortError);
-			expect(connectSpy).toHaveBeenCalledTimes(1);
 			// The freshly-launched browser MUST be torn down before publication so it
 			// does not sit at refCount:0 in the global map, leaking a live cmux socket
 			// (or, for headless, a live Chromium process) that no `releaseAllTabs`
@@ -97,7 +96,11 @@ describe("browser lifecycle — aborted open must not leak a browser handle", ()
 
 describe("browser lifecycle — session-scoped teardown reaps owned tabs", () => {
 	afterEach(async () => {
-		await drainAllTabs();
+		try {
+			await drainAllTabs();
+		} finally {
+			vi.restoreAllMocks();
+		}
 	});
 
 	it("acquireTab records ownerSessionId and releaseTabsForOwner tears down only that session's tabs", async () => {

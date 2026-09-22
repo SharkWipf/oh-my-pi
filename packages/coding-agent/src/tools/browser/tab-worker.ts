@@ -2973,10 +2973,15 @@ export class WorkerCore {
 		await this.#tracing?.dispose();
 		await this.#consoleCapture.detach();
 		this.#emulation?.dispose();
-		if (this.#mode === "headless" && page && !page.isClosed()) await page.close().catch(() => undefined);
-		if (this.#browser?.connected) this.#browser.disconnect();
-		this.#transport.send({ type: "closed" });
-		this.#transport.close();
+		try {
+			if (this.#mode === "headless" && page && !page.isClosed()) await page.close();
+			this.#transport.send({ type: "closed" });
+		} catch (error) {
+			this.#transport.send({ type: "close-failed", error: errorPayload(error) });
+		} finally {
+			if (this.#browser?.connected) this.#browser.disconnect();
+			this.#transport.close();
+		}
 	}
 
 	#requirePage(): Page {

@@ -109,6 +109,8 @@ export interface WorkerTabSession extends TabSessionBase<PuppeteerBrowserHandle>
 	backend: "worker";
 	worker: WorkerHandle;
 	activateForScreenshot: boolean;
+	/** Owned target could not be closed; retain its lease and retry through owner idle cleanup. */
+	closePending?: boolean;
 }
 
 export interface CmuxTabSession extends TabSessionBase<CmuxBrowserHandle> {
@@ -429,8 +431,9 @@ async function acquireTabImpl(
 	// the hard backstop for floor overshoot.
 	const initBudgetMs = opts.timeoutMs + GRACE_MS;
 	let info: ReadyInfo;
+	const ownershipScope = sharedScopeOf(browser);
 	try {
-		info = await initializeTabWorker(worker, initPayload, initBudgetMs, startedAt);
+		info = await initializeTabWorker(worker, initPayload, initBudgetMs, startedAt, ownershipScope);
 	} catch (error) {
 		// `BuildMessage`-class failures arrive asynchronously via the worker's `error` event,
 		// after `spawnTabWorker`'s synchronous try/catch has already returned. Fall back to
@@ -439,7 +442,7 @@ async function acquireTabImpl(
 		// A headless worker that died mid-init may have already created its page in the
 		// shared browser — a killed worker can't close it, so close the target the worker
 		// reported (no-op when it never got that far).
-		closeAbandonedWorkerPage(browser, worker);
+		closeAbandonedWorkerPage(browser, worker, opts);
 		if (worker.mode === "inline" || isReportedInitFailure(error)) {
 			if (tempHold || browser.refCount === 0) await releaseBrowser(browser, { kill: false });
 			throw error;
@@ -456,10 +459,10 @@ async function acquireTabImpl(
 		});
 		worker = await spawnInlineWorker();
 		try {
-			info = await initializeTabWorker(worker, initPayload, initBudgetMs, startedAt);
+			info = await initializeTabWorker(worker, initPayload, initBudgetMs, startedAt, ownershipScope);
 		} catch (inlineError) {
 			await worker.terminate().catch(() => undefined);
-			closeAbandonedWorkerPage(browser, worker);
+			closeAbandonedWorkerPage(browser, worker, opts);
 			if (tempHold || browser.refCount === 0) await releaseBrowser(browser, { kill: false });
 			const finalError = new ToolError(
 				`Failed to start browser tab worker (inline fallback also failed): ${inlineError instanceof Error ? inlineError.message : String(inlineError)}`,
@@ -478,7 +481,7 @@ async function acquireTabImpl(
 	// for its owner to release.
 	if (opts.signal?.aborted) {
 		await worker.terminate().catch(() => undefined);
-		closeAbandonedWorkerPage(browser, worker);
+		closeAbandonedWorkerPage(browser, worker, opts);
 		if (tempHold || browser.refCount === 0) await releaseBrowser(browser, { kill: false }).catch(() => undefined);
 		throw new ToolAbortError("Browser tab open aborted");
 	}
@@ -505,10 +508,7 @@ async function acquireTabImpl(
 	};
 	worker.onMessage(msg => handleTabMessage(tab, msg));
 	tabs.set(name, tab);
-	// Durably record ownership so another live omp process can reap this page if
-	// this process dies abnormally before its own teardown closes the tab.
-	const scope = sharedScopeOf(browser);
-	if (scope) void recordSharedTarget(scope, info.targetId);
+	workerPageTargets.delete(worker);
 	return { tab, created: true };
 }
 
@@ -882,27 +882,33 @@ async function releaseTabInner(tab: TabSession, name: string, opts: ReleaseTabOp
 		return true;
 	}
 	let cleanupError: unknown;
-	let forced = false;
 	if (wasAlive) {
 		try {
 			tab.worker.send({ type: "close" });
 			await waitForClosed(tab);
 		} catch {
-			forced = true;
+			// A failed worker handshake is not proof of page closure. The owner
+			// confirms the exact target independently below, including dead workers.
 		}
 	}
 	await tab.worker.terminate().catch(() => undefined);
-	if (forced && tab.kindTag === "headless") {
+	if (tab.kindTag === "headless") {
 		try {
 			await waitForTabCleanup(
 				tab,
 				timeoutMs,
-				`orphan CDP target ${JSON.stringify(tab.targetId)} (Page.close)`,
-				closeOrphanTarget(tab),
+				`owned CDP target ${JSON.stringify(tab.targetId)}`,
+				closeTargetById(tab.browser, tab.targetId),
 			);
 		} catch (error) {
-			cleanupError = error;
+			tab.closePending = true;
+			if (tab.ownerSessionId) {
+				const idleMs = idleCloseTimers.get(tab.ownerSessionId)?.idleMs ?? Number.POSITIVE_INFINITY;
+				armIdleCloseForOwner(tab.ownerSessionId, idleMs);
+			}
+			throw error;
 		}
+		tab.closePending = false;
 	}
 	try {
 		await releaseBrowser(tab.browser, {
@@ -915,24 +921,35 @@ async function releaseTabInner(tab: TabSession, name: string, opts: ReleaseTabOp
 	} finally {
 		tabs.delete(name);
 		const scope = sharedScopeOf(tab.browser);
-		if (scope) void forgetSharedTarget(scope, tab.targetId);
+		if (scope) await forgetSharedTarget(scope, tab.targetId);
 	}
 	if (cleanupError) throw cleanupError;
 	return true;
 }
 
-export async function releaseAllTabs(opts: ReleaseTabOptions = {}): Promise<number> {
-	const names = [...tabs.keys()];
+async function releaseNamedTabs(names: string[], opts: ReleaseTabOptions): Promise<number> {
+	// Start every owned release: one wedged target must not strand its siblings
+	// behind the caller's disposal deadline. Report failures after all settle.
+	const results = await Promise.allSettled(names.map(name => releaseTab(name, opts)));
 	let count = 0;
-	for (const name of names) {
-		if (await releaseTab(name, opts)) count++;
+	let errors: unknown[] | undefined;
+	for (const result of results) {
+		if (result.status === "rejected") (errors ??= []).push(result.reason);
+		else if (result.value) count++;
 	}
+	if (errors) throw new AggregateError(errors, "Some browser tabs could not be released");
 	return count;
 }
 
+export async function releaseAllTabs(opts: ReleaseTabOptions = {}): Promise<number> {
+	return releaseNamedTabs([...tabs.keys()], opts);
+}
+
 export async function dropHeadlessTabs(): Promise<void> {
-	const names = [...tabs.values()].filter(tab => tab.kindTag === "headless").map(tab => tab.name);
-	for (const name of names) await releaseTab(name);
+	await releaseNamedTabs(
+		[...tabs.values()].filter(tab => tab.kindTag === "headless").map(tab => tab.name),
+		{},
+	);
 }
 
 /**
@@ -951,11 +968,7 @@ export async function dropHeadlessTabs(): Promise<void> {
 export async function releaseTabsForOwner(ownerId: string, opts: ReleaseTabOptions = {}): Promise<number> {
 	if (!ownerId) return 0;
 	const names = [...tabs.values()].filter(tab => tab.ownerSessionId === ownerId).map(tab => tab.name);
-	let count = 0;
-	for (const name of names) {
-		if (await releaseTab(name, opts)) count++;
-	}
-	return count;
+	return releaseNamedTabs(names, opts);
 }
 
 /**
@@ -1114,9 +1127,10 @@ export async function freezeTabsForOwner(ownerId: string): Promise<number> {
 export function isIdleCloseCandidate(tab: TabSession, ownerId: string, nowMs: number, idleMs: number): boolean {
 	return (
 		tab.ownerSessionId === ownerId &&
-		isSettleManaged(tab) &&
-		tab.pending.size === 0 &&
-		nowMs - tab.lastActivityAt >= idleMs
+		(tab.backend === "worker" && tab.closePending
+			? true
+			: isSettleManaged(tab) && nowMs - tab.lastActivityAt >= idleMs) &&
+		tab.pending.size === 0
 	);
 }
 /**
@@ -1148,9 +1162,8 @@ export async function releaseIdleTabsForOwner(
 			try {
 				if (await releaseTab(name, opts)) count++;
 			} catch (error) {
-				// One tab's wedged cleanup must not abandon the remaining
-				// candidates; the tab is already removed from the map, so
-				// the next sweep (or close path) retries it.
+				// Failed owned-target closes retain their map entry and lease, so
+				// the existing owner deadline retries them without waiting for exit.
 				logger.debug("Failed to close idle browser tab; continuing sweep", {
 					name,
 					error: error instanceof Error ? error.message : String(error),
@@ -1169,7 +1182,7 @@ export async function releaseIdleTabsForOwner(
 }
 
 /** Per-owner one-shot timers arming the idle-close backstop. Always unref'd. */
-const idleCloseTimers = new Map<string, NodeJS.Timeout>();
+const idleCloseTimers = new Map<string, { timer: NodeJS.Timeout; idleMs: number }>();
 
 /**
  * Monotonic clock ordering sweeps against cancels: each sweep entry and
@@ -1193,7 +1206,9 @@ export function earliestIdleCloseInMs(ownerId: string, idleMs: number, nowMs: nu
 	if (!ownerId || !(idleMs > 0)) return undefined;
 	let earliest: number | undefined;
 	for (const tab of tabs.values()) {
-		if (tab.ownerSessionId !== ownerId || !isSettleManaged(tab)) continue;
+		if (tab.ownerSessionId !== ownerId) continue;
+		if (tab.backend === "worker" && tab.closePending) return 0;
+		if (!isSettleManaged(tab) || !Number.isFinite(idleMs)) continue;
 		const remaining = idleMs - (nowMs - tab.lastActivityAt);
 		if (remaining <= 0) return 0;
 		earliest = earliest === undefined ? remaining : Math.min(earliest, remaining);
@@ -1201,11 +1216,12 @@ export function earliestIdleCloseInMs(ownerId: string, idleMs: number, nowMs: nu
 	return earliest;
 }
 
-/** Drop a pending idle-close deadline and invalidate a sweep in flight. */
+/** Cancel future idle closes, but finish any owned-target close already requested. */
 export function cancelIdleCloseForOwner(ownerId: string): void {
 	if (!ownerId) return;
 	clearIdleCloseTimer(ownerId);
 	idleCloseCancelSeq.set(ownerId, ++idleCloseSeq);
+	armIdleCloseForOwner(ownerId, Number.POSITIVE_INFINITY);
 }
 
 /** Test probe: whether the owner currently has an armed deadline. */
@@ -1217,7 +1233,7 @@ function clearIdleCloseTimer(ownerId: string): void {
 	const existing = idleCloseTimers.get(ownerId);
 	if (existing === undefined) return;
 	idleCloseTimers.delete(ownerId);
-	clearTimeout(existing);
+	clearTimeout(existing.timer);
 }
 
 /**
@@ -1244,7 +1260,7 @@ export function armIdleCloseForOwner(ownerId: string, idleMs: number, retryMs: n
 			.catch(() => undefined);
 	}, wait);
 	timer.unref();
-	idleCloseTimers.set(ownerId, timer);
+	idleCloseTimers.set(ownerId, { timer, idleMs });
 }
 
 /** Test-only accessor for the module-global tabs map. */
@@ -1458,30 +1474,19 @@ async function forceKillTab(name: string, reason: string): Promise<void> {
 	if (!tab) return;
 	killedTabs.set(name, reason);
 	tab.state = "dead";
-	const error = postmortem.markExpectedCleanupError(new ToolError(reason));
-	for (const pending of tab.pending.values()) pending.reject(error);
-	tab.pending.clear();
-	if (tab.backend === "cmux") {
-		await releaseBrowser(tab.browser, { kill: false });
-		tabs.delete(name);
-		return;
-	}
-	await tab.worker.terminate().catch(() => undefined);
-	if (tab.kindTag === "headless") await closeOrphanTarget(tab);
-	await releaseBrowser(tab.browser, { kill: false });
-	tabs.delete(name);
-	const scope = sharedScopeOf(tab.browser);
-	if (scope) void forgetSharedTarget(scope, tab.targetId);
+	await releaseTab(name);
 }
 
 /**
- * Best-effort close of a specific page target in the browser. Close through
+ * Confirmed close of a specific owned page target. Close through
  * the browser CDP session rather than `page.close()`: a page whose navigation
  * wedged during initialization can make Puppeteer's page close wait for the
  * protocol timeout, retaining the cleanup hold for tens of seconds.
  */
 async function closeTargetById(browser: PuppeteerBrowserHandle, targetId: string): Promise<void> {
-	await closeCdpTarget(browser.browser, targetId);
+	if (!(await closeCdpTarget(browser.browser, targetId))) {
+		throw new ToolError(`Could not confirm closure of owned browser target ${JSON.stringify(targetId)}`);
+	}
 }
 
 /**
@@ -1496,42 +1501,51 @@ function sharedScopeOf(browser: BrowserHandle): SharedTargetScope | undefined {
 }
 
 /**
- * Best-effort cleanup for a forced-kill path: close the page the tab's worker
- * reported as created. A run caller is never a browser ref holder, so the
- * browser is still in the registry; the tab's browser is the only place that
- * page can be, so no targetId guesswork across multiple sessions.
- */
-async function closeOrphanTarget(tab: WorkerTabSession): Promise<void> {
-	await closeTargetById(tab.browser, tab.targetId);
-}
-
-/**
  * Close the page a worker created (page-created) before dying during init.
  * Fire-and-forget: the caller has already timed out, so cleanup must not delay
  * error propagation. A killed worker can't clean up after itself; a shared
  * browser's other targets must never be touched.
  */
-function closeAbandonedWorkerPage(browser: PuppeteerBrowserHandle, worker: WorkerHandle): void {
+function closeAbandonedWorkerPage(
+	browser: PuppeteerBrowserHandle,
+	worker: WorkerHandle,
+	opts: AcquireTabOptions,
+): void {
 	const targetId = workerPageTargets.get(worker);
 	workerPageTargets.delete(worker);
-	if (!targetId) return;
-	// The close outlives its caller, and every caller here may go on to release
-	// the last browser reference — `closeTargetById` yields before it looks the
-	// target up, so a disconnect in that gap turns the lookup into a caught
-	// failure and leaves the page on the instance for good. Hold the browser
-	// across the close instead of blocking on it: the hold defers the release
-	// (and the dispose behind it) rather than cancelling one, so the refCount
-	// ends where it would have, one turn later.
+	if (!targetId || browser.kind.kind !== "headless") return;
+	// Keep the failed attempt separate from a replacement using the requested
+	// name. The normal release path owns its lease and retries unconfirmed
+	// closure through the same owner idle deadline as any other closed tab.
+	const name = `abandoned-init-${Snowflake.next()}`;
 	holdBrowser(browser);
-	void closeTargetById(browser, targetId)
-		.catch(() => undefined)
-		.finally(() => void releaseBrowser(browser, { kill: false }).catch(() => undefined));
+	tabs.set(name, {
+		name,
+		browser,
+		targetId,
+		worker,
+		backend: "worker",
+		kindTag: "headless",
+		state: "dead",
+		closePending: true,
+		pending: new Map(),
+		// No ready result exists; dead cleanup entries never expose page state.
+		info: { targetId, url: opts.url ?? "about:blank", viewport: opts.viewport ?? DEFAULT_VIEWPORT },
+		ownerSessionId: opts.ownerSessionId,
+		activateForScreenshot: false,
+		lastActivityAt: Date.now(),
+		frozen: false,
+	});
+	void releaseTab(name).catch(error => {
+		logger.debug("Retaining abandoned browser target for retry", { targetId, error: String(error) });
+	});
 }
 
 async function waitForClosed(tab: WorkerTabSession): Promise<void> {
-	const { promise, resolve } = Promise.withResolvers<void>();
+	const { promise, resolve, reject } = Promise.withResolvers<void>();
 	const unsubscribe = tab.worker.onMessage(msg => {
 		if (msg.type === "closed") resolve();
+		if (msg.type === "close-failed") reject(errorFromPayload(msg.error));
 	});
 	try {
 		await raceWithTimeout(promise, GRACE_MS, "Timed out closing browser tab worker");
@@ -1711,6 +1725,7 @@ async function initializeTabWorker(
 	payload: WorkerInitPayload,
 	timeoutMs: number,
 	deadlineStart: number = performance.now(),
+	ownershipScope?: SharedTargetScope,
 ): Promise<ReadyInfo> {
 	// Derive both phase budgets from the remaining caller budget so a
 	// retried attempt (inline fallback) cannot outlive the caller's timeout.
@@ -1734,6 +1749,7 @@ async function initializeTabWorker(
 			// post-creation CDP work: if this init is killed before ready,
 			// the supervisor closes exactly this target.
 			workerPageTargets.set(worker, msg.targetId);
+			if (ownershipScope) void recordSharedTarget(ownershipScope, msg.targetId);
 		} else if (msg.type === "setup") {
 			setupDone = true;
 			setup.resolve();

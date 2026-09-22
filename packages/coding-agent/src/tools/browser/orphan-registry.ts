@@ -14,11 +14,10 @@
  * shared-browser targets — user-owned connected/relay/spawned browsers have no
  * registry and are never scanned.
  *
- * Ownership is authoritative in the safe direction: a target is reaped only
- * when its owner PID reports `ESRCH` (definitively dead). A live PID is never
- * reaped, so a live session's tabs cannot be yanked out from under it; the
- * worst case (recycled PID) leaves an orphan uncollected rather than closing a
- * live page.
+ * Ownership is authoritative in the safe direction: other live PIDs are never
+ * reaped. A fresh host incarnation can reap its own PID's previous records
+ * after exec, whose JavaScript owners no longer exist. Incarnation-specific
+ * files keep new live targets separate from unresolved previous targets.
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -34,9 +33,11 @@ export interface SharedTargetScope {
 	daemonName: string;
 }
 
-/** On-disk ownership record: one file per owning omp process. */
+/** On-disk ownership record: one file per owning host incarnation. */
 interface OwnershipFile {
 	pid: number;
+	/** Absent in legacy PID-only ownership files. */
+	incarnation?: string;
 	updatedAt: number;
 	targets: string[];
 }
@@ -49,7 +50,12 @@ interface OwnershipFile {
  */
 const DEFAULT_GRACE_MS = 15_000;
 
-/** In-process set of shared-browser targets this process created, keyed by registry dir. */
+// The host supervisor is the sole owner; page workers report targets to it.
+// A new exec gets a new identity even when the operating-system PID survives.
+const incarnation = crypto.randomUUID();
+const ownershipFilename = `${process.pid}.${incarnation}.json`;
+
+/** In-process set of shared-browser targets this incarnation created, keyed by registry dir. */
 const ownedByDir = new Map<string, Set<string>>();
 /** Per-registry-dir write serialization so concurrent record/forget can't tear the file. */
 const writeChains = new Map<string, Promise<void>>();
@@ -72,12 +78,12 @@ function chain(dir: string, task: () => Promise<void>): Promise<void> {
 /** Persist (or, when empty, remove) this process's ownership file for a registry dir. */
 async function flush(dir: string): Promise<void> {
 	const owned = ownedByDir.get(dir);
-	const file = path.join(dir, `${process.pid}.json`);
+	const file = path.join(dir, ownershipFilename);
 	if (!owned || owned.size === 0) {
 		await fs.rm(file, { force: true }).catch(() => undefined);
 		return;
 	}
-	const record: OwnershipFile = { pid: process.pid, updatedAt: Date.now(), targets: [...owned] };
+	const record: OwnershipFile = { pid: process.pid, incarnation, updatedAt: Date.now(), targets: [...owned] };
 	const tmp = `${file}.${process.pid}.tmp`;
 	await fs.mkdir(dir, { recursive: true });
 	await Bun.write(tmp, JSON.stringify(record));
@@ -132,10 +138,11 @@ export interface CollectOrphanOptions {
 	graceMs?: number;
 }
 
-/** Targets belonging to one dead process, kept grouped so partial failures remain retryable. */
+/** Targets belonging to an ended host incarnation; partial failures remain retryable. */
 export interface OrphanOwner {
 	file: string;
 	pid: number;
+	incarnation?: string;
 	updatedAt: number;
 	targetIds: string[];
 }
@@ -146,10 +153,10 @@ export interface OrphanScan {
 }
 
 /**
- * Scan a registry dir for targets whose owning process is gone. Returns one
- * entry per dead owner so a reaper can retain only targets whose CDP closure
- * was not confirmed. This process's own file and every live-owner file are
- * left untouched.
+ * Scan for dead owners or previous incarnations of this host PID. Current
+ * targets use a separate file, so recording/forgetting a newly opened tab
+ * cannot overwrite unresolved ownership from before exec. Other live PIDs
+ * and the current incarnation remain untouched.
  */
 export async function collectOrphanTargets(
 	scope: SharedTargetScope,
@@ -178,12 +185,18 @@ export async function collectOrphanTargets(
 			continue; // torn or malformed file; a live owner will rewrite it
 		}
 		if (typeof record?.pid !== "number" || !Array.isArray(record.targets)) continue;
-		if (record.pid === process.pid) continue; // our own file
-		if (isAlive(record.pid)) continue; // owner still running
-		if (nowMs - (record.updatedAt ?? 0) < graceMs) continue; // conservative grace
+		if (record.pid === process.pid) {
+			if (record.incarnation === incarnation) continue;
+			// Same PID, different (or legacy) incarnation: exec already ended
+			// that owner. Do not defer its only attach-time sweep for a grace.
+		} else {
+			if (isAlive(record.pid)) continue;
+			if (nowMs - (record.updatedAt ?? 0) < graceMs) continue;
+		}
 		owners.push({
 			file,
 			pid: record.pid,
+			...(typeof record.incarnation === "string" ? { incarnation: record.incarnation } : {}),
 			updatedAt: record.updatedAt,
 			targetIds: record.targets.filter(id => typeof id === "string"),
 		});
@@ -230,7 +243,12 @@ async function updateOwnershipFile(owner: OrphanOwner, targetIds: string[]): Pro
 	}
 	const tmp = `${owner.file}.${process.pid}.tmp`;
 	try {
-		const record: OwnershipFile = { pid: owner.pid, updatedAt: owner.updatedAt, targets: targetIds };
+		const record: OwnershipFile = {
+			pid: owner.pid,
+			...(owner.incarnation === undefined ? {} : { incarnation: owner.incarnation }),
+			updatedAt: owner.updatedAt,
+			targets: targetIds,
+		};
 		await Bun.write(tmp, JSON.stringify(record));
 		await fs.rename(tmp, owner.file);
 	} catch (error) {
@@ -240,7 +258,7 @@ async function updateOwnershipFile(owner: OrphanOwner, targetIds: string[]): Pro
 }
 
 /**
- * Reap shared-browser targets whose owning omp process is gone. Each owner
+ * Reap targets of dead processes and previous incarnations of this host PID. Each owner
  * file is removed only after every target is confirmed closed/absent; partial
  * failures atomically retain the unresolved ids for the next attach to retry.
  * Failures are logged, never thrown, so cleanup cannot block browser open.

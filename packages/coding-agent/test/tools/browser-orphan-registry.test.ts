@@ -7,7 +7,8 @@
  *
  * The contract under test:
  *  - a dead owner's targets are collected for reaping, a live owner's are not;
- *  - this process's own targets are never reaped (a live session keeps its tabs);
+ *  - the current host incarnation keeps its tabs, while prior same-PID owners
+ *    are eligible immediately, including legacy records from before exec;
  *  - a conservative grace window keeps a just-crashed owner's fresh records;
  *  - confirmed closures are removed, while transient failures remain durable
  *    and are retried on the next reap.
@@ -40,11 +41,21 @@ function registryDir(scope: SharedTargetScope): string {
 
 async function writeOwnershipFile(
 	scope: SharedTargetScope,
-	record: { pid: number; updatedAt: number; targets: string[] },
-): Promise<void> {
+	record: { pid: number; incarnation?: string; updatedAt: number; targets: string[] },
+): Promise<string> {
 	const dir = registryDir(scope);
 	await fs.mkdir(dir, { recursive: true });
-	await Bun.write(path.join(dir, `${record.pid}.json`), JSON.stringify(record));
+	const filename = record.incarnation ? `${record.pid}.${record.incarnation}.json` : `${record.pid}.json`;
+	const file = path.join(dir, filename);
+	await Bun.write(file, JSON.stringify(record));
+	return file;
+}
+
+/** Discover the current record in a fresh scope without depending on its UUID. */
+async function currentOwnershipFile(scope: SharedTargetScope): Promise<string> {
+	const files = (await fs.readdir(registryDir(scope))).filter(file => file.endsWith(".json"));
+	expect(files).toHaveLength(1);
+	return path.join(registryDir(scope), files[0]!);
 }
 
 /** A pid that has been spawned and reaped, so `kill(pid, 0)` reports ESRCH. */
@@ -55,13 +66,18 @@ async function deadPid(): Promise<number> {
 }
 
 /** Minimal puppeteer Browser stub recording closes and optionally failing selected targets. */
-function makeBrowser(closed: string[], failTargets: ReadonlySet<string> = new Set()): Browser {
+function makeBrowser(
+	closed: string[],
+	failTargets: ReadonlySet<string> = new Set(),
+	beforeClose?: (targetId: string) => Promise<void>,
+): Browser {
 	const session = {
 		send: async (method: string, params?: { targetId: string }) => {
 			if (method === "Target.getTargets") {
 				return { targetInfos: [...failTargets].map(targetId => ({ targetId })) };
 			}
 			if (!params) throw new Error(`Missing params for ${method}`);
+			await beforeClose?.(params.targetId);
 			if (failTargets.has(params.targetId)) throw new Error("transient CDP failure");
 			closed.push(params.targetId);
 			return { success: true };
@@ -110,20 +126,48 @@ describe("orphan-registry — ownership scan", () => {
 		]);
 	});
 
-	it("never reaps this process's own recorded targets", async () => {
+	it("excludes the current incarnation and other live PIDs even when their records are old", async () => {
 		const scope = trackedScope();
 		await recordSharedTarget(scope, "mine-1");
 		await recordSharedTarget(scope, "mine-2");
-
-		// Our own file is present on disk...
-		const own = (await Bun.file(path.join(registryDir(scope), `${process.pid}.json`)).json()) as {
-			targets: string[];
-		};
+		const ownFile = await currentOwnershipFile(scope);
+		const own = await Bun.file(ownFile).json();
 		expect(own.targets.sort()).toEqual(["mine-1", "mine-2"]);
 
-		// ...but a scan (even with everything else forced dead) skips it.
-		const scan = await collectOrphanTargets(scope, { now: () => 10_000_000, isAlive: () => false });
+		const live = process.pid + 1;
+		await writeOwnershipFile(scope, { pid: live, updatedAt: 0, targets: ["live-legacy"] });
+		await writeOwnershipFile(scope, {
+			pid: live,
+			incarnation: crypto.randomUUID(),
+			updatedAt: 0,
+			targets: ["live-incarnation"],
+		});
+		// Even a failed probe of this PID cannot make the current incarnation an orphan.
+		const scan = await collectOrphanTargets(scope, {
+			now: () => own.updatedAt + 60_000,
+			isAlive: pid => pid === live,
+		});
 		expect(scan.owners).toEqual([]);
+	});
+
+	it("collects a fresh legacy record of this PID immediately after exec", async () => {
+		const scope = trackedScope();
+		const file = await writeOwnershipFile(scope, { pid: process.pid, updatedAt: 100_000, targets: ["legacy"] });
+		const scan = await collectOrphanTargets(scope, { now: () => 100_000, isAlive: () => true });
+		expect(scan.owners).toEqual([{ file, pid: process.pid, updatedAt: 100_000, targetIds: ["legacy"] }]);
+	});
+
+	it("collects a fresh prior incarnation of this PID without waiting for the grace window", async () => {
+		const scope = trackedScope();
+		const incarnation = crypto.randomUUID();
+		const file = await writeOwnershipFile(scope, {
+			pid: process.pid,
+			incarnation,
+			updatedAt: 100_000,
+			targets: ["prior"],
+		});
+		const scan = await collectOrphanTargets(scope, { now: () => 100_000, isAlive: () => true });
+		expect(scan.owners).toEqual([{ file, pid: process.pid, incarnation, updatedAt: 100_000, targetIds: ["prior"] }]);
 	});
 
 	it("forgetSharedTarget drops one id and removes the file once empty", async () => {
@@ -131,13 +175,14 @@ describe("orphan-registry — ownership scan", () => {
 		await recordSharedTarget(scope, "a");
 		await recordSharedTarget(scope, "b");
 		await forgetSharedTarget(scope, "a");
-		const after = (await Bun.file(path.join(registryDir(scope), `${process.pid}.json`)).json()) as {
+		const ownFile = await currentOwnershipFile(scope);
+		const after = (await Bun.file(ownFile).json()) as {
 			targets: string[];
 		};
 		expect(after.targets).toEqual(["b"]);
 
 		await forgetSharedTarget(scope, "b");
-		expect(await Bun.file(path.join(registryDir(scope), `${process.pid}.json`)).exists()).toBe(false);
+		expect(await Bun.file(ownFile).exists()).toBe(false);
 	});
 
 	it("keeps a dead owner's records inside the conservative grace window", async () => {
@@ -214,5 +259,53 @@ describe("orphan-registry — reap", () => {
 		expect(retryCount).toBe(1);
 		expect(retryClosed).toEqual(["retry-later"]);
 		expect(await Bun.file(path.join(registryDir(scope), `${dead}.json`)).exists()).toBe(false);
+	});
+
+	it("retains a failed prior incarnation across concurrent current writes and retries only its file", async () => {
+		const scope = trackedScope();
+		await recordSharedTarget(scope, "current-old");
+		const ownFile = await currentOwnershipFile(scope);
+		const incarnation = crypto.randomUUID();
+		const updatedAt = Date.now();
+		const priorFile = await writeOwnershipFile(scope, {
+			pid: process.pid,
+			incarnation,
+			updatedAt,
+			targets: ["closed-now", "retry-later"],
+		});
+		const closing = Promise.withResolvers<void>();
+		const resume = Promise.withResolvers<void>();
+		const firstClosed: string[] = [];
+		const browser = makeBrowser(firstClosed, new Set(["retry-later"]), async targetId => {
+			if (targetId !== "retry-later") return;
+			closing.resolve();
+			await resume.promise;
+		});
+		const firstReap = reapOrphanSharedTargets(browser, scope);
+		try {
+			await closing.promise;
+			// Interleave normal host ownership writes with the unresolved old close.
+			await Promise.all([recordSharedTarget(scope, "current-new"), forgetSharedTarget(scope, "current-old")]);
+		} finally {
+			resume.resolve();
+			await firstReap;
+		}
+		expect(await firstReap).toBe(1);
+		expect(firstClosed).toEqual(["closed-now"]);
+		const retained = { pid: process.pid, incarnation, updatedAt, targets: ["retry-later"] };
+		expect(await Bun.file(priorFile).json()).toEqual(retained);
+		expect((await Bun.file(ownFile).json()).targets).toEqual(["current-new"]);
+
+		// Removing the last current tab must not erase the still-retryable old owner.
+		await forgetSharedTarget(scope, "current-new");
+		expect(await Bun.file(ownFile).exists()).toBe(false);
+		expect(await Bun.file(priorFile).json()).toEqual(retained);
+		await recordSharedTarget(scope, "current-active");
+
+		const retryClosed: string[] = [];
+		expect(await reapOrphanSharedTargets(makeBrowser(retryClosed), scope)).toBe(1);
+		expect(retryClosed).toEqual(["retry-later"]);
+		expect(await Bun.file(priorFile).exists()).toBe(false);
+		expect((await Bun.file(ownFile).json()).targets).toEqual(["current-active"]);
 	});
 });

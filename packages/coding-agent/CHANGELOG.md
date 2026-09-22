@@ -169,6 +169,10 @@
 
 - JavaScript eval now settles pending tool calls after their originating cell finishes or fails, preserving retained promises and attributing late errors to the original cell without losing kernel state.
 
+### Fixed
+
+- Retained browser target ownership until closure is confirmed, including failed or abandoned initialization, with retryable owner cleanup and same-process restart recovery that leaves current and unrecorded tabs untouched.
+
 ## [18.2.8] - 2026-09-21
 
 ### Added
