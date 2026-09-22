@@ -347,7 +347,7 @@ describe("OpenAI-family mid-stream socket-close retry", () => {
 			// replaying would duplicate it, so the socket close must surface.
 			return createSocketCloseResponse([
 				{ type: "response.output_item.added", item: { type: "reasoning", id: "rs_partial", summary: [] } },
-				{ type: "response.reasoning_text.delta", item_id: "rs_partial", delta: "deliberating" },
+				{ type: "response.reasoning_summary_text.delta", item_id: "rs_partial", delta: "deliberating" },
 			]);
 		});
 
