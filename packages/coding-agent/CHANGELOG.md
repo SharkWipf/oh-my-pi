@@ -9,6 +9,9 @@
 ### Fixed
 
 - Supported in-place session-entry rewrites refresh cumulative usage, derived controls, and credential pins without moving the selected branch.
+### Fixed
+
+- Killing a subagent cancels its assignment and provider requests before asynchronous shutdown hooks finish, while keeping upstream disposal idempotency, accepted-yield handling, and wake-failure notifications. Disposed sessions reject late prompts; killed or replaced workers cannot deliver late success, but the executor still notifies the original waker of cancellation.
 
 ### Added
 

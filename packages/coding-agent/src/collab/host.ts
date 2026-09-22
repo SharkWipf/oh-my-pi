@@ -1078,12 +1078,10 @@ export class CollabHost {
 			case "kill": {
 				const kill = async () => {
 					const ref = AgentRegistry.global().get(agentId);
-					if (!ref || !this.#guestTrafficAllowed()) return;
-					if (ref.status === "running" && ref.session) {
-						await ref.session.abort({ reason: USER_INTERRUPT_LABEL });
-					}
-					if (!this.#guestTrafficAllowed() || !this.#guestActionsReady()) return;
-					await AgentLifecycleManager.global().release(agentId, ref, { tombstone: true });
+					if (!ref || !this.#guestTrafficAllowed() || !this.#guestActionsReady()) return;
+					const abort =
+						ref.status === "running" ? ref.session?.abort({ reason: USER_INTERRUPT_LABEL }) : undefined;
+					await Promise.all([abort, AgentLifecycleManager.global().release(agentId, ref, { tombstone: true })]);
 				};
 				kill().catch(fail);
 				break;

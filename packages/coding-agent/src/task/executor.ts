@@ -1345,6 +1345,18 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		);
 	}
 
+	// A manager kill is terminal for the assignment, not just its current turn.
+	// Follow the exact registration so a killed worker cannot enter the yield
+	// reminder ladder, and a stale generation cannot stop a same-id replacement.
+	const registry = AgentRegistry.global();
+	let runRef = registry.get(id);
+	const unsubscribeRegistry = registry.onChange(event => {
+		if (event.ref.id !== id) return;
+		if (event.type === "registered" && !runRef) runRef = event.ref;
+		if (event.ref === runRef && event.type === "status_changed" && event.ref.status === "aborted") {
+			requestAbort("signal");
+		}
+	});
 	// Wall-clock hard limit. Defense-in-depth for the case where a provider stream
 	// hang escapes the inference-layer watchdog (see openai-completions
 	// `isOpenAICompletionsProgressChunk`). Disabled by default; set
@@ -2043,11 +2055,15 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		resolveAbortReasonText,
 		setActiveSession: session => {
 			activeSession = session;
+			const ref = registry.get(id);
+			if (ref?.session === session) runRef = ref;
+			if (runRef?.status === "aborted") requestAbort("signal");
 			publishAdvisorState(session);
 		},
 		takeActiveSession: () => {
 			const session = activeSession;
 			activeSession = null;
+			unsubscribeRegistry();
 			return session;
 		},
 		attach,
@@ -2059,6 +2075,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		finish: () => {
 			resolved = true;
 			listenerController.abort();
+			unsubscribeRegistry();
 			if (runtimeTimeoutId !== undefined) {
 				clearTimeout(runtimeTimeoutId);
 				runtimeTimeoutId = undefined;
@@ -2663,6 +2680,8 @@ async function relayWakeTurnOutput(args: {
 	error: string | undefined;
 	/** Whether the turn was aborted (runtime limit, cancellation, hard abort). */
 	aborted: boolean;
+	/** A killed/replaced runtime may report only the executor-owned cancellation notice. */
+	stopped: boolean;
 	/** Reason text for an aborted turn, from {@link SubagentRunMonitor.resolveAbortReasonText}. */
 	abortReason: string | undefined;
 	/** A {@link finalizeRunResult} throw, so the waiter is notified instead of stranded. */
@@ -2683,13 +2702,15 @@ async function relayWakeTurnOutput(args: {
 		if (alreadyMessaged && !failed) continue;
 		const body = buildWakeRelayBody({ ...args, alreadyMessaged });
 		if (!body) continue;
-		const receipt = await bus.send({
-			from: args.id,
-			to: source.from,
-			body,
-			replyTo: source.messageId,
-			wakeRelay: true,
-		});
+		const receipt = args.stopped
+			? await bus.sendWakeCancellation({ from: args.id, to: source.from, replyTo: source.messageId })
+			: await bus.send({
+					from: args.id,
+					to: source.from,
+					body,
+					replyTo: source.messageId,
+					wakeRelay: true,
+				});
 		if (receipt.outcome === "failed") {
 			logger.warn("IRC wake-turn relay failed", { from: args.id, to: source.from, error: receipt.error });
 		}
@@ -2805,7 +2826,9 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 		const turnStartTime = Date.now();
 		const relay = Promise.withResolvers<void>();
 		session.trackIrcReply(relay.promise);
-		const sessionFile = AgentRegistry.global().get(id)?.sessionFile ?? options.sessionFile ?? undefined;
+		const registry = AgentRegistry.global();
+		const ref = registry.get(id);
+		const sessionFile = ref?.sessionFile ?? options.sessionFile ?? undefined;
 		const turnMonitor = createSubagentRunMonitor({
 			index,
 			id,
@@ -2846,7 +2869,15 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			const lastAssistant = session.getLastAssistantMessage();
 			const yielded = turnMonitor.yieldCalled();
 			const runtimeLimitExceeded = turnMonitor.runtimeLimitExceeded();
-			const aborted = runtimeLimitExceeded || (lastAssistant?.stopReason === "aborted" && !yielded);
+			const senderStopped = () =>
+				registry.get(id) !== ref ||
+				ref?.status === "aborted" ||
+				(session.isDisposed && !(ref?.status === "parked" && !ref.session));
+			const aborted =
+				(turnMonitor.abortSignal.aborted && turnMonitor.isAbortedRun()) ||
+				senderStopped() ||
+				runtimeLimitExceeded ||
+				(lastAssistant?.stopReason === "aborted" && !yielded);
 			// Two error lanes. `error` carries full diagnostics (a thrown turn
 			// error's stack) for `done.error`, logs, and lifecycle. `errorForPeer`
 			// carries only the short, attributed message: a stack trace injected
@@ -2918,15 +2949,18 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 				// wake turn must still tell whoever woke it, or a `send await:true`
 				// waiter mistakes a dead peer for a healthy-but-silent one.
 				try {
+					// A stopped/replaced owner may report its cancellation, never late success.
+					const stopped = senderStopped();
 					await relayWakeTurnOutput({
 						id,
 						records,
 						turnStartTime,
-						yielded,
-						result,
-						turnText,
+						yielded: !stopped && yielded,
+						result: stopped ? undefined : result,
+						turnText: stopped ? "" : turnText,
 						error: errorForPeer,
-						aborted,
+						aborted: aborted || stopped,
+						stopped,
 						abortReason,
 						finalizeError,
 					});
