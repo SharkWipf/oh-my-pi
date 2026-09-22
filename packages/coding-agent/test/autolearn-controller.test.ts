@@ -21,7 +21,10 @@ class FakeSession {
 
 	subscribe(listener: (event: AgentSessionEvent) => void): () => void {
 		this.listeners.push(listener);
-		return () => {};
+		return () => {
+			const index = this.listeners.indexOf(listener);
+			if (index >= 0) this.listeners.splice(index, 1);
+		};
 	}
 
 	async capture(content: string): Promise<void> {
@@ -266,6 +269,27 @@ describe("AutoLearnController", () => {
 		session.agentEnd();
 		await settleCaptures();
 		expect(session.captures).toHaveLength(3);
+	});
+
+	it("drops queued capture on disposal and cannot restart on a later turn", async () => {
+		const session = new FakeSession();
+		const release = Promise.withResolvers<void>();
+		session.captureGate = release.promise;
+		const controller = new AutoLearnController({
+			session: session as unknown as AgentSession,
+			settings: Settings.isolated({ "autolearn.enabled": true, "autolearn.autoContinue": true }),
+			capture: content => session.capture(content),
+		});
+		session.toolCalls(5);
+		session.agentEnd();
+		session.toolCalls(5);
+		session.agentEnd();
+		controller.dispose();
+		release.resolve();
+		await settleCaptures();
+		session.toolCalls(5);
+		session.agentEnd();
+		expect(session.captures).toHaveLength(1);
 	});
 
 	it("does not queue an ineligible stop behind an in-flight capture", async () => {

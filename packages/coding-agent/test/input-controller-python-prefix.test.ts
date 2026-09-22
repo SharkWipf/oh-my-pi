@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "bun:test";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 type FakeEditor = {
 	onSubmit?: (text: string) => Promise<void>;
 	imageLinks?: readonly (string | undefined)[];
@@ -18,11 +18,11 @@ type FakeEditor = {
 
 function createContext() {
 	let editorText = "";
-	const submitted: unknown[] = [];
+	const submitted: string[] = [];
 	const handlePythonCommand = vi.fn(async (_code: string, _isExcluded: boolean) => {});
 	const handleBashCommand = vi.fn(async (_command: string, _isExcluded: boolean) => {});
 	const startPendingSubmission = vi.fn((submission: unknown) => submission);
-	const onInputCallback = vi.fn((submission: unknown) => submitted.push(submission));
+	const onInputCallback = vi.fn((submission: { text: string }) => submitted.push(submission.text));
 	const prompt = vi.fn(async (_text: string, _options?: unknown) => {});
 
 	const editor: FakeEditor = {
@@ -54,7 +54,7 @@ function createContext() {
 			queuedMessageCount: 0,
 			getQueuedMessages: () => ({ steering: [], followUp: [] }),
 		} as unknown as InteractiveModeContext["session"],
-		sessionManager: { getSessionName: () => "named-session" } as unknown as InteractiveModeContext["sessionManager"],
+		sessionManager: Object.assign(SessionManager.inMemory(), { getSessionName: () => "named-session" }),
 		compactionQueuedMessages: [] as InteractiveModeContext["compactionQueuedMessages"],
 		locallySubmittedUserSignatures: new Set<string>(),
 		onInputCallback,
@@ -86,28 +86,15 @@ function createContext() {
 
 describe("InputController Python prompt prefix", () => {
 	it("submits leading shell-variable prose as a normal prompt", async () => {
-		const { ctx, editor, handlePythonCommand, onInputCallback, startPendingSubmission, submitted } = createContext();
+		const { ctx, editor, handlePythonCommand, onInputCallback, submitted } = createContext();
 		const controller = new InputController(ctx);
 		controller.setupEditorSubmitHandler();
 
 		await editor.onSubmit?.("$HOME is home");
 
 		expect(handlePythonCommand).not.toHaveBeenCalled();
-		expect(startPendingSubmission).toHaveBeenCalledWith({
-			text: "$HOME is home",
-			images: undefined,
-			imageLinks: undefined,
-			streamingBehavior: "steer",
-		});
 		expect(onInputCallback).toHaveBeenCalledTimes(1);
-		expect(submitted).toEqual([
-			{
-				text: "$HOME is home",
-				images: undefined,
-				imageLinks: undefined,
-				streamingBehavior: "steer",
-			},
-		]);
+		expect(submitted).toEqual(["$HOME is home"]);
 	});
 
 	it("submits pasted shell-prompt transcripts with OMP chrome as a normal prompt", async () => {
@@ -116,28 +103,15 @@ describe("InputController Python prompt prefix", () => {
 			" |\n" +
 			" in: 282  out: 152  cache 344K  t: 3.3s  tok/s: 351.9/s\n" +
 			" is this command stuck in limbo";
-		const { ctx, editor, handlePythonCommand, onInputCallback, startPendingSubmission, submitted } = createContext();
+		const { ctx, editor, handlePythonCommand, onInputCallback, submitted } = createContext();
 		const controller = new InputController(ctx);
 		controller.setupEditorSubmitHandler();
 
 		await editor.onSubmit?.(transcript);
 
 		expect(handlePythonCommand).not.toHaveBeenCalled();
-		expect(startPendingSubmission).toHaveBeenCalledWith({
-			text: transcript,
-			images: undefined,
-			imageLinks: undefined,
-			streamingBehavior: "steer",
-		});
 		expect(onInputCallback).toHaveBeenCalledTimes(1);
-		expect(submitted).toEqual([
-			{
-				text: transcript,
-				images: undefined,
-				imageLinks: undefined,
-				streamingBehavior: "steer",
-			},
-		]);
+		expect(submitted).toEqual([transcript]);
 	});
 
 	it("keeps space-separated Python shortcuts available", async () => {

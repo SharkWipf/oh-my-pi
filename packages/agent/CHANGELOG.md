@@ -18,7 +18,7 @@
 ### Added
 
 - Exported the existing per-image `IMAGE_TOKEN_ESTIMATE` baseline so source projections can replace it with representation-specific estimates without counting images twice.
-- Pre-model-call observation gates now receive the actual prepared request model after provider-context transforms and inband tool encoding.
+- Added local source-addressed compaction coverage and positional rewrite APIs; journal owners can remap retained coverage atomically with source edits without rerendering historical artifacts.
 
 ### Fixed
 
@@ -27,6 +27,9 @@
 ### Fixed
 
 - Fixed metadata-only computer screenshots counting as zero in local token estimates. Their single image baseline replaces content-image mirrors, matching computer-result serialization. Original user, developer and custom images retain one-time baseline accounting.
+- Kept compaction source IDs and selected ranges aligned with converted messages across journal metadata and repeated sparse retention.
+- Authored images interleaved with snap archive frames keep their one-time original-image estimate instead of being priced as rasterized transcript frames.
+- Pre-model-call observation gates now receive the actual prepared request model after provider-context transforms and inband tool encoding.
 
 ## [18.2.5] - 2026-09-17
 

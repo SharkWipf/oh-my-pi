@@ -450,7 +450,10 @@ async function embedApi(texts: readonly string[]): Promise<EmbeddingMatrix | nul
 				method: "POST",
 				headers,
 				body,
-				signal: AbortSignal.timeout(30000),
+				signal: AbortSignal.any([
+					AbortSignal.timeout(30000),
+					...(getMnemopiRuntimeOptions()?.signal ? [getMnemopiRuntimeOptions()!.signal!] : []),
+				]),
 				maxAttempts: 3,
 				defaultDelayMs: attempt => 2 ** attempt * 1000,
 			});
@@ -565,7 +568,7 @@ export async function embedQuery(text: string): Promise<Vector | null> {
 }
 
 export async function embed(texts: readonly string[]): Promise<EmbeddingMatrix | null> {
-	if (texts.length === 0 || embeddingsDisabled()) {
+	if (getMnemopiRuntimeOptions()?.signal?.aborted || texts.length === 0 || embeddingsDisabled()) {
 		return null;
 	}
 	texts = capInputs(texts);
@@ -595,7 +598,7 @@ export async function embed(texts: readonly string[]): Promise<EmbeddingMatrix |
 		}
 	}
 	const model = await getLocalModel();
-	if (model === null) {
+	if (getMnemopiRuntimeOptions()?.signal?.aborted || model === null) {
 		return null;
 	}
 	try {

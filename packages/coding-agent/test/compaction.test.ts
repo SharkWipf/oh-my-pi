@@ -905,7 +905,8 @@ describe("remote compaction setting", () => {
 
 		const result = await compact(preparation, model, "test-api-key");
 
-		expect(result.preserveData).toEqual({ otherState: "keep-me" });
+		expect(result.preserveData?.otherState).toBe("keep-me");
+		expect(result.preserveData?.openaiRemoteCompaction).toBeUndefined();
 	});
 
 	it("summarizes snapcompact archive text locally and stops carrying frames", async () => {
@@ -955,7 +956,8 @@ describe("remote compaction setting", () => {
 			.join("\n");
 
 		expect(promptText).toContain("Archived snapcompact source");
-		expect(result.preserveData).toEqual({ otherState: "keep-me" });
+		expect(result.preserveData?.otherState).toBe("keep-me");
+		expect(result.preserveData?.snapcompact).toBeUndefined();
 	});
 
 	it("keeps snapcompact archive text when only split-turn prefix is summarized", async () => {
@@ -1017,7 +1019,8 @@ describe("remote compaction setting", () => {
 		expect(result.summary).toContain("Turn prefix summary");
 		expect(result.summary).not.toContain("Archived split snapcompact source");
 		expect(result.summary).not.toContain("No prior history.");
-		expect(result.preserveData).toEqual({ otherState: "keep-me" });
+		expect(result.preserveData?.otherState).toBe("keep-me");
+		expect(result.preserveData?.snapcompact).toBeUndefined();
 	});
 
 	it("strips legacy frame-only snapcompact archives during local compaction", async () => {
@@ -1057,7 +1060,8 @@ describe("remote compaction setting", () => {
 
 		const result = await compact(preparation, model, "test-api-key");
 
-		expect(result.preserveData).toEqual({ otherState: "keep-me" });
+		expect(result.preserveData?.otherState).toBe("keep-me");
+		expect(result.preserveData?.snapcompact).toBeUndefined();
 	});
 
 	it("sends snapcompact archive text to OpenAI remote compaction and strips frames", async () => {

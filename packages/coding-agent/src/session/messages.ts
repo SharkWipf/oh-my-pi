@@ -68,17 +68,10 @@ export {
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { titleTextFromSkillPrompt } from "@oh-my-pi/pi-tui/chat/skill-title-input";
 
-/** Host-recorded producer, independent of role and billing attribution. Absence means unknown. */
-export type UserMessageProducer =
-	| { type: "human" }
-	| { type: "tool"; name: string; toolCallId?: string }
-	| { type: "extension"; name?: string }
-	| { type: "generated"; name?: string };
-
 declare module "@oh-my-pi/pi-ai" {
 	interface UserMessage {
-		/** Local provenance only; never a provider role, retention rule, or human-authorship inference. */
-		producer?: UserMessageProducer;
+		imageLinks?: (string | undefined)[];
+		compactionOverride?: "keep" | "exclude";
 	}
 }
 

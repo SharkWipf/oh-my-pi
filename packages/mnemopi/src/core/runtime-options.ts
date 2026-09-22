@@ -7,6 +7,7 @@ export type MnemopiLlmCompletionTask = {
 };
 
 export interface MnemopiLlmCompleteOptions {
+	signal?: AbortSignal;
 	maxTokens?: number;
 	temperature?: number;
 	timeout?: number;
@@ -84,6 +85,7 @@ export interface ResolvedMnemopiLlmRuntimeOptions {
 }
 
 export interface ResolvedMnemopiRuntimeOptions {
+	signal?: AbortSignal;
 	embeddings?: ResolvedMnemopiEmbeddingRuntimeOptions;
 	llm?: ResolvedMnemopiLlmRuntimeOptions;
 	debug?: boolean;

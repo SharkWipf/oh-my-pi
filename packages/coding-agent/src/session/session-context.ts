@@ -533,13 +533,8 @@ export function buildSessionContextFromPath(
 			pushMessage(compactionSummaryMsg);
 		}
 
-		// Notes-backed windows do not summarize a discarded turn prefix. Recover
-		// its latest user request verbatim, independently of the disposable tail.
-		// Resolve from the branch journal so repeated rollovers and resume retain
-		// it too, without copying messages into compaction metadata or transcripts.
-		// Attribution follows the shared turn-initiator semantics so a
-		// user-invoked skill or writable-collab request is retained like an
-		// ordinary one instead of being skipped for an older plain user message.
+		// Keep the request visible at this boundary, not a future request from the
+		// active leaf. The normal branch fold retains it independently of the tail.
 		if (
 			!options?.transcript &&
 			isRecord(compaction.details) &&

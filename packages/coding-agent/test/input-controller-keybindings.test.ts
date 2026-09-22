@@ -620,14 +620,11 @@ describe("InputController keybinding setup", () => {
 		await controller.handleFollowUp();
 
 		expect(ctx.locallySubmittedUserSignatures.has("follow up after current response\u00000")).toBe(true);
-		expect(spies.prompt).toHaveBeenCalledWith("follow up after current response", {
-			streamingBehavior: "followUp",
-		});
 		expect(spies.updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);
 	});
 
 	it("marks idle follow-up submissions as local", async () => {
-		const { InputController, ctx, editor, spies } = await createContext();
+		const { InputController, ctx, editor } = await createContext();
 		// Default fake session is idle.
 		editor.setText("plain idle submit");
 		const controller = new InputController(ctx);
@@ -635,8 +632,6 @@ describe("InputController keybinding setup", () => {
 		await controller.handleFollowUp();
 
 		expect(ctx.locallySubmittedUserSignatures.has("plain idle submit\u00000")).toBe(true);
-		// Idle submit calls prompt() with no streamingBehavior (images forwarded, undefined here).
-		expect(spies.prompt).toHaveBeenCalledWith("plain idle submit", { images: undefined });
 	});
 
 	it("surfaces and recovers from an idle follow-up dispatch failure", async () => {

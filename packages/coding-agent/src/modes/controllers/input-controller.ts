@@ -1,6 +1,6 @@
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { ImageContent, OriginalSubmission } from "@oh-my-pi/pi-ai";
 import {
 	type AutocompleteProvider,
 	matchesKey,
@@ -896,6 +896,12 @@ export class InputController {
 	setupEditorSubmitHandler(): void {
 		this.ctx.editor.onSubmit = async (text: string) => {
 			text = this.#compactDraftImages(text.trim());
+			const originalSubmission: OriginalSubmission = {
+				text,
+				images: this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined,
+				imageLinks:
+					this.ctx.editor.pendingImageLinks.length > 0 ? [...this.ctx.editor.pendingImageLinks] : undefined,
+			};
 			const hasPendingImages = this.ctx.editor.pendingImages.length > 0;
 			if ((!isSettingsInitialized() || settings.get("emojiAutocomplete")) && text) text = expandEmoticons(text);
 
@@ -903,7 +909,7 @@ export class InputController {
 			// Everything below (continue shortcuts, slash/bash/python, loop,
 			// compaction queueing) is main-session-only.
 			if (this.ctx.focusedAgentId) {
-				await this.#submitToFocusedSession(text, "steer");
+				await this.#submitToFocusedSession(text, "steer", originalSubmission);
 				return;
 			}
 
@@ -939,10 +945,10 @@ export class InputController {
 			}
 
 			const runner = this.ctx.session.extensionRunner;
-			let inputImages = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
-			let inputImageLinks =
-				this.ctx.editor.pendingImageLinks.length > 0 ? [...this.ctx.editor.pendingImageLinks] : undefined;
+			let inputImages = originalSubmission.images;
+			let inputImageLinks = originalSubmission.imageLinks;
 			let hasInputImages = (inputImages?.length ?? 0) > 0;
+			const submittedText = text;
 			const submittedImages = inputImages;
 
 			if (runner?.hasHandlers("input")) {
@@ -963,7 +969,18 @@ export class InputController {
 				}
 				hasInputImages = (inputImages?.length ?? 0) > 0;
 			}
-			const submittedMode = parseSlashCommand(text)?.name;
+			const transformedCommand = parseSlashCommand(text);
+			if (
+				text !== submittedText &&
+				transformedCommand?.name === "memory" &&
+				/^requirements(?:\s|$)/i.test(transformedCommand.args.trim())
+			) {
+				this.ctx.showError(
+					"Requirements operator commands must be typed directly; an extension transformed this input. Submit the intended command explicitly.",
+				);
+				return;
+			}
+			const submittedMode = transformedCommand?.name;
 			const draftDetached =
 				submittedMode === "plan" ||
 				submittedMode === "vibe" ||
@@ -988,6 +1005,7 @@ export class InputController {
 					historyText: text,
 					images: inputImages,
 					imageLinks: inputImageLinks,
+					originalSubmission,
 				});
 				return;
 			}
@@ -995,10 +1013,7 @@ export class InputController {
 			// Handle built-in slash commands
 			if (text) {
 				this.#recordSlashCommandUsage(text);
-				const input =
-					(inputImages?.length ?? 0) > 0 || (inputImageLinks?.length ?? 0) > 0
-						? { images: inputImages, imageLinks: inputImageLinks }
-						: undefined;
+				const input = { images: inputImages, imageLinks: inputImageLinks, originalSubmission };
 				const slashResult = await executeBuiltinSlashCommand(text, { ctx: this.ctx, input, draftDetached });
 				if (slashResult === true) {
 					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
@@ -1052,10 +1067,10 @@ export class InputController {
 				}
 				if (this.ctx.session.isCompacting) {
 					const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
-					this.ctx.queueCompactionMessage(text, "steer", images);
+					this.ctx.queueCompactionMessage(text, "steer", images, originalSubmission);
 					return;
 				}
-				if (await this.#invokeSkillCommand(text, "steer", inputImages, inputImageLinks)) {
+				if (await this.#invokeSkillCommand(text, "steer", inputImages, inputImageLinks, originalSubmission)) {
 					// The dispatch above ran the turn inline without resolving the input
 					// callback, so nothing re-enters `getUserInput` to arm the next
 					// iteration. Arm it here, now that the turn has settled.
@@ -1106,7 +1121,7 @@ export class InputController {
 			// Queue input during compaction
 			if (this.ctx.session.isCompacting) {
 				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
-				this.ctx.queueCompactionMessage(text, "steer", images);
+				this.ctx.queueCompactionMessage(text, "steer", images, originalSubmission);
 				// An inline `/loop` body queued here arms the loop only when it is
 				// an actual model prompt. Skill/bash/python bodies never reach this
 				// branch, but an extension-command body would otherwise be retained
@@ -1122,7 +1137,7 @@ export class InputController {
 			if (this.#isLocalExtensionCommand(text)) {
 				this.ctx.editor.clearDraft(text);
 				try {
-					await this.ctx.session.prompt(text, { images: inputImages });
+					await this.ctx.session.prompt(text, { images: inputImages, originalSubmission });
 				} catch (error) {
 					if (inputImages && inputImages.length > 0) {
 						this.ctx.editor.pendingImages = [...inputImages];
@@ -1153,7 +1168,7 @@ export class InputController {
 				try {
 					const forwarded = await this.ctx.withLocalSubmission(
 						text,
-						() => this.ctx.session.prompt(text, { streamingBehavior: "steer", images }),
+						() => this.ctx.session.prompt(text, { streamingBehavior: "steer", images, originalSubmission }),
 						{ imageCount: images?.length ?? 0 },
 					);
 					// An inline `/loop` body arms the loop only after dispatch
@@ -1206,6 +1221,7 @@ export class InputController {
 				// streaming-branch Enter (above) and keeps the message from throwing
 				// AgentBusyError on that race.
 				const submission = this.ctx.startPendingSubmission({
+					originalSubmission,
 					text,
 					images,
 					imageLinks: inputImageLinks,
@@ -1232,7 +1248,7 @@ export class InputController {
 				try {
 					const forwarded = await this.ctx.withLocalSubmission(
 						text,
-						() => this.ctx.session.prompt(text, { streamingBehavior: "steer", images }),
+						() => this.ctx.session.prompt(text, { streamingBehavior: "steer", images, originalSubmission }),
 						{
 							imageCount: images?.length ?? 0,
 						},
@@ -1291,7 +1307,11 @@ export class InputController {
 	}
 
 	/** Submit editor text to the focused subagent session (chat-only focus policy). */
-	async #submitToFocusedSession(text: string, streamingBehavior: "steer" | "followUp"): Promise<void> {
+	async #submitToFocusedSession(
+		text: string,
+		streamingBehavior: "steer" | "followUp",
+		originalSubmission?: OriginalSubmission,
+	): Promise<void> {
 		const target = this.ctx.viewSession;
 		const images = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
 		const imageLinks =
@@ -1312,9 +1332,13 @@ export class InputController {
 		this.ctx.editor.clearDraft(text);
 		try {
 			// prompt() handles idle (new turn) and streaming (queues per streamingBehavior).
-			await this.ctx.withLocalSubmission(text, () => target.prompt(text, { streamingBehavior, images }), {
-				imageCount: images?.length ?? 0,
-			});
+			await this.ctx.withLocalSubmission(
+				text,
+				() => target.prompt(text, { streamingBehavior, images, originalSubmission }),
+				{
+					imageCount: images?.length ?? 0,
+				},
+			);
 		} catch (error) {
 			// Hand the message back, mirroring the main submit error path: restore
 			// pasted images so the user can retry an image-only or text+image draft.
@@ -1501,6 +1525,7 @@ export class InputController {
 		streamingBehavior: "steer" | "followUp",
 		images?: ImageContent[],
 		imageLinks?: (string | undefined)[],
+		originalSubmission?: OriginalSubmission,
 	): Promise<boolean> {
 		if (!isKnownSkillCommand(this.ctx, text)) return false;
 		const draftImages = images && images.length > 0 ? [...images] : undefined;
@@ -1522,6 +1547,7 @@ export class InputController {
 			const dispatched = await invokeSkillCommandFromText(this.ctx, text, streamingBehavior, {
 				images: draftImages,
 				imageLinks: draftImageLinks,
+				originalSubmission,
 				optimistic: true,
 				propagateErrors: true,
 			});
@@ -1566,6 +1592,7 @@ export class InputController {
 			historyText?: string;
 			images?: ImageContent[];
 			imageLinks?: (string | undefined)[];
+			originalSubmission?: OriginalSubmission;
 		},
 	): Promise<void> {
 		const splitMessages = splitQueuedMessages(text);
@@ -1591,6 +1618,7 @@ export class InputController {
 					text: messages[index] ?? "",
 					mode: "followUp",
 					images: index === 0 ? images : undefined,
+					originalSubmission: options.originalSubmission,
 				});
 			}
 			this.ctx.updatePendingMessagesDisplay();
@@ -1612,6 +1640,7 @@ export class InputController {
 					text: first,
 					images,
 					imageLinks,
+					originalSubmission: options.originalSubmission,
 					streamingBehavior: "followUp",
 				});
 				this.ctx.onInputCallback(submission);
@@ -1627,9 +1656,12 @@ export class InputController {
 							await this.ctx.session.prompt(message, {
 								images: queuedImages,
 								streamingBehavior: "followUp",
+								originalSubmission: options.originalSubmission,
 							});
 						} else {
-							await this.ctx.session.followUp(message, queuedImages);
+							await this.ctx.session.followUp(message, queuedImages, {
+								originalSubmission: options.originalSubmission,
+							});
 						}
 					},
 					{ imageCount: queuedImages?.length ?? 0 },
@@ -1678,11 +1710,12 @@ export class InputController {
 		const images = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
 		const imageLinks =
 			images && this.ctx.editor.pendingImageLinks.length > 0 ? [...this.ctx.editor.pendingImageLinks] : undefined;
+		const originalSubmission: OriginalSubmission = { text, images, imageLinks };
 		if (!text && !images) return;
 
 		// Focused subagent session: follow-ups go to it; non-chat input is gated.
 		if (this.ctx.focusedAgentId) {
-			await this.#submitToFocusedSession(text, "followUp");
+			await this.#submitToFocusedSession(text, "followUp", originalSubmission);
 			return;
 		}
 
@@ -1693,12 +1726,12 @@ export class InputController {
 		// queued text into a user-attributed skill invocation before delivery.
 		if (this.ctx.session.isCompacting) {
 			const images = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
-			this.ctx.queueCompactionMessage(text, "followUp", images);
+			this.ctx.queueCompactionMessage(text, "followUp", images, originalSubmission);
 			return;
 		}
 
 		if (text) {
-			const input = (images?.length ?? 0) > 0 || (imageLinks?.length ?? 0) > 0 ? { images, imageLinks } : undefined;
+			const input = { images, imageLinks, originalSubmission };
 			const slashResult = await executeBuiltinSlashCommand(text, { ctx: this.ctx, input });
 			if (slashResult === true) {
 				if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
@@ -1715,7 +1748,7 @@ export class InputController {
 		// Skill commands invoke through the custom-message path regardless of
 		// which keybinding submitted them. Enter routes them as `steer`;
 		// Ctrl+Enter (this handler) routes them as `followUp`.
-		if (text && (await this.#invokeSkillCommand(text, "followUp", images, imageLinks))) {
+		if (text && (await this.#invokeSkillCommand(text, "followUp", images, imageLinks, originalSubmission))) {
 			return;
 		}
 
@@ -1738,7 +1771,7 @@ export class InputController {
 			try {
 				await this.ctx.withLocalSubmission(
 					text,
-					() => this.ctx.session.prompt(text, { streamingBehavior: "followUp", images }),
+					() => this.ctx.session.prompt(text, { streamingBehavior: "followUp", images, originalSubmission }),
 					{ imageCount: images?.length ?? 0 },
 				);
 			} catch (error) {
@@ -1752,7 +1785,7 @@ export class InputController {
 		// Not streaming — just submit normally
 		this.ctx.editor.clearDraft(text);
 		try {
-			await this.ctx.withLocalSubmission(text, () => this.ctx.session.prompt(text, { images }), {
+			await this.ctx.withLocalSubmission(text, () => this.ctx.session.prompt(text, { images, originalSubmission }), {
 				imageCount: images?.length ?? 0,
 			});
 		} catch (error) {
