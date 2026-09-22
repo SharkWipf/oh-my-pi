@@ -1048,7 +1048,7 @@ describe("CollabController", () => {
 			const transition = Promise.withResolvers<void>();
 			const flush = spyOn(CollabSocket.prototype, "flush").mockImplementation(() => drain.promise);
 			state.transition = transition.promise;
-			let stopping: Promise<string | boolean> | undefined;
+			let stopping: ReturnType<typeof executeBuiltinSlashCommand> | undefined;
 			try {
 				switchSession(state, "cancelled-session");
 				// The old room has left the command's public slot, but its goodbye is

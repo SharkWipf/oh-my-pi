@@ -203,7 +203,10 @@ describe("submitInteractiveInput", () => {
 
 		await submitInteractiveInput(mode, session, input);
 
-		expect(session.prompt).toHaveBeenCalledWith("loop prompt", { images: undefined, streamingBehavior: "followUp" });
+		expect(session.prompt).toHaveBeenCalledWith(
+			"loop prompt",
+			expect.objectContaining({ streamingBehavior: "followUp" }),
+		);
 		expect(mode.showError).not.toHaveBeenCalled();
 	});
 
@@ -218,10 +221,10 @@ describe("submitInteractiveInput", () => {
 
 		await submitInteractiveInput(mode, session, input);
 
-		expect(session.prompt).toHaveBeenCalledWith("interrupt now", {
-			images: undefined,
-			streamingBehavior: "steer",
-		});
+		expect(session.prompt).toHaveBeenCalledWith(
+			"interrupt now",
+			expect.objectContaining({ streamingBehavior: "steer" }),
+		);
 		expect(mode.showError).not.toHaveBeenCalled();
 	});
 
@@ -261,7 +264,10 @@ describe("submitInteractiveInput", () => {
 
 		await submitInteractiveInput(mode, session, input);
 
-		expect(session.prompt).toHaveBeenCalledWith("loop prompt", { images: undefined, streamingBehavior: "followUp" });
+		expect(session.prompt).toHaveBeenCalledWith(
+			"loop prompt",
+			expect.objectContaining({ streamingBehavior: "followUp" }),
+		);
 		expect(session.promptCustomMessage).not.toHaveBeenCalled();
 		expect(mode.finishPendingSubmission).toHaveBeenCalledWith(input);
 		expect(mode.showError).not.toHaveBeenCalled();
@@ -282,7 +288,10 @@ describe("submitInteractiveInput", () => {
 
 		await submitInteractiveInput(mode, session, input);
 
-		expect(session.prompt).toHaveBeenCalledWith("/void-cmd", { images: undefined, streamingBehavior: "followUp" });
+		expect(session.prompt).toHaveBeenCalledWith(
+			"/void-cmd",
+			expect.objectContaining({ streamingBehavior: "followUp" }),
+		);
 		expect(mode.pauseLoop).toHaveBeenCalledTimes(1);
 		expect(mode.showError).not.toHaveBeenCalled();
 	});

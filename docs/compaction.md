@@ -541,6 +541,24 @@ Post-navigation event exposing new/old leaf and optional summary entry.
 
 ## Settings and defaults
 
+### Keeping extra messages after compaction
+
+In `/settings` → Context, **Remember User Messages** enables extra user-message retention beside the summary and normal recent history. **Keep First Limit** selects the oldest eligible messages; **Keep Recent Limit** selects the newest. Filters can reject or request extra retention. **Protect Most-Recent Limit** keeps newest user messages intact even when filters or manual Never reject them, and bypasses long-message pruning. Turning Remember off disables these automatic selections, but manual Always (`/keep` or `/context`) still applies.
+
+**Rule / Manual Keep Limit** selects messages marked Keep by filters or Always by you, including assistant/tool exchanges. **Newest first** reuses the Keep Recent Limit setting; **Oldest first** reuses Keep First Limit; **No cap** selects all. Editing the linked budget changes that First/Recent window too. This is a separate, overlapping selection, not a remaining budget or a total-context cap: messages beyond it may still qualify through First/Recent or recent protection, and overlaps are kept once. Complete assistant/tool exchanges stay together, with each message charged to the count.
+
+For example, First = 50 messages, Recent = 250 messages and Newest first select the oldest 50 eligible users, newest 250 eligible users, and newest 250 Keep/Always messages, then merge overlaps. It does not guarantee 550 distinct messages or restrict all retained context to 250.
+
+Each limit offers Off (no selection), All (all eligible messages), a positive whole-message count, a nonnegative token budget, or 0–100% of the active model's maximum context size. Percentages are not based on current usage or free space. For the linked Rule / Manual Keep selection only, Off and All mean no cap; zero tokens or zero percent is a finite zero-token allowance, which can still admit zero-token messages until a positive-cost message is reached. Token budgets keep whole messages and stop before the first over-budget message. Long-message pruning applies only to automatic retention; text-trimming modes retain images, while `exclude` skips the whole message from extra retention. Manual Always and protected recent messages are exempt.
+
+The normal `/context` list keeps a legend visible. Its checkbox is the saved manual override: `[ ]` Never, `[-]` Auto (no override), or `[*]` Always. Separate markers show the current selection for compaction, not content already installed in model context: `A` means admission through Rule / Manual Keep Limit, from automatic filter Keep or manual Always; `H` means recent protection; `F#` and `R#` are First/Recent selection ranks, not visible row numbers. An Auto row can therefore show `A` without its checkbox changing. `i` Inspect names the requesting rule/manual choice from existing policy facts, and `?` explains precedence and classifier status markers. Short terminals prioritize the manual/selection distinction while retaining navigable message rows; classifier details remain in Help.
+
+The source manager is the default `/context` view; `/context usage` and `/context details` show diagnostics. Open `a` Actions for every command. Source rows cycle with Space/Enter; y or * assigns Always, n assigns Never, and - or Backspace clears the override to Auto. `f` opens independent role and saved-state visibility filters: Space toggles, y includes, and n excludes; even the Auto filter is an ordinary boolean checkbox. Filters do not change retention policy or reset/backfill scope.
+
+In native preservation settings, boolean rows use Space/y/n. Category and regex Action rows cycle with Space or assign Keep with y/*, Never with n, and Auto with -/Backspace; Enter opens the explanatory chooser. Search and nested text editors own their keys while active, so patterns and queries containing y, n, -, *, or spaces remain literal. `/` explicitly opens search. Nonboolean rows keep their native numeric, text, model, or submenu controls.
+
+### Defaults
+
 From `settings-schema.ts`:
 
 - `compaction.enabled` = `true`

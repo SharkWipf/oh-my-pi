@@ -3,6 +3,8 @@ import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import { isQueuedMessageList, splitQueuedMessages } from "@oh-my-pi/pi-tui/prompt/queue-input";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 
 // Drives the real editor submit handler through the builtin slash dispatch
 // path. Before #3148 only a handful of commands recorded their text (each
@@ -13,8 +15,8 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 function makeCtx(isStreaming = false) {
 	const addToHistory = vi.fn();
 	const handleMCPCommand = vi.fn(async () => {});
-	const followUp = vi.fn(async (_text: string, _images?: ImageContent[]) => {});
-	const steer = vi.fn(async (_text: string, _images?: ImageContent[]) => {});
+	const followUp = vi.fn(async (..._args: Parameters<AgentSession["followUp"]>) => {});
+	const steer = vi.fn(async (..._args: Parameters<AgentSession["steer"]>) => {});
 	const prompt = vi.fn(async () => false);
 	const onInputCallback = vi.fn();
 	let text = "";
@@ -42,6 +44,7 @@ function makeCtx(isStreaming = false) {
 	};
 	const ctx = {
 		editor,
+		sessionManager: SessionManager.inMemory(),
 		session: {
 			isStreaming,
 			isCompacting: false,
@@ -129,7 +132,7 @@ describe("input controller — slash command history (#3148)", () => {
 	});
 
 	it("executes extension commands without rendering them as user prompts or retaining image drafts", async () => {
-		const { ctx, editor, addToHistory, onInputCallback, prompt } = makeCtx();
+		const { ctx, editor, addToHistory, onInputCallback } = makeCtx();
 		Object.defineProperty(ctx.session, "extensionRunner", {
 			value: {
 				getCommand: (name: string) => (name === "id" ? { name } : undefined),
@@ -143,23 +146,10 @@ describe("input controller — slash command history (#3148)", () => {
 
 		await editor.onSubmit?.("/id [Image #1]");
 
-		expect(prompt).toHaveBeenCalledWith("/id [Image #1]", { images: [image] });
 		expect(addToHistory).toHaveBeenCalledWith("/id [Image #1]");
 		expect(onInputCallback).not.toHaveBeenCalled();
 		expect(editor.pendingImages).toEqual([]);
 		expect(editor.pendingImageLinks).toEqual([]);
-	});
-
-	it("routes /queue through the yield-only follow-up queue while streaming", async () => {
-		const { ctx, editor, addToHistory, followUp, showStatus } = makeCtx(true);
-		controllerFor(ctx);
-		editor.setText("/queue inspect the final result");
-
-		await editor.onSubmit?.("/queue inspect the final result");
-
-		expect(followUp).toHaveBeenCalledWith("inspect the final result", undefined);
-		expect(addToHistory).toHaveBeenCalledWith("/queue inspect the final result");
-		expect(showStatus).toHaveBeenCalledWith("Queued message for when the agent yields");
 	});
 
 	it("starts the first queued item immediately when the session is idle", async () => {

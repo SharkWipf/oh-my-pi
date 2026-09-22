@@ -51,8 +51,11 @@ import type { TodoItem, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 
 export type CompactionQueuedMessage = {
 	text: string;
+	originalSubmission?: OriginalSubmission;
 	mode: "steer" | "followUp";
 	images?: ImageContent[];
+	imageLinks?: (string | undefined)[];
+	compactionOverride?: "keep" | "exclude";
 };
 
 export type SubmittedUserInput = {
@@ -321,7 +324,14 @@ export interface InteractiveModeContext {
 	showNewVersionNotification(newVersion: string): void;
 	clearEditor(): void;
 	updatePendingMessagesDisplay(): void;
-	queueCompactionMessage(text: string, mode: "steer" | "followUp", images?: ImageContent[]): void;
+	queueCompactionMessage(
+		text: string,
+		mode: "steer" | "followUp",
+		images?: ImageContent[],
+		imageLinks?: (string | undefined)[],
+		compactionOverride?: "keep" | "exclude",
+		originalSubmission?: OriginalSubmission,
+	): Promise<void>;
 	flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void>;
 	flushPendingBashComponents(): void;
 	flushPendingModelSwitch(): Promise<void>;
@@ -332,6 +342,8 @@ export interface InteractiveModeContext {
 	syncRetryHintRow(): void;
 	startPendingSubmission(input: {
 		text: string;
+		originalSubmission?: OriginalSubmission;
+		compactionOverride?: "keep" | "exclude";
 		images?: ImageContent[];
 		imageLinks?: (string | undefined)[];
 		customType?: string;
@@ -422,7 +434,7 @@ export interface InteractiveModeContext {
 	handleChangelogCommand(showFull?: boolean): Promise<void>;
 	handleHotkeysCommand(): void;
 	handleToolsCommand(): void;
-	handleContextCommand(argument?: "usage" | "details"): void;
+	handleContextCommand(view?: "usage" | "details"): void;
 	handleDumpCommand(): Promise<void>;
 	handleAdvisorDumpCommand(isRaw?: boolean): void;
 	handleDebugTranscriptCommand(): Promise<void>;
@@ -534,14 +546,20 @@ export interface InteractiveModeContext {
 	toggleThinkingBlockVisibility(): void;
 	handlePlanModeCommand(
 		initialPrompt?: string,
-		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
+		input?: Pick<SubmittedUserInput, "images" | "imageLinks" | "originalSubmission">,
 	): Promise<boolean>;
 	handleVibeModeCommand(
 		initialPrompt?: string,
-		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
+		input?: Pick<SubmittedUserInput, "images" | "imageLinks" | "originalSubmission">,
 	): Promise<boolean>;
-	handleGoalModeCommand(rest?: string, input?: Pick<SubmittedUserInput, "images" | "imageLinks">): Promise<boolean>;
-	handleGuidedGoalCommand(rest?: string, input?: Pick<SubmittedUserInput, "images" | "imageLinks">): Promise<boolean>;
+	handleGoalModeCommand(
+		rest?: string,
+		input?: Pick<SubmittedUserInput, "images" | "imageLinks" | "originalSubmission">,
+	): Promise<boolean>;
+	handleGuidedGoalCommand(
+		rest?: string,
+		input?: Pick<SubmittedUserInput, "images" | "imageLinks" | "originalSubmission">,
+	): Promise<boolean>;
 	handleLoopCommand(args?: string): Promise<string | undefined>;
 	setLoopPrompt(prompt: string): void;
 	armLoopAutoSubmit(): void;

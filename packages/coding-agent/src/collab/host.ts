@@ -26,6 +26,7 @@ import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
 import { stripImagesFromMessage, USER_INTERRUPT_LABEL } from "../session/messages";
+import { parseCompactionOverridePrompt } from "../session/preserved-message-settings";
 import type { SessionEntry as StoredSessionEntry } from "../session/session-entries";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "../task/types";
 import { generateRoomKey, generateWriteToken, importRoomKey } from "./crypto";
@@ -670,7 +671,7 @@ export class CollabHost {
 				break;
 			case "prompt":
 				if (this.#rejectWhileStarting("prompting", fromPeer)) break;
-				this.#handlePrompt(frame.text, frame.images, fromPeer);
+				this.#handlePrompt(frame.text, frame.images, fromPeer, frame.imageLinks, frame.compactionOverride);
 				break;
 			case "abort":
 				if (this.#rejectWhileStarting("interrupting", fromPeer)) break;
@@ -872,10 +873,30 @@ export class CollabHost {
 		}
 	}
 
-	#handlePrompt(text: string, images: ImageContent[] | undefined, fromPeer: number): void {
+	#handlePrompt(
+		text: string,
+		images: ImageContent[] | undefined,
+		fromPeer: number,
+		imageLinks?: (string | undefined)[],
+		compactionOverride?: "keep" | "exclude",
+	): void {
 		const peer = this.#peers.get(fromPeer);
 		if (!peer?.canWrite) {
 			this.#rejectReadOnly("prompting", fromPeer);
+			return;
+		}
+		if (compactionOverride === undefined) {
+			const directive = parseCompactionOverridePrompt(text);
+			if (directive) {
+				text = directive.text;
+				compactionOverride = directive.compactionOverride;
+			}
+		}
+		if (compactionOverride && !text.trim()) {
+			this.#send(
+				{ t: "error", message: `Usage: /${compactionOverride === "keep" ? "keep" : "once"} <message>` },
+				fromPeer,
+			);
 			return;
 		}
 		const name = peer.name;
@@ -896,7 +917,13 @@ export class CollabHost {
 					details,
 					attribution: "user",
 				},
-				{ streamingBehavior: "steer", queueChipText: text },
+				{
+					streamingBehavior: "steer",
+					queueChipText: text,
+					imageLinks,
+					compactionOverride,
+					producer: { type: "human" },
+				},
 			)
 			.then(dispatched => {
 				if (dispatched === false) return this.#notifyPromptDropped(fromPeer);

@@ -48,7 +48,10 @@ export interface ParsedSlashCommand {
  * - `{ prompt: string }` — command handled, pass `prompt` through as the new
  *   user input (e.g. `/force <tool> <prompt>` keeps `<prompt>` as the message).
  */
-export type SlashCommandResult = undefined | { consumed: true; agentInvoked?: boolean } | { prompt: string };
+export type SlashCommandResult =
+	| undefined
+	| { consumed: true; agentInvoked?: boolean }
+	| { prompt: string; compactionOverride?: "keep" | "exclude" };
 
 /**
  * Runtime visible to slash-command handlers that run in text/ACP mode.
@@ -111,7 +114,7 @@ export interface SlashCommandRuntime {
 export interface TuiSlashCommandRuntime {
 	ctx: InteractiveModeContext;
 	/** Post-extension-hook attachments belonging to the submitted slash draft. */
-	input?: Pick<SubmittedUserInput, "images" | "imageLinks">;
+	input?: Pick<SubmittedUserInput, "images" | "imageLinks" | "originalSubmission">;
 	/** The editor snapshot was cleared before asynchronous input hooks ran. */
 	draftDetached?: boolean;
 }
@@ -167,4 +170,7 @@ export interface SlashCommandSpec extends BuiltinSlashCommand {
 }
 
 /** Result returned by `executeAcpBuiltinSlashCommand`. */
-export type AcpBuiltinSlashCommandResult = false | { consumed: true; agentInvoked?: boolean } | { prompt: string };
+export type AcpBuiltinSlashCommandResult =
+	| false
+	| { consumed: true; agentInvoked?: boolean }
+	| { prompt: string; compactionOverride?: "keep" | "exclude" };

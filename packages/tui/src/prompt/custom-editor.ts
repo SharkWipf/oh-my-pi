@@ -1,5 +1,5 @@
 import * as url from "node:url";
-import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { ImageContent, OriginalSubmission } from "@oh-my-pi/pi-ai";
 import { BracketedPasteHandler } from "../bracketed-paste";
 import { BRACKETED_PASTE_END, BRACKETED_PASTE_START } from "../stdin-buffer";
 import { Editor, type EditorTextDecorationContext, type EditorTheme } from "../components/editor";
@@ -18,6 +18,7 @@ import {
 	collapseImageMarkers,
 	collapseModelMentions,
 	collapseSkillTokens,
+	compactImageMarkers,
 	composerTokenRegex,
 	modelChipStyle,
 	renderPlaceholders,
@@ -402,6 +403,14 @@ export type ComposerChipDescriptor =
 export class CustomEditor extends Editor {
 	#spelling = new MacOSSpellingProvider();
 	imageLinks?: readonly (string | undefined)[];
+	/** Original submissions returned for editing; reused only while the rich draft is unchanged. */
+	restoredOriginalSubmissions?: readonly (OriginalSubmission & { originalSubmission?: OriginalSubmission })[];
+
+	restoreOriginalSubmission(
+		source: NonNullable<CustomEditor["restoredOriginalSubmissions"]>[number] | undefined,
+	): void {
+		this.restoredOriginalSubmissions = source?.originalSubmission ? [source] : undefined;
+	}
 
 	/** Draft images pasted into the composer, consumed on submit. Co-located with
 	 *  {@link imageLinks} so every piece of draft-image state lives on the editor. */
@@ -477,6 +486,7 @@ export class CustomEditor extends Editor {
 		this.setText("");
 		this.clearPasteState();
 		this.imageLinks = undefined;
+		this.restoredOriginalSubmissions = undefined;
 		this.pendingImages = [];
 		this.pendingImageLinks = [];
 		this.pendingTexts = [];
@@ -494,12 +504,14 @@ export class CustomEditor extends Editor {
 		const imageLinks = this.imageLinks;
 		const texts = [...this.pendingTexts];
 		const counter = this.#textAttachmentCounter;
+		const originals = this.restoredOriginalSubmissions;
 		this.rememberDraft(() => {
 			this.pendingImages = [...images];
 			this.pendingImageLinks = [...links];
 			this.imageLinks = imageLinks;
 			this.pendingTexts = [...texts];
 			this.#textAttachmentCounter = counter;
+			this.restoredOriginalSubmissions = originals;
 			if (this.pendingImages.length > 0 && this.pendingImageLinks.some(link => link === undefined)) {
 				void this.#materializeDraftLinks();
 			}
@@ -509,6 +521,7 @@ export class CustomEditor extends Editor {
 
 	override restoreHistoryState(restore?: () => void): void {
 		this.imageLinks = undefined;
+		this.restoredOriginalSubmissions = undefined;
 		this.pendingImages = [];
 		this.pendingImageLinks = [];
 		this.pendingTexts = [];
@@ -520,14 +533,45 @@ export class CustomEditor extends Editor {
 	 *  images, collapses stored `[Image #N, WxH]` markers back into compact chip tokens (so the
 	 *  chips band and atomic deletion return), and re-materializes `file://` links so the tokens
 	 *  are clickable again instead of degrading to dead text (esc-esc branch, `/tree`). */
-	setDraft(text: string, images?: readonly ImageContent[]): void {
+	setDraft(
+		text: string,
+		images?: readonly ImageContent[],
+		source?: NonNullable<CustomEditor["restoredOriginalSubmissions"]>[number],
+	): void {
 		this.clearPasteState();
 		this.pendingTexts = [];
 		this.#textAttachmentCounter = 0;
 		this.imageLinks = undefined;
 		this.pendingImages = images ? [...images] : [];
-		this.pendingImageLinks = images ? images.map(() => undefined) : [];
-		this.setCollapsedText(text);
+		this.pendingImageLinks = source?.imageLinks ? [...source.imageLinks] : images ? images.map(() => undefined) : [];
+		this.imageLinks = source?.imageLinks ? this.pendingImageLinks : undefined;
+		const unreferenced = compactImageMarkers(text, this.pendingImages.length);
+		let draftText = text;
+		if (unreferenced) {
+			const referenced = new Set(unreferenced.keep);
+			for (let index = 0; index < this.pendingImages.length; index++) {
+				if (referenced.has(index)) continue;
+				const kind = imageAttachmentSource(this.pendingImages[index])?.kind === "video" ? "Video" : "Image";
+				draftText += `${draftText ? "\n" : ""}[${kind} #${index + 1}]`;
+			}
+		}
+		this.setCollapsedText(draftText);
+		this.restoreOriginalSubmission(
+			source || unreferenced
+				? {
+						...source,
+						text: draftText,
+						images: this.pendingImages,
+						imageLinks: this.pendingImageLinks,
+						originalSubmission: source?.originalSubmission ?? {
+							text,
+							images: this.pendingImages,
+							imageLinks: this.pendingImageLinks,
+							compactionOverride: source?.compactionOverride,
+						},
+					}
+				: undefined,
+		);
 		void this.#materializeDraftLinks();
 	}
 
@@ -715,6 +759,8 @@ export class CustomEditor extends Editor {
 		this.pendingImageLinks = images.map((image, index) => imageAttachmentSource(image)?.path ?? links[index]);
 		this.imageLinks = this.pendingImageLinks;
 		this.#requestShimmerRepaint?.();
+		const source = this.restoredOriginalSubmissions?.[0];
+		if (source?.images === images) source.imageLinks = this.pendingImageLinks;
 	}
 
 	/** Treat image/paste references — compact chip tokens and bracketed markers alike — as

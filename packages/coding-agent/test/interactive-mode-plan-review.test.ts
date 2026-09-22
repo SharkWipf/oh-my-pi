@@ -1012,9 +1012,8 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("Failed to finalize approved plan"));
 		expect(promptSpy).not.toHaveBeenCalled();
 		expect(followUpSpy).toHaveBeenCalledTimes(1);
-		const [text, images, options] = followUpSpy.mock.calls[0] as unknown[];
+		const [text, , options] = followUpSpy.mock.calls[0]!;
 		expect(isPlanApprovedCall([text, options])).toBe(true);
-		expect(images).toBeUndefined();
 		expect(options).toMatchObject({ synthetic: true });
 		// `handlePlanApproval` aborts once on entry (unrelated to the finalize path);
 		// this test asserts the finalize path routes to followUp instead of prompt.
@@ -1052,9 +1051,8 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(promptSpy).toHaveBeenCalledTimes(1);
 		expect(isPlanApprovedCall(promptSpy.mock.calls[0] as unknown[])).toBe(true);
 		expect(followUpSpy).toHaveBeenCalledTimes(1);
-		const [text, images, options] = followUpSpy.mock.calls[0] as unknown[];
+		const [text, , options] = followUpSpy.mock.calls[0]!;
 		expect(isPlanApprovedCall([text, options])).toBe(true);
-		expect(images).toBeUndefined();
 		expect(options).toMatchObject({ synthetic: true });
 	});
 
@@ -1102,7 +1100,7 @@ describe("InteractiveMode plan review rendering", () => {
 		session.sessionManager.appendMessage({ role: "user", content: "seed two", timestamp: Date.now() - 1 });
 		vi.spyOn(session, "compact").mockImplementation(async () => {
 			// Operator types a follow-up while compaction is running.
-			mode.queueCompactionMessage("queued message", "followUp");
+			await mode.queueCompactionMessage("queued message", "followUp");
 			return undefined as never;
 		});
 		vi.spyOn(mode, "showPlanReview").mockImplementation(async (_plan, _title, options) => options[1]);

@@ -133,6 +133,8 @@
 
 - Long-session footer totals, credential pins, and retained-context reconstruction now reuse the session index instead of repeatedly scanning cold history. Recent sibling branches reuse a bounded control-state checkpoint; full transcript exports still include historical messages.
 - Transcript retirement and tail updates skip already committed blocks while preserving public middle-child replacements and externally assigned child arrays.
+- Added the native `/context` source manager with lazy source inspection, independent role/state filters, manual retention, classifier job controls, linked preservation settings, and a persistent selection legend. `/context usage` and `/context details` remain explicit diagnostic views.
+- Added direct keyboard controls for context filters and preservation settings: Space toggles booleans, y/n assign them, and category/regex actions support Space cycling and y/*/n/-/Backspace assignment without stealing keys from active text input.
 
 ### Fixed
 
@@ -168,6 +170,8 @@
 - Notes-backed local rollovers preserve selected originals without overriding extension-owned cuts, keep latest requests once in chronological replay, restore branch-local notebook state across resume and clear boundaries, and expose original input and provenance alongside delivered raw history.
 - Fixed cold manual compaction cancelling when native replay provenance was lazily attached during its context projection. Read-only binding now leaves source JSON unchanged; controlled source rewrites explicitly persist native correspondence before remapping it.
 - Retrying failed manual-preservation preflight now uses scoped persistence recovery on the next explicit capture or state-change request; the initial error remains visible and a concurrent writer's durable turn is never overwritten.
+- Restored original prompt text, image bytes, positional links, and `/keep` or `/once` disposition through editor recall, rewind, compaction queues, skills, and collaborative submission. Native ephemeral queues retain originals until actual delivery.
+- Kept preservation settings values visible in narrow terminals and explained the separate First/Recent, protected-recent, and Rule / Manual Keep selections.
 
 ## [18.2.8] - 2026-09-21
 
