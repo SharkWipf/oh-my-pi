@@ -2999,7 +2999,7 @@ async function writeArchiveLayout(
 	vanilla: ArchiveLayout,
 	headAnchor: number,
 	tailAnchor: number,
-	imageOffsets: readonly { offset: number; part: Extract<SourceLayoutPart, { kind: "original-image" | "gap" }> }[],
+	imageOffsets: readonly { offset: number; part: Exclude<SourceLayoutPart, { kind: "text" | "frame" }> }[],
 	unchanged: boolean,
 	byteBudget: number,
 ): Promise<{ frames: Frame[]; layout: SourceLayoutPart[]; overflow: boolean }> {
@@ -3099,6 +3099,84 @@ async function writeArchiveLayout(
 		await emitInterval(text.length);
 	}
 	return { frames, layout, overflow };
+}
+
+function archiveSummary(
+	archive: Archive,
+	high: Shape,
+	files: string,
+	includedPreviousSummary: boolean,
+	includeThinking: boolean,
+): string {
+	const { frames, text } = archive;
+	const cols = [...new Set(frames.map(frame => frame.cols))];
+	return !text && !frames.length && !files
+		? "No prior history."
+		: prompt.render(snapcompactSummaryPrompt, {
+				frameCount: frames.length,
+				multipleFrames: frames.length > 1,
+				docColumns: high.columns === 2,
+				cols: cols.length ? cols.join(" or ") : geometry(high).cols,
+				rows: geometry(high).rows,
+				sentenceInk: high.variant === "sent",
+				stopwordDimmed: high.stopwordDim === true,
+				lineRepeated: high.lineRepeat > 1,
+				truncatedChars: archive.truncatedChars,
+				includedPreviousSummary,
+				files: files || undefined,
+				includeThinking,
+			});
+}
+
+/** Repartition an already source-aware archive without selecting or serializing source again. */
+export async function reframe(
+	previous: CompactionResult,
+	options?: Pick<Options, "model" | "shape" | "frameSize" | "maxFrames" | "maxFrameDataBytes" | "includeThinking">,
+): Promise<CompactionResult> {
+	const archive = getPreservedArchive(previous.preserveData);
+	const prior = previous.preserveData?.sourceRepresentation as SourceRepresentation | undefined;
+	if (typeof archive?.text !== "string" || prior?.version !== 1) {
+		throw new Error("Reframing requires a source-aware archive with retained text");
+	}
+	const text = archive.text;
+	const base = options?.shape ?? resolveShapeForText(text, options?.model);
+	const high = options?.frameSize === undefined ? base : { ...base, frameSize: options.frameSize };
+	const maxFrames = Math.max(1, Math.min(options?.maxFrames ?? MAX_FRAMES_DEFAULT, MAX_FRAMES_DEFAULT));
+	// The ordinary planner supplies only the frame-count/shape profile here.
+	// Its retained ranges MUST NOT select from this already-committed source.
+	const profile = planArchive(text, high, denseCompanion(high, options?.model?.api), maxFrames);
+	const headEnd = profile.textHead.length;
+	const tailStart = text.length - profile.textTail.length;
+	const events: { offset: number; part: Exclude<SourceLayoutPart, { kind: "text" | "frame" }> }[] = [];
+	let offset = 0;
+	for (const part of prior.layout) {
+		if (part.kind === "text" || part.kind === "frame") offset = part.range.end;
+		else events.push({ offset, part });
+	}
+	const { frames, layout } = await writeArchiveLayout(
+		text,
+		profile,
+		headEnd,
+		tailStart,
+		events,
+		false,
+		options?.maxFrameDataBytes ?? FRAME_DATA_BYTES_BUDGET,
+	);
+	const rebuilt: Archive = { ...archive, frames, textHead: text.slice(0, headEnd), textTail: text.slice(tailStart) };
+	const representation: SourceRepresentation = { ...prior, layout };
+	const readFiles = previous.details?.readFiles ?? [];
+	const modifiedFiles = previous.details?.modifiedFiles ?? [];
+	const files = formatFileList(readFiles, modifiedFiles);
+	const textChars = layout.reduce(
+		(sum, part) => sum + (part.kind === "text" ? part.range.end - part.range.start : 0),
+		0,
+	);
+	return {
+		...previous,
+		summary: archiveSummary(rebuilt, high, files, !!prior.aggregate, options?.includeThinking !== false),
+		shortSummary: `Archived ${archive.totalChars.toLocaleString()} chars of history onto ${frames.length} snapcompact frames (+${textChars.toLocaleString()} chars as text)`,
+		preserveData: { ...previous.preserveData, [PRESERVE_KEY]: rebuilt, sourceRepresentation: representation },
+	};
 }
 
 /** Serialize once, retain ordinary ranges once, then place the chronological union. */
@@ -3668,24 +3746,13 @@ export async function compact<T = Message>(
 	};
 	const { readFiles, modifiedFiles } = computeFileLists(preparation.fileOps);
 	const files = formatFileList(readFiles, modifiedFiles, preparation.fileOps.read);
-	const cols = [...new Set(frames.map(frame => frame.cols))];
-	const summary =
-		!text && !frames.length && !files
-			? "No prior history."
-			: prompt.render(snapcompactSummaryPrompt, {
-					frameCount: frames.length,
-					multipleFrames: frames.length > 1,
-					docColumns: high.columns === 2,
-					cols: cols.length ? cols.join(" or ") : geometry(high).cols,
-					rows: geometry(high).rows,
-					sentenceInk: high.variant === "sent",
-					stopwordDimmed: high.stopwordDim === true,
-					lineRepeated: high.lineRepeat > 1,
-					truncatedChars: archive.truncatedChars,
-					includedPreviousSummary: includedPreviousSummary || !!representation.aggregate,
-					files: files || undefined,
-					includeThinking: options?.includeThinking !== false,
-				});
+	const summary = archiveSummary(
+		archive,
+		high,
+		files,
+		includedPreviousSummary || !!representation.aggregate,
+		options?.includeThinking !== false,
+	);
 	return {
 		summary,
 		shortSummary: `Archived ${totalChars.toLocaleString()} chars of history onto ${frames.length} snapcompact frames (+${textChars.toLocaleString()} chars as text)`,

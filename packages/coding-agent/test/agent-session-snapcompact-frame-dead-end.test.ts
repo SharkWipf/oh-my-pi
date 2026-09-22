@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { Agent, RESCUE_SHAKE_CONFIG } from "@oh-my-pi/pi-agent-core";
+import { Agent, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -10,6 +10,7 @@ import { loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensio
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { buildSessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import type { CompactionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
@@ -26,10 +27,8 @@ import * as snapcompact from "@oh-my-pi/snapcompact";
  * warning re-fires on every resume — the shape issue #4786's rescue does not
  * cover.
  *
- * The fix rebuilds the trailing archive locally via snapcompact.compact() at
- * a threshold-derived frame budget (planArchive truncates the oldest chars),
- * persists it through appendCompaction, and skips the misleading no-progress
- * warning.
+ * Rescue reframes the retained original-source archive locally. It must reduce
+ * actual emitted context and survive reload without duplicating originals.
  */
 describe("AgentSession snapcompact frame dead-end rescue", () => {
 	let tempDir: TempDir;
@@ -45,30 +44,9 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 	});
 
 	const NOTICE_SOURCE = "compaction";
-	const NO_PROGRESS_FRAGMENT = "Compaction freed too little context to make progress";
-	const IMAGE_REMEDY_FRAGMENT = "reduce archived image frames (";
 	const SEEDED_FRAME_COUNT = 16;
-
-	function makeFrames(count: number): Record<string, unknown>[] {
-		return Array.from({ length: count }, (_, i) => ({
-			data: btoa(`stale-frame-${i}`),
-			mimeType: "image/png",
-			cols: 4,
-			rows: 2,
-			chars: 8,
-		}));
-	}
-
-	function makeArchivePreserveData(frameCount: number): Record<string, unknown> {
-		return {
-			snapcompact: {
-				frames: makeFrames(frameCount),
-				text: `HEAD sentinel. ${"Archived history line. ".repeat(200)}TAIL sentinel.`,
-				totalChars: 4600,
-				truncatedChars: 0,
-			},
-		};
-	}
+	const ORIGINAL_TEXT = `HEAD sentinel. ${"Archived history line. ".repeat(250)}TAIL sentinel.`;
+	const tokenizer = new Tokenizer();
 
 	async function createSession(options: {
 		frameCount: number;
@@ -82,7 +60,37 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 		preArchiveKeptText?: string;
 	}): Promise<void> {
 		tempDir = TempDir.createSync("@pi-snapcompact-frame-dead-end-");
-		sessionManager = SessionManager.inMemory(tempDir.path());
+		sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+		const original = { role: "user" as const, content: ORIGINAL_TEXT, timestamp: 1 };
+		const originalId = sessionManager.appendMessage(original);
+		const userEntryId = sessionManager.appendMessage({ role: "user", content: "hello", timestamp: 2 });
+		const source = { entryId: originalId, order: 0, message: original };
+		// Small real frames model an archive written with an older geometry.
+		const archive = await snapcompact.compact(
+			{
+				firstKeptEntryId: userEntryId,
+				tokensBefore: 150_000,
+				fileOps: snapcompact.createFileOps(),
+				messagesToSummarize: [original],
+				turnPrefixMessages: [],
+				sourcesToSummarize: [source],
+				turnPrefixSources: [],
+				recentSources: [],
+				selectedSources: [source],
+			},
+			{
+				shape: {
+					font: "8x8",
+					cellWidth: 8,
+					cellHeight: 8,
+					lineRepeat: 1,
+					variant: "bw",
+					frameSize: 128,
+					frameTokenEstimate: 100,
+				},
+				maxFrames: options.hookArchiveFrames ?? options.frameCount,
+			},
+		);
 
 		let extensionRunner: ExtensionRunner | undefined;
 		if (options.hookArchiveFrames !== undefined) {
@@ -101,10 +109,10 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 					"\t\t\tcompaction: {",
 					'\t\t\t\tsummary: "compacted",',
 					"\t\t\t\tshortSummary: undefined,",
-					"\t\t\t\tfirstKeptEntryId: event.preparation.firstKeptEntryId,",
+					`\t\t\t\tfirstKeptEntryId: ${JSON.stringify(userEntryId)},`,
 					"\t\t\t\ttokensBefore: event.preparation.tokensBefore,",
 					"\t\t\t\tdetails: {},",
-					`\t\t\t\tpreserveData: ${JSON.stringify(makeArchivePreserveData(options.hookArchiveFrames))},`,
+					`\t\t\t\tpreserveData: ${JSON.stringify(archive.preserveData)},`,
 					"\t\t\t},",
 					"\t\t};",
 					"\t});",
@@ -137,11 +145,6 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 		// the archive) a trailing snapcompact CompactionEntry as the LAST branch
 		// entry — the real prepareCompaction must hit its
 		// last-entry-is-compaction guard organically.
-		const userEntryId = sessionManager.appendMessage({
-			role: "user",
-			content: "hello",
-			timestamp: Date.now(),
-		});
 		if (options.preArchiveKeptText !== undefined && options.hookArchiveFrames === undefined) {
 			// A kept-recent entry BETWEEN firstKeptEntryId and the archive:
 			// buildSessionContext re-emits it before the compaction entry, so
@@ -163,7 +166,7 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 				150_000,
 				{
 					details: { readFiles: ["src/a.ts"], modifiedFiles: ["src/b.ts"] },
-					preserveData: makeArchivePreserveData(options.frameCount),
+					preserveData: archive.preserveData,
 				},
 			);
 		}
@@ -173,7 +176,7 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 				model,
 				systemPrompt: ["Test"],
 				tools: [],
-				messages: [],
+				messages: sessionManager.buildSessionContext().messages,
 			},
 		});
 
@@ -196,6 +199,7 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 	afterEach(async () => {
 		try {
 			await session?.dispose();
+			await sessionManager?.close();
 		} finally {
 			await tempDir?.remove();
 			vi.restoreAllMocks();
@@ -251,169 +255,113 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 		await session.waitForIdle();
 	}
 
-	it("rebuilds a stale trailing snapcompact archive and skips the no-progress warning", async () => {
+	function compactions(): CompactionEntry[] {
+		return sessionManager.getBranch().filter((entry): entry is CompactionEntry => entry.type === "compaction");
+	}
+
+	function useLocalContextUsage(): void {
+		vi.spyOn(session, "getContextUsage").mockImplementation(() => {
+			const tokens = tokenizer.countMessages(session.agent.state.messages);
+			return { tokens, contextWindow: 200_000, percent: tokens / 2000 };
+		});
+	}
+
+	async function expectDurableRescue(): Promise<CompactionEntry> {
+		const entries = compactions();
+		expect(entries).toHaveLength(2);
+		const [stale, rebuilt] = entries;
+		const oldArchive = snapcompact.getPreservedArchive(stale.preserveData)!;
+		const archive = snapcompact.getPreservedArchive(rebuilt.preserveData)!;
+		expect(oldArchive.frames).toHaveLength(SEEDED_FRAME_COUNT);
+		expect(archive.frames.length).toBeLessThan(oldArchive.frames.length);
+		expect(archive.text).toBe(oldArchive.text);
+		expect(archive.text).toContain(ORIGINAL_TEXT);
+		const context = sessionManager.buildSessionContext().messages;
+		const previousContext = buildSessionContext(sessionManager.getEntries(), stale.id).messages;
+		expect(tokenizer.countMessages(context)).toBeLessThan(tokenizer.countMessages(previousContext));
+		// The archived original is not replayed a second time as a live user turn.
+		expect(context.filter(message => message.role === "user").map(message => message.content)).toEqual(["hello"]);
+		const original = sessionManager.getBranch().find(entry => entry.type === "message");
+		if (original?.type !== "message" || original.message.role !== "user")
+			throw new Error("Expected retained original");
+		expect(original.message.content).toBe(ORIGINAL_TEXT);
+		await sessionManager.ensureOnDisk();
+		await sessionManager.flush();
+		const reloaded = await SessionManager.open(sessionManager.getSessionFile()!);
+		try {
+			expect(
+				reloaded.buildSessionContext().messages.map(message => ({
+					role: message.role,
+					content: "content" in message ? message.content : undefined,
+				})),
+			).toEqual(
+				context.map(message => ({
+					role: message.role,
+					content: "content" in message ? message.content : undefined,
+				})),
+			);
+			expect(reloaded.getEntry(original.id)).toEqual(original);
+			for (const entry of entries) {
+				const persisted = reloaded.getEntry(entry.id);
+				if (persisted?.type !== "compaction") throw new Error("Expected durable archive");
+				expect(snapcompact.getPreservedArchive(persisted.preserveData)?.text).toBe(oldArchive.text);
+			}
+		} finally {
+			await reloaded.close();
+		}
+		return rebuilt;
+	}
+
+	it("reframes a stale archive into real headroom without losing or duplicating originals", async () => {
 		await createSession({ frameCount: SEEDED_FRAME_COUNT });
 		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
 		vi.spyOn(session.agent, "continue").mockResolvedValue();
-		// Over the band until the rescue rebuilds the archive, then well under —
-		// the rescue only counts as complete when it creates real headroom.
-		let rebuiltArchiveApplied = false;
-		vi.spyOn(session, "getContextUsage").mockImplementation(() =>
-			rebuiltArchiveApplied
-				? { tokens: 30000, contextWindow: 200000, percent: 15 }
-				: { tokens: 190000, contextWindow: 200000, percent: 95 },
-		);
-		const shakeSpy = vi
-			.spyOn(session, "shake")
-			.mockResolvedValue({ mode: "elide", toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 });
-		const compactSpy = vi.spyOn(snapcompact, "compact").mockImplementation(async () => {
-			rebuiltArchiveApplied = true;
-			return {
-				summary: "Rebuilt archive at a smaller frame budget.",
-				shortSummary: "rebuilt snapcompact archive",
-				firstKeptEntryId: (sessionManager.getBranch()[0] as { id: string }).id,
-				tokensBefore: 150_000,
-				details: { readFiles: ["src/a.ts"], modifiedFiles: ["src/b.ts"] },
-				preserveData: makeArchivePreserveData(4),
-			};
-		});
-
+		useLocalContextUsage();
+		const before = tokenizer.countMessages(session.agent.state.messages);
 		const notices = collectNotices();
-		const compactionEnds: { result?: compactionModule.CompactionResult; skipped?: boolean }[] = [];
+		const ends: { result?: compactionModule.CompactionResult; skipped?: boolean }[] = [];
 		session.subscribe(event => {
-			if (event.type === "auto_compaction_end") {
-				compactionEnds.push({ result: event.result, skipped: event.skipped });
-			}
+			if (event.type === "auto_compaction_end") ends.push({ result: event.result, skipped: event.skipped });
 		});
 		await triggerMaintenance();
-
-		expect(compactSpy).toHaveBeenCalledTimes(1);
-		// The rescue rewrote history: the pass must surface a real result (TUI
-		// rebuilds on it), not a skipped no-op.
-		expect(compactionEnds.length).toBe(1);
-		expect(compactionEnds[0].result).toBeTruthy();
-		expect(compactionEnds[0].skipped).toBeFalsy();
-		expect(compactionEnds[0].result?.preserveData).toBeUndefined();
-		const [, compactOptions] = compactSpy.mock.calls[0] as [unknown, { maxFrames?: number }];
-		expect(compactOptions.maxFrames).toBeDefined();
-		expect(compactOptions.maxFrames as number).toBeLessThan(SEEDED_FRAME_COUNT);
-
-		// The rebuilt entry supersedes the stale one in active context without
-		// destroying the stale archive needed by a later rewind.
-		const compactions = sessionManager
-			.getBranch()
-			.filter((entry): entry is CompactionEntry => entry.type === "compaction");
-		expect(compactions.length).toBe(2);
-		const [stale, rebuilt] = compactions;
-		expect(stale.summary).toBe("Archived history onto stale snapcompact frames.");
-		expect(snapcompact.getPreservedArchive(stale.preserveData)?.frames.length).toBe(SEEDED_FRAME_COUNT);
-		const rebuiltArchive = snapcompact.getPreservedArchive(rebuilt.preserveData);
-		expect(rebuiltArchive?.frames.length).toBe(4);
-
-		// The frame rescue fired first: the elide/image tiers (provable no-ops
-		// on a compaction tail) were skipped, and no misleading warning.
-		expect(shakeSpy).not.toHaveBeenCalled();
-		const noProgress = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes(NO_PROGRESS_FRAGMENT));
-		expect(noProgress.length).toBe(0);
-		const recovery = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes("dead-end recovery"));
-		expect(recovery.length).toBe(1);
-		expect(recovery[0].level).toBe("info");
+		const rebuilt = await expectDurableRescue();
+		const after = tokenizer.countMessages(session.agent.state.messages);
+		expect(after).toBeLessThan(before);
+		expect(after).toBeLessThan(48_000);
+		// Consumers must receive the installed result rather than a skipped pass.
+		expect(ends).toHaveLength(1);
+		expect(ends[0].result?.summary).toBe(rebuilt.summary);
+		expect(ends[0].skipped).not.toBe(true);
+		expect(notices.filter(n => n.source === NOTICE_SOURCE && n.level === "warning")).toEqual([]);
 	});
 
-	it("rebuilds the just-written archive when a completed pass dead-ends on its own frames", async () => {
-		// POST-PASS shape (observed live on 17.0.8): compaction ran and wrote a
-		// frame archive, but the archive itself is the over-budget cost — each
-		// pass re-renders the carried-forward text into MORE frames. The
-		// elide/image tiers can't shrink it; tier 0 of the dead-end rescue must.
+	it("reframes a just-written archive without losing its durable original source", async () => {
 		await createSession({ frameCount: 0, hookArchiveFrames: SEEDED_FRAME_COUNT });
 		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
 		vi.spyOn(session.agent, "continue").mockResolvedValue();
-		let rebuiltArchiveApplied = false;
-		vi.spyOn(session, "getContextUsage").mockImplementation(() =>
-			rebuiltArchiveApplied
-				? { tokens: 30000, contextWindow: 200000, percent: 15 }
-				: { tokens: 190000, contextWindow: 200000, percent: 95 },
-		);
-		const shakeSpy = vi
-			.spyOn(session, "shake")
-			.mockResolvedValue({ mode: "elide", toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 });
-		const compactSpy = vi.spyOn(snapcompact, "compact").mockImplementation(async () => {
-			rebuiltArchiveApplied = true;
-			return {
-				summary: "Rebuilt archive at a smaller frame budget.",
-				shortSummary: "rebuilt snapcompact archive",
-				firstKeptEntryId: (sessionManager.getBranch()[0] as { id: string }).id,
-				tokensBefore: 150_000,
-				details: { readFiles: [], modifiedFiles: [] },
-				preserveData: makeArchivePreserveData(4),
-			};
-		});
-
+		useLocalContextUsage();
 		const notices = collectNotices();
-		const emitSpy = vi.spyOn(ExtensionRunner.prototype, "emit");
 		await triggerMaintenance({ appendAssistant: true });
-
-		expect(compactSpy).toHaveBeenCalledTimes(1);
-		const compactions = sessionManager
-			.getBranch()
-			.filter((entry): entry is CompactionEntry => entry.type === "compaction");
-		expect(compactions.length).toBe(2);
-		const [hookWritten, rebuilt] = compactions;
-		expect(hookWritten.summary).toBe("compacted");
-		expect(snapcompact.getPreservedArchive(hookWritten.preserveData)?.frames.length).toBe(SEEDED_FRAME_COUNT);
-		expect(snapcompact.getPreservedArchive(rebuilt.preserveData)?.frames.length).toBe(4);
-		// Extensions must be notified about the entry that is now active, not
-		// only the hook-written one the rescue superseded.
-		const compactEvents = emitSpy.mock.calls
-			.map(c => c[0] as { type?: string; compactionEntry?: CompactionEntry })
-			.filter(e => e.type === "session_compact");
-		expect(compactEvents.some(e => e.compactionEntry?.id === rebuilt.id)).toBe(true);
-		expect(shakeSpy).not.toHaveBeenCalled();
-		const noProgress = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes(NO_PROGRESS_FRAGMENT));
-		expect(noProgress.length).toBe(0);
-		const recovery = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes("dead-end recovery"));
-		expect(recovery.length).toBe(1);
+		await expectDurableRescue();
+		expect(tokenizer.countMessages(session.agent.state.messages)).toBeLessThan(48_000);
+		expect(notices.filter(n => n.source === NOTICE_SOURCE && n.level === "warning")).toEqual([]);
 	});
 
-	it("still runs the elide tiers and warns when the frame rebuild frees too little", async () => {
-		// Codex review on #6362: the latest archive may not be the oversized
-		// tail (e.g. a huge kept tool result sits after it). A frame-count
-		// shrink alone must NOT count as success — the elide/image tiers still
-		// get their shot at the real tail, and the no-progress warning stays.
+	it("pauses continuation and marks the active archive when reframing still leaves usage over budget", async () => {
 		await createSession({ frameCount: SEEDED_FRAME_COUNT });
-		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
-		vi.spyOn(session.agent, "continue").mockResolvedValue();
-		// Usage stays over the band even after the rebuild.
+		const prompt = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		const continuation = vi.spyOn(session.agent, "continue").mockResolvedValue();
 		vi.spyOn(session, "getContextUsage").mockReturnValue({ tokens: 190000, contextWindow: 200000, percent: 95 });
-		const shakeSpy = vi
-			.spyOn(session, "shake")
-			.mockResolvedValue({ mode: "elide", toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 });
-		vi.spyOn(snapcompact, "compact").mockResolvedValue({
-			summary: "Rebuilt archive at a smaller frame budget.",
-			shortSummary: "rebuilt snapcompact archive",
-			firstKeptEntryId: (sessionManager.getBranch()[0] as { id: string }).id,
-			tokensBefore: 150_000,
-			details: { readFiles: [], modifiedFiles: [] },
-			preserveData: makeArchivePreserveData(4),
-		});
-
+		const before = tokenizer.countMessages(session.agent.state.messages);
 		const notices = collectNotices();
 		await triggerMaintenance();
-		expect(shakeSpy).toHaveBeenCalledWith("elide", expect.objectContaining({ config: RESCUE_SHAKE_CONFIG }));
-
-		const noProgress = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes(NO_PROGRESS_FRAGMENT));
-		expect(noProgress.length).toBe(1);
-		expect(noProgress[0].level).toBe("warning");
-		expect(noProgress[0].message).toContain(IMAGE_REMEDY_FRAGMENT);
-		// The dead-end badge must live on the ACTIVE (rebuilt) entry — the
-		// collapsed transcript only shows the latest compaction divider.
-		const compactions = sessionManager
-			.getBranch()
-			.filter((entry): entry is CompactionEntry => entry.type === "compaction");
-		const active = compactions.at(-1);
-		expect(snapcompact.getPreservedArchive(active?.preserveData)?.frames.length).toBe(4);
-		expect(active?.warning).toContain(NO_PROGRESS_FRAGMENT);
-		expect(active?.warning).toContain(IMAGE_REMEDY_FRAGMENT);
+		const active = await expectDurableRescue();
+		expect(tokenizer.countMessages(session.agent.state.messages)).toBeLessThan(before);
+		const warnings = notices.filter(n => n.source === NOTICE_SOURCE && n.level === "warning");
+		expect(warnings).toHaveLength(1);
+		expect(active.warning).toBe(warnings[0].message);
+		expect(prompt).not.toHaveBeenCalled();
+		expect(continuation).not.toHaveBeenCalled();
 	});
 
 	it("bails when the kept tail plus fixed context leaves no frame budget", async () => {
@@ -436,15 +384,17 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
 		vi.spyOn(session.agent, "continue").mockResolvedValue();
 		vi.spyOn(session, "getContextUsage").mockReturnValue({ tokens: 190000, contextWindow: 200000, percent: 95 });
-		const shakeSpy = vi
-			.spyOn(session, "shake")
-			.mockResolvedValue({ mode: "elide", toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 });
-		const compactSpy = vi.spyOn(snapcompact, "compact");
+		vi.spyOn(session, "shake").mockResolvedValue({
+			mode: "elide",
+			toolResultsDropped: 0,
+			blocksDropped: 0,
+			tokensFreed: 0,
+		});
 
 		await triggerMaintenance();
 
-		expect(compactSpy).not.toHaveBeenCalled();
-		expect(shakeSpy).toHaveBeenCalledWith("elide", expect.objectContaining({ config: RESCUE_SHAKE_CONFIG }));
+		expect(compactions()).toHaveLength(1);
+		expect(snapcompact.getPreservedArchive(compactions()[0].preserveData)?.frames).toHaveLength(SEEDED_FRAME_COUNT);
 		expect(sessionManager.getBranch().at(-1)?.type).not.toBe("compaction");
 	});
 
@@ -460,15 +410,17 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
 		vi.spyOn(session.agent, "continue").mockResolvedValue();
 		vi.spyOn(session, "getContextUsage").mockReturnValue({ tokens: 190000, contextWindow: 200000, percent: 95 });
-		const shakeSpy = vi
-			.spyOn(session, "shake")
-			.mockResolvedValue({ mode: "elide", toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 });
-		const compactSpy = vi.spyOn(snapcompact, "compact");
+		vi.spyOn(session, "shake").mockResolvedValue({
+			mode: "elide",
+			toolResultsDropped: 0,
+			blocksDropped: 0,
+			tokensFreed: 0,
+		});
 
 		await triggerMaintenance();
 
-		expect(compactSpy).not.toHaveBeenCalled();
-		expect(shakeSpy).toHaveBeenCalledWith("elide", expect.objectContaining({ config: RESCUE_SHAKE_CONFIG }));
+		expect(compactions()).toHaveLength(1);
+		expect(snapcompact.getPreservedArchive(compactions()[0].preserveData)?.frames).toHaveLength(SEEDED_FRAME_COUNT);
 	});
 
 	it("leaves an oversized non-archive tail to the elide tiers instead of rescuing the archive", async () => {
@@ -495,20 +447,21 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
 		vi.spyOn(session.agent, "continue").mockResolvedValue();
 		vi.spyOn(session, "getContextUsage").mockReturnValue({ tokens: 190000, contextWindow: 200000, percent: 95 });
-		const shakeSpy = vi
-			.spyOn(session, "shake")
-			.mockResolvedValue({ mode: "elide", toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 });
-		const compactSpy = vi.spyOn(snapcompact, "compact");
+		vi.spyOn(session, "shake").mockResolvedValue({
+			mode: "elide",
+			toolResultsDropped: 0,
+			blocksDropped: 0,
+			tokensFreed: 0,
+		});
 
 		const notices = collectNotices();
 		await triggerMaintenance();
 
-		// The archive was NOT rebuilt; the elide tier got its shot at the tail.
-		expect(compactSpy).not.toHaveBeenCalled();
-		expect(shakeSpy).toHaveBeenCalledWith("elide", expect.objectContaining({ config: RESCUE_SHAKE_CONFIG }));
+		expect(compactions()).toHaveLength(1);
+		expect(snapcompact.getPreservedArchive(compactions()[0].preserveData)?.frames).toHaveLength(SEEDED_FRAME_COUNT);
 		const lastEntry = sessionManager.getBranch().at(-1);
 		expect(lastEntry?.type).not.toBe("compaction");
-		const noProgress = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes(NO_PROGRESS_FRAGMENT));
+		const noProgress = notices.filter(n => n.source === NOTICE_SOURCE && n.level === "warning");
 		expect(noProgress.length).toBe(1);
 	});
 
@@ -523,17 +476,16 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 			blocksDropped: 0,
 			tokensFreed: 0,
 		});
-		const compactSpy = vi.spyOn(snapcompact, "compact");
 
 		const notices = collectNotices();
 		await triggerMaintenance();
 
-		expect(compactSpy).not.toHaveBeenCalled();
+		expect(compactions()).toHaveLength(1);
+		expect(snapcompact.getPreservedArchive(compactions()[0].preserveData)?.frames).toHaveLength(1);
 		expect(promptSpy).not.toHaveBeenCalled();
 		expect(continueSpy).not.toHaveBeenCalled();
-		const noProgress = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes(NO_PROGRESS_FRAGMENT));
-		expect(noProgress.length).toBe(1);
-		expect(noProgress[0].level).toBe("warning");
+		const noProgress = notices.filter(n => n.source === NOTICE_SOURCE && n.level === "warning");
+		expect(noProgress).toHaveLength(1);
 	});
 
 	it("skips the frame rescue when the active model is not vision-capable", async () => {
@@ -541,19 +493,21 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
 		vi.spyOn(session.agent, "continue").mockResolvedValue();
 		vi.spyOn(session, "getContextUsage").mockReturnValue({ tokens: 190000, contextWindow: 200000, percent: 95 });
-		const shakeSpy = vi
-			.spyOn(session, "shake")
-			.mockResolvedValue({ mode: "elide", toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 });
-		const compactSpy = vi.spyOn(snapcompact, "compact");
+		vi.spyOn(session, "shake").mockResolvedValue({
+			mode: "elide",
+			toolResultsDropped: 0,
+			blocksDropped: 0,
+			tokensFreed: 0,
+		});
 
 		const notices = collectNotices();
 		await triggerMaintenance();
 
 		// Text-only model: no frame re-render; existing tiers still run and the
 		// existing dead-end warning is preserved.
-		expect(compactSpy).not.toHaveBeenCalled();
-		expect(shakeSpy).toHaveBeenCalledWith("elide", expect.objectContaining({ config: RESCUE_SHAKE_CONFIG }));
-		const noProgress = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes(NO_PROGRESS_FRAGMENT));
+		expect(compactions()).toHaveLength(1);
+		expect(snapcompact.getPreservedArchive(compactions()[0].preserveData)?.frames).toHaveLength(SEEDED_FRAME_COUNT);
+		const noProgress = notices.filter(n => n.source === NOTICE_SOURCE && n.level === "warning");
 		expect(noProgress.length).toBe(1);
 	});
 });

@@ -2,9 +2,11 @@ import type {
 	ImageContent,
 	Message,
 	MessageAttribution,
+	OriginalSubmission,
 	ProviderPayload,
 	TextContent,
 	ToolResultMessage,
+	UserMessageProducer,
 } from "@oh-my-pi/pi-ai";
 import {
 	combineContentSourceOrigins,
@@ -27,6 +29,9 @@ const BRANCH_SUMMARY_TEMPLATE = branchSummaryContextPrompt;
 export interface CustomMessage<T = unknown> {
 	/** Host capture identity, retained through custom skill delivery and queued replay. */
 	sourceCaptureId?: string;
+	/** Original host input, retained through custom skill delivery and queued replay. */
+	originalSubmission?: OriginalSubmission;
+	producer?: UserMessageProducer;
 	imageLinks?: (string | undefined)[];
 	compactionOverride?: "keep" | "exclude";
 	role: "custom";

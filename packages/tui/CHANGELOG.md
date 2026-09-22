@@ -39,6 +39,7 @@
 - Fixed cursor placement when recalling prompts from history, keeping single-line entries at the end and preserving the appropriate position for multi-line entries.
 - Restored modified-key handling and terminal notifications over SSH sessions running inside tmux.
 - Fixed typed Enter occasionally being interpreted as a literal newline when terminal input events are batched.
+- Added a protected indexed child-removal seam and overridable child-array accessors so transcript containers can track public mutations without rescanning committed history.
 
 ## [18.2.8] - 2026-09-21
 

@@ -128,6 +128,11 @@
 - `find` (and `omp find`) accepts an `omp://` docs scope: `omp://` searches every embedded harness doc and `omp://<file>.md` searches one, reporting hits as canonical `omp://` URLs that `read` opens directly, including with `:start-end` selectors ([#12758](https://github.com/can1357/oh-my-pi/pull/12758) by [@H4vC](https://github.com/H4vC)).
 - `prompt()` and `sendUserMessage()` preserve optional host producer identity through immediate, steering, follow-up, and aside delivery without changing billing attribution.
 
+### Changed
+
+- Long-session footer totals, credential pins, and retained-context reconstruction now reuse the session index instead of repeatedly scanning cold history. Recent sibling branches reuse a bounded control-state checkpoint; full transcript exports still include historical messages.
+- Transcript retirement and tail updates skip already committed blocks while preserving public middle-child replacements and externally assigned child arrays.
+
 ### Fixed
 
 - Classifier requests use named boolean categories with complete response validation and unchanged packed v1 saved facts. Independent categories may overlap; their configured preservation actions remain host policy rather than model decisions.
@@ -136,6 +141,28 @@
 - Visible human custom-message journal sources retain manual protection and ordinary raw accounting without being promoted to automatic user classifications or windows.
 - Secret redaction now covers provider-visible computer actions and safety messages, tool explanations, Anthropic server-tool text, and native web-search text while preserving opaque replay data, identifiers, and original screenshots.
 - Inline snap images now expose transient, identity-bound frame estimates and prompt/tool ownership through provider normalization, separately from original images. Outgoing image mutations no longer corrupt cached frames for later requests.
+- Fixed cumulative usage remaining stale after supported in-place session-entry rewrites; derived controls and credential pins are refreshed without moving the selected branch.
+- Compaction now appends its frozen result once and awaits durable publication before installing live context or resetting provider state. Persistence recovery reuses the same journal entry; stale branch results cannot install, while valid same-branch suffixes survive.
+- Ordinary compaction and handoff no longer capture or render a separate requirements snapshot; pending live source IDs join the existing selection synchronously and invalidate the normal publication fence when their generation changes.
+- Human `/keep` and `/once` inputs retain exact typed text, original PNG/image bytes and links through queue dequeue, durable journal reload, branch/edit and tree-navigation restoration. Original metadata is accepted-delivery journal data, independent of V2 capture IDs and readiness.
+- Controlled representation rewrites retain accepted original text/images on the first mutation and atomically update current content, positional coverage and affected classifier records without moving physical archive offsets or erasing unrelated manual state.
+- Automatic pruning and shaking retain original deliveries still pending in requirements memory, independently of user-preservation eligibility, while continuing ordinary pruning of unrelated content.
+- Fixed ACP cancellation during initial durable source capture: cancelled input no longer resumes into a provider request or delivered user message when capture completes.
+- Fixed invalidated source preparation surfacing as an operational failure during automatic pruning after branch/session changes or disposal. Both pruning passes retain their initiating scope; genuine storage errors still propagate.
+- Manual source-state updates now publish complete metadata batches without serializing cold history; file-backed publication preserves the original journal bytes and stages the copy asynchronously.
+- Atomic session replacement now surfaces failed EPERM rollback instead of reporting success and preserves a newer target when the original operation loses its commit guard.
+- Ordinary ACP/RPC/SDK input and preservation menus no longer perform requirements capture, source-depot writes or requirements observation waits. Manual override publication retains its atomic journal and post-flush ownership checks.
+- Compacted selected originals now retain their own text/image coordinates through reload and repeated compaction, without replacing an ordinarily retained expanded submission.
+- Automatic image-drop rescue now skips protected source entries while still removing unselected images; explicit image removal and `/shake images` continue to override preservation.
+- Preserve source identity through cached message conversion, secret obfuscation, original-image encoding and URL changes, and inline rasterization. Current selected original images are not silently removed by the ordinary provider image clamp.
+- Fixed repeated snapcompact rejecting genuine reductions by counting the committed prior archive alongside fresh context in the before-state estimate; opaque reasoning remains excluded symmetrically.
+- Controlled source rewrites now publish source content together with remapped snap/native coverage and classifier validity across older and sibling compactions. Affected classifications are removed from every successful historical record; unsupported records retain their raw evidence without reactivating stale facts on resume. Manual overrides and unchanged artifact bytes are preserved.
+- Automatic snapcompact frame rescue now accounts for archive image costs and rejects larger text spills without discarding retained source; genuine reductions remain eligible even above the headroom band.
+- Legacy archive migration now reports unavailable original source boundaries and current original-image references before replacing installed history, instead of treating a fresh suffix as a complete original baseline.
+- Ordinary turns prepare preservation policy only after finding an eligible pruning victim. Full selected-user, complete non-user, and pending-live protection still applies before mutation, including source ownership checks and minimum-savings revalidation.
+- Notes-backed local rollovers preserve selected originals without overriding extension-owned cuts, keep latest requests once in chronological replay, restore branch-local notebook state across resume and clear boundaries, and expose original input and provenance alongside delivered raw history.
+- Fixed cold manual compaction cancelling when native replay provenance was lazily attached during its context projection. Read-only binding now leaves source JSON unchanged; controlled source rewrites explicitly persist native correspondence before remapping it.
+- Retrying failed manual-preservation preflight now uses scoped persistence recovery on the next explicit capture or state-change request; the initial error remains visible and a concurrent writer's durable turn is never overwritten.
 
 ## [18.2.8] - 2026-09-21
 

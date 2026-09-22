@@ -10,6 +10,7 @@ import type { CompactionMethod } from "@oh-my-pi/pi-coding-agent/session/compact
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionMaintenance, type SessionMaintenanceHost } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+
 import * as snapcompactModule from "@oh-my-pi/snapcompact";
 
 const CONTEXT_WINDOW = 100_000;
@@ -64,6 +65,7 @@ describe("async speculative compaction", () => {
 		options: {
 			asyncEnabled?: boolean;
 			methodOrder?: CompactionMethod[];
+			handoff?: () => Promise<void>;
 			experimental?: boolean;
 			recoveryTools?: boolean;
 			obfuscateTextForProvider?: (text: string | undefined) => string | undefined;
@@ -88,6 +90,7 @@ describe("async speculative compaction", () => {
 			"compaction.experimentalContextManagement": options.experimental ?? false,
 		});
 		maintenanceSettings = settings;
+
 		const host = {
 			agent,
 			sessionManager,
@@ -108,6 +111,10 @@ describe("async speculative compaction", () => {
 			hasExperimentalContextRolloverTools: () => options.recoveryTools ?? true,
 			queueExperimentalContextNotesReminder: () => events.push("notes-reminder"),
 			sessionId: () => sessionManager.getSessionId(),
+			compactionOwnership: () => sessionManager.getSessionId(),
+			compactionPolicyIdentity: () => JSON.stringify(settings.getGroup("compaction")),
+			compactionSourceSelection: async () => ({}),
+
 			messages: () => agent.state.messages,
 			baseSystemPrompt: () => ["Test"],
 			goalModeState: () => undefined,
@@ -143,7 +150,12 @@ describe("async speculative compaction", () => {
 			getContextUsage: () => undefined,
 			shake: async () => ({ modified: false, tokensRemoved: 0 }),
 			dropImages: async () => ({ removed: 0 }),
-			generateHandoffDocument: options.generateHandoffDocument ?? (async () => undefined),
+			generateHandoffDocument:
+				options.generateHandoffDocument ??
+				(async () => {
+					await options.handoff?.();
+					return undefined;
+				}),
 			removeAssistantMessageFromActiveContext: () => {},
 			dropPersistedAssistantTurn: async () => undefined,
 			runRecoveryCompactionWithRollback: async () => ({ deferredHandoff: false, continuationScheduled: false }),
@@ -188,6 +200,78 @@ describe("async speculative compaction", () => {
 
 	afterAll(() => {
 		authStorage.close();
+	});
+
+	it("uses the original input for method fallback while retaining the appended suffix", async () => {
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: [
+				...preparation.messagesToSummarize,
+				...preparation.turnPrefixMessages,
+				...preparation.recentMessages,
+			].some(message => JSON.stringify(message).includes("fallback suffix"))
+				? "changed snapshot"
+				: "original snapshot",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+		}));
+		maintenance = createMaintenance({
+			methodOrder: ["handoff", "soft"],
+			handoff: async () => {
+				sessionManager.appendMessage(userMessage("fallback suffix"));
+			},
+		});
+		await maintenance.runAutoCompaction("idle", false, true, false);
+		const entry = sessionManager.getEntries().findLast(value => value.type === "compaction");
+		expect(entry?.type === "compaction" ? entry.summary : undefined).toBe("original snapshot");
+		expect(agent.state.messages.at(-1)).toMatchObject({
+			role: "user",
+			content: [{ type: "text", text: "fallback suffix" }],
+		});
+	});
+
+	it("retains a suffix appended during a non-speculative native generator", async () => {
+		const bundled = getBundledModel("openai", "gpt-5")!;
+		model = { ...bundled, contextWindow: CONTEXT_WINDOW };
+		authStorage.keys.setRuntime("openai", "test-key");
+		maintenance = createMaintenance({ methodOrder: ["remote"] });
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
+			sessionManager.appendMessage(userMessage("native suffix"));
+			return {
+				summary: "native snapshot",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				preserveData: {
+					openaiRemoteCompaction: {
+						version: "v2",
+						provider: model.provider,
+						replacementHistory: [{ type: "compaction_summary", summary: "snapshot" }],
+						usedTokens: 1_000,
+					},
+				},
+			};
+		});
+		await maintenance.runAutoCompaction("idle", false, true, false);
+		expect(agent.state.messages.map(message => message.role)).toEqual(["compactionSummary", "user"]);
+		expect(agent.state.messages[1]).toMatchObject({ content: [{ type: "text", text: "native suffix" }] });
+	});
+
+	it("does not let a failed method start its fallback on a different branch", async () => {
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "must not compact branch B",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+		}));
+		maintenance = createMaintenance({
+			methodOrder: ["handoff", "soft"],
+			handoff: async () => {
+				sessionManager.branch(sessionManager.getEntries()[0].id);
+				appendSummarizableConversation();
+				throw new Error("branch A generator failed after navigation");
+			},
+		});
+		await maintenance.runAutoCompaction("idle", false, true, false);
+		expect(compactSpy).not.toHaveBeenCalled();
+		expect(sessionManager.getEntries().filter(entry => entry.type === "compaction")).toEqual([]);
 	});
 
 	it("reminds only near threshold once per experimental window, including the first and reset windows", async () => {

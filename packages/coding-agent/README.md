@@ -13,6 +13,14 @@ Package-specific references:
 - [MCP server/tool authoring](../../docs/mcp-server-tool-authoring.md)
 - [DEVELOPMENT](./DEVELOPMENT.md)
 
+## Long-session runtime reads
+
+`SessionManager` keeps cumulative usage in its existing journal index. `getUsageStatistics()` includes task and background model usage; `getAssistantUsageStatistics()` is the top-level assistant-only subtotal displayed by the footer. Branch navigation does not reset either cumulative total.
+
+Credential pins and retained-context controls use one active branch fold and one reset/compaction checkpoint. Recent sibling branches reuse that checkpoint; navigating to unrelated older history may still require a full ancestry walk. `buildSessionContext({ transcript: true })` intentionally retains full-history export semantics. No historical messages are evicted by these optimizations.
+
+After modifying persisted entries in place, call `await sessionManager.rewriteEntries()` before reading derived state. It rebuilds the index while preserving the selected leaf, including for in-memory sessions. Returned credential maps and usage snapshots may be changed without changing the index.
+
 ## Transient inline image accounting
 
 For a prepared provider `Context`, `getInlineFrameAccounting(image)` and `getInlineTextAccounting(textBlock)` from `@oh-my-pi/pi-coding-agent/session/snapcompact-inline` identify actual inline-rendered frames and their control notes. Owners are `system`, `context` (loaded context instructions), or `tool`; tool facts also carry `toolCallId`. Frame `estimatedTokens` comes from the rendering shape and is a local estimate, not exact provider billing. Ordinary original images have no inline fact.

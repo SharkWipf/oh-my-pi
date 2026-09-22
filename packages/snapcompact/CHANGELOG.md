@@ -16,7 +16,7 @@
 ### Fixed
 
 - Consolidated ordinary and source-aware compaction into one serializer/planner/writer path, retaining ordinary pagination with zero selection and monotone text overflow at the measured raster-byte limit.
-- Fixed repeated archive rescue retaining the entire old text despite a smaller target; ordinary retention now reduces reconstructed context before selected source intervals are restored.
+- Frame-budget rescue now preserves already-retained text and original images, spilling overflow instead of discarding source content.
 - Regenerated sparse truncation notices after overlap union and preserved full ordinary recent spans and durable whole-message omission counts.
 - Distinguished differing original-submission coordinates from delivered history, retaining both projections in the same chronological source position with independent text/image coverage.
 - Preserved complete admitted assistant/tool atoms, original-image interleaving, and historical source bytes across repeated compaction without duplicating provenance payloads.

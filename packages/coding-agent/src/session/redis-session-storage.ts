@@ -68,9 +68,19 @@ end
 return {1, string.len(ARGV[1])}`;
 
 const APPEND_SCRIPT = `-- OMP_APPEND
+local expected = ARGV[4]
+if expected ~= "" then
+	local actual = -1
+	if redis.call("EXISTS", KEYS[1]) == 1 then
+		actual = redis.call("STRLEN", KEYS[1])
+	end
+	if actual ~= tonumber(expected) then
+		return {0, actual}
+	end
+end
 local size = redis.call("APPEND", KEYS[1], ARGV[1])
 redis.call("HSET", KEYS[2], ARGV[2], ARGV[3])
-return size`;
+return {1, size}`;
 
 const UPDATE_TITLE_SCRIPT = `-- OMP_UPDATE_TITLE
 redis.call("HSET", KEYS[1], ARGV[1], ARGV[2])
@@ -214,8 +224,8 @@ class RedisSessionStorageBackend implements SessionStorageBackend {
 		throw new SessionWriteConflictError(path, expectedSize, actualSize);
 	}
 
-	async append(path: string, line: string, mtimeMs: number): Promise<void> {
-		await this.#client.send("EVAL", [
+	async append(path: string, line: string, mtimeMs: number, expectedSize?: number | null): Promise<void> {
+		const result = await this.#client.send("EVAL", [
 			APPEND_SCRIPT,
 			"2",
 			this.#fileKey(path),
@@ -223,7 +233,12 @@ class RedisSessionStorageBackend implements SessionStorageBackend {
 			line,
 			path,
 			String(mtimeMs),
+			expectedSize === undefined ? "" : String(expectedSize ?? -1),
 		]);
+		if (expectedSize === undefined || (Array.isArray(result) && Number(result[0]) === 1)) return;
+		const encodedActual = Array.isArray(result) ? Number(result[1]) : Number.NaN;
+		const actualSize = encodedActual === -1 ? null : Number.isFinite(encodedActual) ? encodedActual : null;
+		throw new SessionWriteConflictError(path, expectedSize, actualSize);
 	}
 
 	async updateSessionTitle(path: string, title: SessionTitleUpdate, mtimeMs: number): Promise<void> {

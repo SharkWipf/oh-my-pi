@@ -41,7 +41,8 @@ export interface SessionStorageBackend {
 		title?: SessionTitleUpdate,
 		expectedSize?: number | null,
 	): Promise<void>;
-	append(path: string, line: string, mtimeMs: number): Promise<void>;
+	/** Append atomically, rejecting stale expected UTF-8 lengths before changing content. */
+	append(path: string, line: string, mtimeMs: number, expectedSize?: number | null): Promise<void>;
 	updateSessionTitle(path: string, title: SessionTitleUpdate, mtimeMs: number): Promise<void>;
 	truncate(path: string, mtimeMs: number): Promise<void>;
 	remove(paths: string[]): Promise<void>;
@@ -346,6 +347,10 @@ export class IndexedSessionStorage implements SessionStorage {
 			this.#dropFrame(path, mtimeMs);
 		} catch (err) {
 			const error = toError(err);
+			if (error instanceof SessionWriteConflictError) {
+				this.#failFrame(path, mtimeMs);
+				throw error;
+			}
 			try {
 				if ((await this.#backend.readFull(path)) === content) {
 					this.#dropFrame(path, mtimeMs);
@@ -356,6 +361,49 @@ export class IndexedSessionStorage implements SessionStorage {
 			}
 			this.#failFrame(path, mtimeMs);
 			throw error;
+		}
+	}
+
+	async appendTextAtomic(path: string, suffix: string, options?: WriteTextAtomicOptions): Promise<void> {
+		const commitGuard = options?.commitGuard;
+		if (commitGuard && !commitGuard()) return;
+		await this.#awaitPath(path);
+		if (commitGuard && !commitGuard()) return;
+		this.#assertExpectedSize(path, options?.expectedSize);
+		const previous = this.#index.get(path);
+		if (!previous) throw enoent(path);
+		const size = previous.size + byteLength(suffix);
+		const mtimeMs = this.#allocMtimeMs();
+		this.#setIndex(path, size, mtimeMs);
+		this.#pushFrame(path, { mtimeMs, previous });
+		let superseded = false;
+		const pending = this.#enqueuePath(
+			path,
+			async () => {
+				if (commitGuard && !commitGuard()) {
+					superseded = true;
+					throw new Error("Atomic session append superseded before commit.");
+				}
+				try {
+					await this.#backend.append(path, suffix, mtimeMs, options?.expectedSize ?? previous.size);
+				} catch (error) {
+					if (error instanceof SessionWriteConflictError) throw error;
+					try {
+						const actual = await this.#backend.readFull(path);
+						if (actual !== null && byteLength(actual) === size && actual.endsWith(suffix)) return;
+					} catch {
+						// Readback is recovery only; ordinary suffixes never read history.
+					}
+					throw error;
+				}
+			},
+			{ trackDrain: false, abortOnPredecessorFailure: true },
+		);
+		this.#trackFrame(path, mtimeMs, pending);
+		try {
+			await pending;
+		} catch (error) {
+			if (!superseded) throw error;
 		}
 	}
 
