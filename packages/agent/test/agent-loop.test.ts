@@ -4024,16 +4024,19 @@ describe("agentLoop pre-model-call gate", () => {
 		};
 	}
 
-	it("gates the provider-bound context before opening the initial turn", async () => {
+	it("gates the prepared model and provider-bound context before opening the initial turn", async () => {
 		const context: AgentContext = { systemPrompt: ["stale"], messages: [], tools: [] };
 		const queued = createUserMessage("queued");
 		const providerMessage = createUserMessage("provider") as Message;
 		const mock = createMockModel({ responses: [{ content: ["should not be reached"] }] });
+		const preparedModel = { ...mock.model, contextWindow: 1 };
+		let currentModel = preparedModel;
 		let pending = true;
 		let gatedContext: Context | undefined;
 		const config: AgentLoopConfig = {
 			model: mock.model,
 			convertToLlm: identityConverter,
+			getModel: () => currentModel,
 			getSteeringMessages: async () => {
 				if (!pending) return [];
 				pending = false;
@@ -4042,14 +4045,17 @@ describe("agentLoop pre-model-call gate", () => {
 			syncContextBeforeModelCall: current => {
 				current.systemPrompt = ["fresh"];
 			},
-			transformProviderContext: providerContext => ({
-				...providerContext,
-				systemPrompt: [...(providerContext.systemPrompt ?? []), "provider"],
-				messages: [...providerContext.messages, providerMessage],
-			}),
-			beforeModelCall: current => {
+			transformProviderContext: providerContext => {
+				currentModel = mock.model;
+				return {
+					...providerContext,
+					systemPrompt: [...(providerContext.systemPrompt ?? []), "provider"],
+					messages: [...providerContext.messages, providerMessage],
+				};
+			},
+			beforeModelCall: (current, _signal, request) => {
 				gatedContext = current;
-				return { stop: true, reason: "over budget" };
+				return request.model === preparedModel ? { stop: true, reason: "over budget" } : undefined;
 			},
 		};
 
