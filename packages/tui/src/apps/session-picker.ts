@@ -10,7 +10,10 @@ import { runStandaloneTui } from "./standalone-picker";
 export interface SessionPickerHost<T extends SessionSelectorEntry = SessionSelectorEntry> {
 	loadPinnedIds?(): Promise<ReadonlySet<string>>;
 	loadHistoryMatcher?(): SessionHistoryMatcher;
-	deleteSession?(session: T): Promise<boolean>;
+	deleteSession?(
+		session: T,
+		choose: (title: string, options: string[]) => Promise<string | undefined>,
+	): Promise<boolean>;
 	loadAllSessions?(): Promise<T[]>;
 }
 

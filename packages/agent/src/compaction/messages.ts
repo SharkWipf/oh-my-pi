@@ -2,9 +2,11 @@ import type {
 	ImageContent,
 	Message,
 	MessageAttribution,
+	OriginalSubmission,
 	ProviderPayload,
 	TextContent,
 	ToolResultMessage,
+	UserMessageProducer,
 } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import type { AgentMessage } from "../types";
@@ -18,6 +20,9 @@ const HANDOFF_SUMMARY_TEMPLATE = handoffSummaryContextPrompt;
 const BRANCH_SUMMARY_TEMPLATE = branchSummaryContextPrompt;
 
 export interface CustomMessage<T = unknown> {
+	/** Original host input, retained through custom skill delivery and queued replay. */
+	originalSubmission?: OriginalSubmission;
+	producer?: UserMessageProducer;
 	/** Host capture identity, retained through custom skill delivery and queued replay. */
 	sourceCaptureId?: string;
 	imageLinks?: (string | undefined)[];

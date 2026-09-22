@@ -151,7 +151,9 @@ async function loadSessionPicker(): Promise<SessionPicker> {
 				const history = HistoryStorage.open();
 				return query => history.matchingSessionIds(query);
 			},
-			deleteSession: async session => {
+			deleteSession: async (session, choose) => {
+				const { confirmRequirementsJournalDeletion } = await import("./requirements/commands");
+				if (!(await confirmRequirementsJournalDeletion(settings, session.path, choose))) return false;
 				await storage.deleteSessionWithArtifacts(session.path);
 				return true;
 			},
@@ -432,13 +434,20 @@ export async function submitInteractiveInput(
 			await invokeSkillCommandFromText(skillHost, input.text, streamingBehavior, {
 				images: input.images,
 				imageLinks: input.imageLinks,
+				originalSubmission: input.originalSubmission,
 				optimistic: true,
 				propagateErrors: true,
 			});
 		} else {
 			let forwarded = false;
 			try {
-				forwarded = await session.prompt(input.text, { images: input.images, streamingBehavior });
+				forwarded = await session.prompt(input.text, {
+					images: input.images,
+					streamingBehavior,
+					originalSubmission: input.originalSubmission,
+					imageLinks: input.imageLinks,
+					compactionOverride: input.compactionOverride,
+				});
 			} catch (error: unknown) {
 				mode.showError(error instanceof Error ? error.message : "Unknown error occurred");
 			}
@@ -1227,6 +1236,7 @@ export async function buildSessionOptions(
 	activeSettings: Settings,
 ): Promise<CreateAgentSessionOptions> {
 	const options: CreateAgentSessionOptions = {
+		startWithoutMemory: parsed.startWithoutMemory,
 		cwd: parsed.cwd ?? getProjectDir(),
 		autoApprove: parsed.autoApprove ?? false,
 	};
@@ -2291,7 +2301,19 @@ export async function runRootCommand(
 				notifs.push({ kind: "error", message: modelRegistryError.message });
 			}
 
-			if (!isInteractive && !session.model) {
+			let requirementsCommandsOnly = false;
+			if (!session.model && !isInteractive && mode !== "rpc" && mode !== "rpc-ui") {
+				const { parseSlashCommand } = await import("./slash-commands/helpers/parse");
+				const inputs =
+					initialMessage === undefined ? initialArgs.messages : [initialMessage, ...initialArgs.messages];
+				requirementsCommandsOnly =
+					inputs.length > 0 &&
+					inputs.every(text => {
+						const command = parseSlashCommand(text);
+						return command?.name === "memory" && /^requirements(?:\s|$)/i.test(command.args.trim());
+					});
+			}
+			if (!isInteractive && !session.model && !requirementsCommandsOnly && mode !== "rpc" && mode !== "rpc-ui") {
 				if (modelRegistryError) {
 					process.stderr.write(`${chalk.red(modelRegistryError.message)}\n\n`);
 				}

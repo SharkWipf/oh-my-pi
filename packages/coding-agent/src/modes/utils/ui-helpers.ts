@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, OriginalSubmission, Usage } from "@oh-my-pi/pi-ai";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { type Component, Spacer, Text, TruncatedText } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -1107,9 +1107,19 @@ export class UiHelpers {
 		this.ctx.ui.requestComponentRender(this.ctx.pendingMessagesContainer);
 	}
 
-	queueCompactionMessage(text: string, mode: "steer" | "followUp", images?: ImageContent[]): void {
+	queueCompactionMessage(
+		text: string,
+		mode: "steer" | "followUp",
+		images?: ImageContent[],
+		originalSubmission?: OriginalSubmission,
+	): void {
 		const queuedImages = images && images.length > 0 ? images : undefined;
-		this.ctx.compactionQueuedMessages.push({ text, mode, images: queuedImages } as CompactionQueuedMessage);
+		this.ctx.compactionQueuedMessages.push({
+			text,
+			mode,
+			images: queuedImages,
+			originalSubmission,
+		} as CompactionQueuedMessage);
 		this.ctx.editor.clearDraft(text);
 		this.ctx.updatePendingMessagesDisplay();
 		this.ctx.showStatus(
@@ -1132,12 +1142,15 @@ export class UiHelpers {
 				propagateErrors: true,
 				queueOnly: true,
 				images: message.images,
+				originalSubmission: message.originalSubmission,
 			})
 		) {
 			return;
 		}
 		if (this.ctx.isKnownSlashCommand(message.text)) {
-			const forwarded = await this.ctx.session.prompt(message.text);
+			const forwarded = await this.ctx.session.prompt(message.text, {
+				originalSubmission: message.originalSubmission,
+			});
 			this.#parkLoopOnLocalConsume(message.text, forwarded);
 			return;
 		}
@@ -1145,8 +1158,12 @@ export class UiHelpers {
 			message.text,
 			() =>
 				message.mode === "followUp"
-					? this.ctx.session.followUp(message.text, message.images)
-					: this.ctx.session.steer(message.text, message.images),
+					? this.ctx.session.followUp(message.text, message.images, {
+							originalSubmission: message.originalSubmission,
+						})
+					: this.ctx.session.steer(message.text, message.images, {
+							originalSubmission: message.originalSubmission,
+						}),
 			{ imageCount: message.images?.length ?? 0 },
 		);
 	}
@@ -1208,7 +1225,9 @@ export class UiHelpers {
 			}
 			if (firstPromptIndex === -1) {
 				for (const message of queuedMessages) {
-					const forwarded = await this.ctx.session.prompt(message.text);
+					const forwarded = await this.ctx.session.prompt(message.text, {
+						originalSubmission: message.originalSubmission,
+					});
 					this.#parkLoopOnLocalConsume(message.text, forwarded);
 				}
 				return;
@@ -1237,6 +1256,7 @@ export class UiHelpers {
 					firstPrompt.text,
 					firstPrompt.mode,
 					firstPrompt.images,
+					firstPrompt.originalSubmission,
 				);
 				promptPromise = built
 					? this.ctx.session.promptCustomMessage(built.message, built.options).catch(restoreQueue)
@@ -1250,6 +1270,7 @@ export class UiHelpers {
 					.prompt(firstPrompt.text, {
 						streamingBehavior: firstPrompt.mode === "followUp" ? "followUp" : "steer",
 						images: firstPrompt.images,
+						originalSubmission: firstPrompt.originalSubmission,
 					})
 					.catch((error: unknown) => {
 						disposeFirstPrompt();

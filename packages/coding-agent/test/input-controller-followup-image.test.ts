@@ -226,10 +226,10 @@ describe("InputController.handleFollowUp image forwarding", () => {
 		editor.setText("/goal set Ship the release [Image #1]");
 		await controller.handleFollowUp();
 
-		expect(handleGoalModeCommand).toHaveBeenCalledWith("set Ship the release [Image #1]", {
-			images: [image],
-			imageLinks: ["local://draft.png"],
-		});
+		expect(handleGoalModeCommand).toHaveBeenCalledWith(
+			"set Ship the release [Image #1]",
+			expect.objectContaining({ images: [image], imageLinks: ["local://draft.png"] }),
+		);
 		expect(ctx.editor.pendingImages).toEqual([]);
 		expect(ctx.editor.pendingImageLinks).toEqual([]);
 	});

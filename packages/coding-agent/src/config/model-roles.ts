@@ -62,6 +62,21 @@ export const MODEL_ROLES: Record<ModelRole, ModelRoleInfo> = {
 	memory: { tag: "MEMORY", name: "Memory", color: "dim", section: "chat", accepts: acceptsTinyOrChat },
 	task: { tag: "TASK", name: "Subtask", color: "muted", section: "chat", accepts: acceptsChat },
 	advisor: { tag: "ADVISOR", name: "Advisor", color: "accent", section: "chat", accepts: acceptsChat },
+	requirements: { tag: "REQ", name: "Requirements Extractor", color: "accent", section: "chat", accepts: acceptsChat },
+	requirementsEvidence: {
+		tag: "EVIDENCE",
+		name: "Requirements Evidence",
+		color: "accent",
+		section: "chat",
+		accepts: acceptsChat,
+	},
+	requirementsSanity: {
+		tag: "SANITY",
+		name: "Requirements Sanity",
+		color: "accent",
+		section: "chat",
+		accepts: acceptsChat,
+	},
 	image: {
 		tag: "IMAGE",
 		name: "Image generation",

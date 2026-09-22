@@ -1,3 +1,4 @@
+import { confirmRequirementsJournalDeletion } from "../../requirements/commands";
 import { type AgentMessage, type AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model, PASTE_CODE_LOGIN_PROVIDERS as PasteCodeLoginProviders, UsageReport } from "@oh-my-pi/pi-ai";
@@ -1887,7 +1888,8 @@ export class SelectorController {
 				: undefined;
 			onSelectSession = session => this.handleResumeSession(session.path);
 			selectorOptions = {
-				onDelete: async (session: SessionInfo) => {
+				onDelete: async (session, choose) => {
+					if (!(await confirmRequirementsJournalDeletion(this.ctx.settings, session.path, choose))) return false;
 					if (!(await this.#detachActiveSessionBeforeDeletion(session.path))) {
 						return false;
 					}
@@ -2060,6 +2062,14 @@ export class SelectorController {
 			return;
 		}
 
+		if (
+			!(await confirmRequirementsJournalDeletion(this.ctx.settings, sessionFile, (title, options) =>
+				this.ctx.showHookSelector(title, options),
+			))
+		) {
+			this.ctx.showStatus("Delete cancelled");
+			return;
+		}
 		if (!(await this.#detachActiveSessionBeforeDeletion(sessionFile))) {
 			this.ctx.showStatus("Delete cancelled");
 			return;

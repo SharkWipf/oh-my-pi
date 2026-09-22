@@ -2,20 +2,12 @@ import type { AssistantMessage, ImageContent, MessageAttribution, TextContent } 
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import type { OutputMeta } from "../tools/output-meta";
-import type {
-	BranchSummaryMessage,
-	CompactionSummaryMessage,
-	CustomMessage,
-} from "@oh-my-pi/pi-agent-core/compaction/messages";
+import type { CustomMessage } from "@oh-my-pi/pi-agent-core/compaction/messages";
 
 declare module "@oh-my-pi/pi-agent-core" {
 	interface CustomAgentMessages {
 		bashExecution: BashExecutionMessage;
 		pythonExecution: PythonExecutionMessage;
-		custom: CustomMessage;
-		hookMessage: HookMessage;
-		branchSummary: BranchSummaryMessage;
-		compactionSummary: CompactionSummaryMessage;
 		fileMention: FileMentionMessage;
 	}
 }
@@ -24,6 +16,7 @@ export type {
 	BranchSummaryMessage,
 	CompactionSummaryMessage,
 	CustomMessage,
+	HookMessage,
 } from "@oh-my-pi/pi-agent-core/compaction/messages";
 
 export const SKILL_PROMPT_MESSAGE_TYPE = "skill-prompt";
@@ -229,20 +222,6 @@ export interface PythonExecutionMessage {
 	timestamp: number;
 	/** If true, this message is excluded from LLM context ($ prefix) */
 	excludeFromContext?: boolean;
-}
-
-/**
- * Legacy hook message type (pre-extensions). Kept for session migration.
- */
-export interface HookMessage<T = unknown> {
-	role: "hookMessage";
-	customType: string;
-	content: CustomMessageContent;
-	display: boolean;
-	details?: T;
-	/** Who initiated this message for billing/attribution semantics. */
-	attribution?: MessageAttribution;
-	timestamp: number;
 }
 
 /**

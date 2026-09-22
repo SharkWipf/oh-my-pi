@@ -1,6 +1,7 @@
 import { type ApiKey, type FetchImpl, withAuth } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 
+import { getMnemopiRuntimeOptions } from "../runtime-options";
 import { getDiagnostics } from "./diagnostics";
 import { EXTRACTION_SYSTEM_PROMPT, EXTRACTION_USER_TEMPLATE } from "./prompts";
 
@@ -65,6 +66,8 @@ export class ExtractionClient {
 	}
 
 	async chat(messages: readonly ChatMessage[], temperature = 0, maxTokens = 4096): Promise<string> {
+		const signal = getMnemopiRuntimeOptions()?.signal;
+		signal?.throwIfAborted();
 		const diag = getDiagnostics();
 		diag.recordAttempt("cloud");
 		const models = [this.model, ...FALLBACK_MODELS.filter(m => m !== this.model)];
@@ -79,9 +82,11 @@ export class ExtractionClient {
 				const result = await withAuth(this.apiKey, async key => {
 					let rateLimitError: unknown = null;
 					for (let attempt = 0; attempt < 3; attempt += 1) {
+						signal?.throwIfAborted();
 						try {
 							return await this.callApi(model, messages, temperature, maxTokens, key);
 						} catch (exc) {
+							signal?.throwIfAborted();
 							const flags = AIError.classify(exc);
 							if (AIError.is(flags, AIError.Flag.UsageLimit) || AIError.is(flags, AIError.Flag.Transient)) {
 								rateLimitError = exc;
@@ -98,6 +103,7 @@ export class ExtractionClient {
 				}
 				return result;
 			} catch (exc) {
+				signal?.throwIfAborted();
 				lastError = exc;
 			}
 			await sleep(FALLBACK_MODEL_DELAY_MS);
@@ -114,11 +120,13 @@ export class ExtractionClient {
 		maxTokens: number,
 		apiKey = "",
 	): Promise<string> {
+		const signal = getMnemopiRuntimeOptions()?.signal;
+		signal?.throwIfAborted();
 		const response = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
 			method: "POST",
 			headers: authHeader(apiKey),
 			body: JSON.stringify({ model, messages, temperature, max_tokens: maxTokens }),
-			signal: AbortSignal.timeout(60000),
+			signal: signal ? AbortSignal.any([AbortSignal.timeout(60000), signal]) : AbortSignal.timeout(60000),
 		});
 		if (!response.ok) {
 			throw new Error(`${response.status} ${response.statusText}`.trim());

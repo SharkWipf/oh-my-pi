@@ -12,7 +12,7 @@ import {
 	ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, ImageContent, Model, Usage, UsageReport } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, Model, OriginalSubmission, Usage, UsageReport } from "@oh-my-pi/pi-ai";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { execReplace } from "@oh-my-pi/pi-natives";
 import type {
@@ -1807,6 +1807,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			if (!$env.PI_NO_TITLE && !this.sessionManager.getSessionName()) {
 				this.#inputController.prewarmTinyTitleModel();
 			}
+			// Cold source coverage belongs after the first frame, never SDK/session construction.
+			void this.session.requirements.observeCommittedSources().catch(error => {
+				this.showError(`Requirements source initialization failed: ${error}`);
+			});
 		});
 
 		// Host the session before extension hooks run: a dialog raised from a
@@ -2631,6 +2635,8 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	startPendingSubmission(
 		input: {
+			originalSubmission?: OriginalSubmission;
+			compactionOverride?: "keep" | "exclude";
 			text: string;
 			images?: ImageContent[];
 			imageLinks?: (string | undefined)[];
@@ -2641,6 +2647,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		options?: { preserveDraft?: boolean },
 	): SubmittedUserInput {
 		const submission: SubmittedUserInput = {
+			originalSubmission: input.originalSubmission,
+			compactionOverride: input.compactionOverride,
 			text: input.text,
 			images: input.images,
 			imageLinks: input.imageLinks,
@@ -4794,7 +4802,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async handlePlanModeCommand(
 		initialPrompt?: string,
-		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
+		input?: Pick<SubmittedUserInput, "images" | "imageLinks" | "originalSubmission">,
 	): Promise<boolean> {
 		if (this.goalModeEnabled || this.goalModePaused) {
 			this.showWarning("Exit goal mode first.");
@@ -4838,6 +4846,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (isKnownSkillCommand(this, initialPrompt)) {
 			await invokeSkillCommandFromText(this, initialPrompt, "steer", {
 				images: input?.images,
+				originalSubmission: input?.originalSubmission,
 				propagateErrors: true,
 			});
 			return true;
@@ -4850,6 +4859,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.session.prompt(initialPrompt, {
 						streamingBehavior: "steer",
 						images,
+						originalSubmission: input?.originalSubmission,
 					}),
 				{ imageCount: images?.length ?? 0 },
 			);
@@ -4871,7 +4881,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	 */
 	async handleVibeModeCommand(
 		initialPrompt?: string,
-		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
+		input?: Pick<SubmittedUserInput, "images" | "imageLinks" | "originalSubmission">,
 	): Promise<boolean> {
 		if (this.vibeModeEnabled) {
 			await this.#exitVibeMode();
@@ -4900,6 +4910,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					await this.#waitForInFlightSubmission(true);
 					await invokeSkillCommandFromText(this, initialPrompt, "steer", {
 						images: input?.images,
+						originalSubmission: input?.originalSubmission,
 						propagateErrors: true,
 					});
 				} finally {
@@ -4922,6 +4933,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.session.prompt(initialPrompt, {
 						streamingBehavior: "steer",
 						images,
+						originalSubmission: input?.originalSubmission,
 					}),
 				{ imageCount: images?.length ?? 0 },
 			);
@@ -4953,6 +4965,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.session.prompt(initialPrompt, {
 					streamingBehavior: "steer",
 					images,
+					originalSubmission: input?.originalSubmission,
 				}),
 			{ imageCount: images?.length ?? 0 },
 		);
@@ -5106,7 +5119,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async handleGoalModeCommand(
 		rest?: string,
-		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
+		input?: Pick<SubmittedUserInput, "images" | "imageLinks" | "originalSubmission">,
 	): Promise<boolean> {
 		if (this.planModeEnabled || this.planModePaused) {
 			this.#warnPlanModeBlocks();
@@ -5150,7 +5163,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 	async handleGuidedGoalCommand(
 		rest?: string,
-		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
+		input?: Pick<SubmittedUserInput, "images" | "imageLinks" | "originalSubmission">,
 	): Promise<boolean> {
 		try {
 			if (this.planModeEnabled || this.planModePaused) {
@@ -5212,7 +5225,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	async #dispatchGoalSubcommand(
 		sub: GoalSubcommand,
 		rest: string,
-		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
+		input?: Pick<SubmittedUserInput, "images" | "imageLinks" | "originalSubmission">,
 	): Promise<boolean> {
 		switch (sub) {
 			case "set":
@@ -5343,7 +5356,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async #startGoalFromObjective(
 		objective: string,
-		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
+		input?: Pick<SubmittedUserInput, "images" | "imageLinks" | "originalSubmission">,
 	): Promise<boolean> {
 		await this.#enterGoalMode({ objective, silent: true });
 		this.#resetGoalContinuationSuppression();
@@ -5355,6 +5368,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.session.prompt(objective, {
 						streamingBehavior: "steer",
 						images,
+						originalSubmission: input?.originalSubmission,
 					}),
 				{ imageCount: images?.length ?? 0 },
 			);
@@ -5369,7 +5383,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async #replaceGoalFromObjective(
 		objective: string,
-		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
+		input?: Pick<SubmittedUserInput, "images" | "imageLinks" | "originalSubmission">,
 	): Promise<boolean> {
 		const state = await this.session.goalRuntime.replaceGoal({ objective });
 		this.session.setGoalModeState(state);
@@ -5386,6 +5400,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.session.prompt(objective, {
 						streamingBehavior: "steer",
 						images,
+						originalSubmission: input?.originalSubmission,
 					}),
 				{ imageCount: images?.length ?? 0 },
 			);
@@ -5400,7 +5415,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async #handleGoalSetSubcommand(
 		rest: string,
-		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
+		input?: Pick<SubmittedUserInput, "images" | "imageLinks" | "originalSubmission">,
 	): Promise<boolean> {
 		if (!this.goalModeEnabled && this.#getPausedGoalState()) {
 			this.showWarning("Resume the current goal first, or drop it before setting a new objective.");
@@ -6390,8 +6405,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#uiHelpers.updatePendingMessagesDisplay();
 	}
 
-	queueCompactionMessage(text: string, mode: "steer" | "followUp", images?: ImageContent[]): void {
-		this.#uiHelpers.queueCompactionMessage(text, mode, images);
+	queueCompactionMessage(
+		text: string,
+		mode: "steer" | "followUp",
+		images?: ImageContent[],
+		originalSubmission?: OriginalSubmission,
+	): void {
+		this.#uiHelpers.queueCompactionMessage(text, mode, images, originalSubmission);
 	}
 
 	flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void> {
