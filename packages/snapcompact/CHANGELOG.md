@@ -7,12 +7,29 @@
 ### Fixed
 
 - Fixed summaries incorrectly advertising a `¶think:` scope when thinking content is excluded from the archive.
+### Added
+
+- Added source-ID/raw-block/normalized coverage and ordered emission descriptors for chronological additive compaction, including original-image references and sparse source intervals.
+- Added fixed-window chronological raster prefixes with lossless text overflow at the first frame-count or actual PNG byte nonfit, plus actual emitted-block location callbacks.
+- Exposed the actual emitted block to archive emission callbacks, including raster-to-text fallback, for identity-based local accounting.
+
+### Fixed
+
+- Consolidated ordinary and source-aware compaction into one serializer/planner/writer path, retaining ordinary pagination with zero selection and monotone text overflow at the measured raster-byte limit.
+- Fixed repeated archive rescue retaining the entire old text despite a smaller target; ordinary retention now reduces reconstructed context before selected source intervals are restored.
+- Regenerated sparse truncation notices after overlap union and preserved full ordinary recent spans and durable whole-message omission counts.
+- Distinguished differing original-submission coordinates from delivered history, retaining both projections in the same chronological source position with independent text/image coverage.
+- Preserved complete admitted assistant/tool atoms, original-image interleaving, and historical source bytes across repeated compaction without duplicating provenance payloads.
+- Kept document wrapping source offsets instead of reconstructing source from wrapped text; corrected the one-frame document archive selection.
+- Distinguished positive whole-message omissions from partial pruning and raster-to-text continuation.
+- Preserved partial normalized-unit coordinates at text/raster boundaries so adding or reloading a selected source completes an expanded glyph exactly once.
+- Recorded original-image coverage independently from neighboring text, preserving admitted image ownership and treating previously committed images as ordinary input on the next compaction.
 
 ## [18.2.1] - 2026-09-15
 
 ### Changed
 
-- `historyBlocks()` now resolves persisted frame payloads lazily, keeps the newest frames within a byte budget, and drops unresolved blob references instead of sending them to providers ([#10227](https://github.com/can1357/oh-my-pi/pull/10227) by [@lemonleks](https://github.com/lemonleks)).
+- `historyBlocks()` resolves persisted frame payloads lazily. Legacy/unmapped archives keep the newest fitting frames with in-place gap notices; mapped archives retain the oldest contiguous raster prefix and spill missing or over-budget frames to chronological source text without charging original images to the raster budget ([#10227](https://github.com/can1357/oh-my-pi/pull/10227) by [@lemonleks](https://github.com/lemonleks)).
 
 ## [18.1.18] - 2026-09-11
 
