@@ -98,12 +98,35 @@ export interface UsageResetCreditDetail {
 	blocking?: string[];
 	/** Used fractions for covered limits, keyed by normalized limit id. */
 	usedFractions?: Record<string, number>;
+	/** Provider reset family, e.g. `codex_rate_limits`. */
+	resetType?: string;
 	/** ISO timestamp when the credit was granted. */
 	grantedAt?: string;
 	/** ISO timestamp when the credit expires and can no longer be redeemed. */
 	expiresAt?: string;
 	/** Backend status, e.g. `available`, `redeemed`. */
 	status?: string;
+	/** ISO timestamp when redemption started; null when explicitly not started. */
+	redeemStartedAt?: string | null;
+	/** ISO timestamp when redeemed; null when explicitly not redeemed. */
+	redeemedAt?: string | null;
+}
+
+/** Original provider reset-history event; kinds are preserved without inferring credit identity. */
+export interface UsageResetHistoryEvent {
+	id: string;
+	kind: string;
+	occurredAt: string;
+}
+
+/** One paginated history observation; partial captures must not be treated as complete history. */
+export interface UsageResetHistory {
+	history: UsageResetHistoryEvent[];
+	historyFetchedAt: number;
+	historyComplete: boolean;
+	historyWindowStart?: string;
+	historyAsOf?: string;
+	historyError?: string;
 }
 
 /** Reset credit carrying the provider id required by its consume endpoint. */
@@ -118,7 +141,7 @@ export interface UsageResetCredit extends UsageResetCreditDetail {
  * later (OpenAI Codex and Claude Cedar resets). The redeem itself is a
  * separate, provider-specific action; this is the read-only state for display.
  */
-export interface UsageResetCredits {
+export interface UsageResetCredits extends Partial<UsageResetHistory> {
 	/** Number of banked resets, including grants that are not currently usable. */
 	availableCount: number;
 	/** Number of resets the provider says can be redeemed now. */
@@ -131,8 +154,12 @@ export interface UsageResetCredits {
 	reason?: string;
 	/** ISO timestamp until which redemption is cooling down. */
 	cooldownUntil?: string;
-	/** Individual credit details (expiry dates, coverage, etc.) when exposed. */
+	/** All observed credit statuses. Empty on successful empty listing; absent when unavailable. */
 	credits?: UsageResetCreditDetail[];
+	/** Epoch milliseconds of the successful detail observation, preserved with cached reports. */
+	creditsFetchedAt?: number;
+	/** Detail-list failure, distinct from a successful empty list. */
+	creditsError?: string;
 }
 
 /** Aggregated usage report for a provider. */

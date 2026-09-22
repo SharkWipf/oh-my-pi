@@ -695,6 +695,8 @@ export type ListResetCreditsOptions = {
 	sessionId?: string;
 	baseUrlResolver?: (provider: string) => string | undefined;
 	signal?: AbortSignal;
+	/** Fetch every page of Codex reset-event history alongside the live credits. */
+	includeHistory?: boolean;
 };
 
 /** Select a saved reset credit and optional provider endpoint. */

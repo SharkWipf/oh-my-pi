@@ -59,6 +59,7 @@ export interface UsageResetSummary {
 export function summarizeUsageResetCredits(
 	reset: UsageResetCredits | undefined,
 	nowMs = Date.now(),
+	provider?: string,
 ): UsageResetSummary | undefined {
 	if (!reset) return undefined;
 	const bankedCount = Math.max(0, Math.trunc(reset.availableCount));
@@ -68,6 +69,7 @@ export function summarizeUsageResetCredits(
 	let latestExpired: string | undefined;
 	let latestExpiredMs = Number.NEGATIVE_INFINITY;
 	for (const credit of reset.credits ?? []) {
+		if (provider === "openai-codex" && (credit.status ?? "available") !== "available") continue;
 		if (!credit.expiresAt || credit.remainingCount === 0 || credit.status === "redeemed") continue;
 		const expiryMs = Date.parse(credit.expiresAt);
 		if (!Number.isFinite(expiryMs)) continue;

@@ -2113,7 +2113,7 @@ export function renderUsageReports(
 
 		const resetAccountLines: string[] = [];
 		for (const report of providerReports) {
-			const resets = summarizeUsageResetCredits(report.resetCredits, nowMs);
+			const resets = summarizeUsageResetCredits(report.resetCredits, nowMs, report.provider);
 			if (!resets || resets.bankedCount <= 0) continue;
 			const identityLabel =
 				typeof report.metadata?.email === "string" && report.metadata.email
