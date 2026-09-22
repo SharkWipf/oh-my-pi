@@ -123,10 +123,12 @@
 - Subagents with an ordered model fallback keep it reachable on startup when the parent default role shares the same primary model ([#12377](https://github.com/can1357/oh-my-pi/pull/12377) by [@Dante-dan](https://github.com/Dante-dan)).
 - omp-plugins MCP servers now substitute `${CLAUDE_PLUGIN_ROOT}`/`${OMP_PLUGIN_ROOT}` in `command`, `args`, and `cwd` ([#12801](https://github.com/can1357/oh-my-pi/pull/12801) by [@holny](https://github.com/holny)).
 - Added source-ID preservation policy APIs with independent first/recent/hard-recent limits, uniformly capped manual tool exchanges, compact source quota indexes, and compatible saved settings/classification readers.
+- Added nonblocking user-message classification with eleven independent saved category facts, selected-message reclassification, bounded missing-only backfill, per-row status updates, and isolated cancellation. Classifier jobs validate active source/branch ownership before saving and require explicit backfill after restart.
 - `find` (and `omp find`) accepts an `omp://` docs scope: `omp://` searches every embedded harness doc and `omp://<file>.md` searches one, reporting hits as canonical `omp://` URLs that `read` opens directly, including with `:start-end` selectors ([#12758](https://github.com/can1357/oh-my-pi/pull/12758) by [@H4vC](https://github.com/H4vC)).
 
 ### Fixed
 
+- Classifier requests use named boolean categories with complete response validation and unchanged packed v1 saved facts. Independent categories may overlap; their configured preservation actions remain host policy rather than model decisions.
 - Preservation previews distinguish unavailable model-percentage limits from finite zero and expose source cap blockers; large manual-reset captures use bounded lazy source enumeration.
 - Quarantined classification records remain visibly invalidated after reload without fabricating category labels, and backfill readers skip history before the latest clear boundary.
 - Visible human custom-message journal sources retain manual protection and ordinary raw accounting without being promoted to automatic user classifications or windows.
