@@ -18,11 +18,14 @@
 ### Added
 
 - Exported the existing per-image `IMAGE_TOKEN_ESTIMATE` baseline so source projections can replace it with representation-specific estimates without counting images twice.
+- Added local source-addressed compaction coverage and positional rewrite APIs; journal owners can remap retained coverage atomically with source edits without rerendering historical artifacts.
 
 ### Fixed
 
 - Fixed ordinary source token estimates omitting assistant images and known current native text, code, logs, search context, and computer metadata. Normalized native mirrors are charged once, including after controlled source rewrites and JSON reload.
 - Fixed metadata-only computer screenshots counting as zero before source allocation. Their single image baseline replaces content-image mirrors, matching computer-result serialization.
+- Kept compaction source IDs and selected ranges aligned with converted messages across journal metadata and repeated sparse retention.
+- Authored images interleaved with snap archive frames keep their one-time original-image estimate instead of being priced as rasterized transcript frames.
 
 ## [18.2.5] - 2026-09-17
 
