@@ -27,8 +27,9 @@ import {
 	SKILL_PROMPT_MESSAGE_TYPE,
 	type SkillPromptDetails,
 } from "./messages";
-import { textContent, type TranscriptEntryLike as TranscriptEntry, transcriptEntryMessage } from "./transcript-entry";
+import { type TranscriptEntryLike as TranscriptEntry, transcriptEntryMessage } from "./transcript-entry";
 import { theme } from "../theme";
+import { chipLabel } from "../prompt/composer-attachments";
 import {
 	assistantHasVisibleContent,
 	assistantUsageIsBilled,
@@ -57,12 +58,16 @@ import { EvalExecutionComponent } from "./eval-execution";
 import { type LateDiagnosticsFile, LateDiagnosticsMessageComponent } from "./late-diagnostics-message";
 import { groupedReadUsageCallIds, ReadToolGroupComponent, readArgsCollapseIntoGroup } from "./read-tool-group";
 import { SkillMessageComponent } from "./skill-message";
-import { ToolExecutionComponent } from "./tool-execution";
+import { displaceableToolName, ToolExecutionComponent } from "./tool-execution";
+import { splitReaction, type ReactionTarget } from "./reaction";
+import { isToolActivityComponent } from "../chrome/tool-activity";
 import { TranscriptContainer } from "../chrome/transcript-container";
 import { createUsageRowBlock, turnElapsedMs } from "../overlays/usage-row";
 import { CollapsedSyntheticMessageComponent, UserMessageComponent } from "./user-message";
 
 export interface ChatTranscriptBuilderDeps {
+	/** Defer renderer construction for viewports; displaced tools retain empty source slots. */
+	deferComponents?: boolean;
 	ui: TUI;
 	getTool?: (name: string) => AgentTool | undefined;
 	/** Whether the active registry entry came from a built-in factory. */
@@ -76,11 +81,190 @@ export interface ChatTranscriptBuilderDeps {
 	requestRender: () => void;
 }
 
+/** Extracts the plain-text content of a user message (string or text blocks). */
+function userMessageText(message: Extract<AgentMessage, { role: "user" }>): string {
+	if (typeof message.content === "string") return message.content;
+	let text = "";
+	let imageCount = 0;
+	for (const block of message.content) {
+		if (block.type === "text") text += block.text;
+		else if (block.type === "image") imageCount++;
+	}
+	if (text.trim() || imageCount === 0) return text;
+	// Image-only requests still need a selectable bubble; these chips are
+	// presentation only, never added to the stored request or returned draft.
+	for (let index = 1; index <= imageCount; index++) {
+		text += (index === 1 ? "" : " ") + chipLabel("image", index);
+	}
+	return text;
+}
+
+type ExpandableComponent = Component & { setExpanded?(expanded: boolean): void };
+
+const EMPTY_DEFERRED_ROWS: readonly string[] = [];
+
+/** A source-backed child: eviction drops presentation, never persisted inputs. */
+class DeferredTranscriptComponent<T extends ExpandableComponent = ExpandableComponent> implements Component {
+	protected value: T | undefined;
+	#expanded = false;
+	#retired = false;
+	constructor(
+		private readonly factory: () => T,
+		private readonly materialized: Set<DeferredTranscriptComponent>,
+	) {}
+	protected configure(component: T): void {
+		component.setExpanded?.(this.#expanded);
+	}
+	render(width: number): readonly string[] {
+		if (this.#retired) return EMPTY_DEFERRED_ROWS;
+		if (!this.value) {
+			this.value = this.factory();
+			this.configure(this.value);
+			this.materialized.add(this);
+		}
+		return this.value.render(width);
+	}
+	invalidate(): void {
+		this.value?.invalidate?.();
+	}
+	setExpanded(expanded: boolean): void {
+		this.#expanded = expanded;
+		this.value?.setExpanded?.(expanded);
+	}
+	/** A displaced descriptor keeps its source slot, but can never paint again. */
+	retire(): void {
+		this.#retired = true;
+		this.dispose();
+	}
+	dispose(): void {
+		this.value?.dispose?.();
+		this.value = undefined;
+		this.materialized.delete(this);
+	}
+}
+
+class DeferredToolActivity<T extends ExpandableComponent> extends DeferredTranscriptComponent<T> {
+	#visible = true;
+	setToolActivityVisible(visible: boolean): void {
+		this.#visible = visible;
+		if (this.value && isToolActivityComponent(this.value)) this.value.setToolActivityVisible(visible);
+	}
+	override render(width: number): readonly string[] {
+		return this.#visible ? super.render(width) : EMPTY_DEFERRED_ROWS;
+	}
+	protected override configure(component: T): void {
+		super.configure(component);
+		if (isToolActivityComponent(component)) component.setToolActivityVisible(this.#visible);
+	}
+}
+
+class DeferredUserMessage extends DeferredTranscriptComponent<UserMessageComponent> implements ReactionTarget {
+	#reaction: string | undefined;
+	setReaction(emoji: string): void {
+		this.#reaction = emoji;
+		this.value?.setReaction(emoji);
+	}
+	protected override configure(component: UserMessageComponent): void {
+		super.configure(component);
+		if (this.#reaction !== undefined) component.setReaction(this.#reaction);
+	}
+}
+
+type ReplayToolResult = Parameters<ToolExecutionComponent["updateResult"]>[0];
+
+class DeferredToolExecution extends DeferredToolActivity<ToolExecutionComponent> {
+	#result: ReplayToolResult | undefined;
+	#sealed = false;
+	constructor(
+		factory: () => ToolExecutionComponent,
+		materialized: Set<DeferredTranscriptComponent>,
+		private readonly toolName: string,
+		private readonly callId: string,
+	) {
+		super(factory, materialized);
+	}
+	protected override configure(component: ToolExecutionComponent): void {
+		super.configure(component);
+		if (this.#result) component.updateResult(this.#result, false, this.callId);
+		if (this.#sealed) component.seal();
+	}
+	updateResult(result: ReplayToolResult, _partial: boolean, _id: string): void {
+		this.#result = result;
+		this.value?.updateResult(result, false, this.callId);
+	}
+	seal(): void {
+		this.#sealed = true;
+		this.value?.seal();
+	}
+	isDisplaceableBlock(): boolean {
+		return (
+			!this.#sealed &&
+			this.#result !== undefined &&
+			displaceableToolName(this.toolName, this.#result, false) !== undefined
+		);
+	}
+	canBeDisplacedBy(name: string | undefined): boolean {
+		return this.isDisplaceableBlock() && displaceableToolName(this.toolName, this.#result!, false) === name;
+	}
+}
+
+type ReadUsage = Parameters<ReadToolGroupComponent["attachUsage"]>;
+type ReplayReadArgs = Parameters<ReadToolGroupComponent["updateArgs"]>[0];
+type ReplayReadResult = Parameters<ReadToolGroupComponent["updateResult"]>[0];
+
+class DeferredReadGroup extends DeferredToolActivity<ReadToolGroupComponent> {
+	#entries = new Map<string, { args: ReplayReadArgs; result?: ReplayReadResult }>();
+	#usage: ReadUsage[] = [];
+	#sealed = false;
+	#finalized = false;
+	protected override configure(component: ReadToolGroupComponent): void {
+		super.configure(component);
+		for (const [id, entry] of this.#entries) {
+			component.updateArgs(entry.args, id);
+			if (entry.result) component.updateResult(entry.result, false, id);
+		}
+		for (const usage of this.#usage) component.attachUsage(...usage);
+		if (this.#finalized) component.finalize();
+		if (this.#sealed) component.seal();
+	}
+	updateArgs(args: ReplayReadArgs, id: string): void {
+		const entry = this.#entries.get(id);
+		if (entry) entry.args = args;
+		else this.#entries.set(id, { args });
+		this.value?.updateArgs(args, id);
+	}
+	updateResult(result: ReplayReadResult, _partial: boolean, id: string): void {
+		const entry = this.#entries.get(id);
+		if (!entry) return;
+		entry.result = result;
+		this.value?.updateResult(result, false, id);
+	}
+	attachUsage(...usage: ReadUsage): boolean {
+		const ids = usage[0].filter(id => this.#entries.has(id));
+		if (ids.length === 0) return false;
+		const snapshot: ReadUsage = [ids, usage[1], usage[2], usage[3], usage[4], usage[5]];
+		this.#usage.push(snapshot);
+		this.value?.attachUsage(...snapshot);
+		return true;
+	}
+	finalize(): void {
+		this.#finalized = true;
+		this.value?.finalize();
+	}
+	seal(): void {
+		this.#sealed = true;
+		this.value?.seal();
+	}
+}
+
+type ReplayTool = ToolExecutionComponent | DeferredToolExecution;
+type ReplayReadGroup = ReadToolGroupComponent | DeferredReadGroup;
+
 export class ChatTranscriptBuilder {
 	readonly container = new TranscriptContainer();
-	#pendingTools = new Map<string, ToolExecutionComponent | ReadToolGroupComponent>();
+	#pendingTools = new Map<string, ReplayTool | ReplayReadGroup>();
 	#readArgs = new Map<string, Record<string, unknown>>();
-	#readGroup: ReadToolGroupComponent | null = null;
+	#readGroup: ReplayReadGroup | null = null;
 	#pendingUsage: Usage | undefined;
 	#pendingUsageDuration: number | undefined;
 	#pendingUsageTtft: number | undefined;
@@ -90,9 +274,11 @@ export class ChatTranscriptBuilder {
 	#turnStartedAt: number | undefined;
 	#lastAssistantUsage: Usage | undefined;
 	#servedModelTracker = new ServedModelTracker();
-	#waitingPoll: ToolExecutionComponent | null = null;
-	#todoSnapshot: ToolExecutionComponent | null = null;
-	#expandables: Array<{ setExpanded(expanded: boolean): void }> = [];
+	#waitingPoll: ReplayTool | null = null;
+	#todoSnapshot: ReplayTool | null = null;
+	#expandables: Array<{ setExpanded?(expanded: boolean): void }> = [];
+	#materialized = new Set<DeferredTranscriptComponent>();
+	#reactionTarget: (Component & ReactionTarget) | undefined;
 	#expanded = false;
 	#entryComponents = new Map<string, Component[]>();
 
@@ -127,7 +313,7 @@ export class ChatTranscriptBuilder {
 	/** Toggle tool-output expansion across every expandable component. */
 	setExpanded(expanded: boolean): void {
 		this.#expanded = expanded;
-		for (const component of this.#expandables) component.setExpanded(expanded);
+		for (const component of this.#expandables) component.setExpanded?.(expanded);
 	}
 
 	get expanded(): boolean {
@@ -141,6 +327,29 @@ export class ChatTranscriptBuilder {
 			if (row !== undefined) return row;
 		}
 		return undefined;
+	}
+
+	/** Release only instantiated offscreen children; source descriptors remain replayable. */
+	releaseOutside(retained: ReadonlySet<Component>): void {
+		for (const component of this.#materialized) {
+			if (!retained.has(component)) component.dispose();
+		}
+	}
+
+	#component<T extends ExpandableComponent>(
+		factory: () => T,
+		toolActivity = false,
+	): T | DeferredTranscriptComponent<T> {
+		if (!this.#deps.deferComponents) return factory();
+		return toolActivity
+			? new DeferredToolActivity(factory, this.#materialized)
+			: new DeferredTranscriptComponent(factory, this.#materialized);
+	}
+
+	#addComponent<T extends ExpandableComponent>(factory: () => T, expandable = false, toolActivity = false): void {
+		const component = this.#component(factory, toolActivity);
+		if (expandable) this.#trackExpandable(component);
+		this.container.addChild(component);
 	}
 
 	/** Tear down components (sealing pending spinners) and clear build state. */
@@ -162,6 +371,7 @@ export class ChatTranscriptBuilder {
 		this.#todoSnapshot = null;
 		this.#expandables = [];
 		this.#entryComponents.clear();
+		this.#reactionTarget = undefined;
 		this.container.dispose();
 		this.container.clear();
 	}
@@ -179,8 +389,8 @@ export class ChatTranscriptBuilder {
 		if (components.length > 0) this.#entryComponents.set(entry.id, components);
 	}
 
-	#trackExpandable(component: { setExpanded(expanded: boolean): void }): void {
-		component.setExpanded(this.#expanded);
+	#trackExpandable(component: { setExpanded?(expanded: boolean): void }): void {
+		component.setExpanded?.(this.#expanded);
 		this.#expandables.push(component);
 	}
 
@@ -189,8 +399,9 @@ export class ChatTranscriptBuilder {
 		const previous = this.#waitingPoll;
 		if (!previous) return;
 		this.#waitingPoll = null;
-		if (nextToolName === "hub" && previous.isDisplaceableBlock() && this.container.canRemoveBlock(previous)) {
-			this.container.removeChild(previous);
+		if (nextToolName === "hub" && previous.isDisplaceableBlock()) {
+			if (previous instanceof DeferredToolExecution) previous.retire();
+			else if (this.container.canRemoveBlock(previous)) this.container.removeChild(previous);
 		}
 		previous.seal();
 	}
@@ -204,9 +415,8 @@ export class ChatTranscriptBuilder {
 		}
 		if (previous.canBeDisplacedBy(nextToolName)) {
 			this.#todoSnapshot = null;
-			if (this.container.canRemoveBlock(previous)) {
-				this.container.removeChild(previous);
-			}
+			if (previous instanceof DeferredToolExecution) previous.retire();
+			else if (this.container.canRemoveBlock(previous)) this.container.removeChild(previous);
 			previous.seal();
 			return;
 		}
@@ -215,11 +425,13 @@ export class ChatTranscriptBuilder {
 		previous.seal();
 	}
 
-	#ensureReadGroup(): ReadToolGroupComponent {
+	#ensureReadGroup(): ReplayReadGroup {
 		if (!this.#readGroup) {
-			this.#readGroup = new ReadToolGroupComponent({
-				showContentPreview: displayPreferences.readToolResultPreview,
-			});
+			const factory = () =>
+				new ReadToolGroupComponent({
+					showContentPreview: displayPreferences.readToolResultPreview,
+				});
+			this.#readGroup = this.#deps.deferComponents ? new DeferredReadGroup(factory, this.#materialized) : factory();
 			this.#trackExpandable(this.#readGroup);
 			this.container.addChild(this.#readGroup);
 		}
@@ -297,7 +509,7 @@ export class ChatTranscriptBuilder {
 				// A user prompt closes the poll-displacement window, same as the live path.
 				if (message.role === "user") this.#resolveWaitingPoll();
 				if (message.role === "user") this.#resolveTodoSnapshot();
-				const userText = message.role === "user" ? textContent(message.content) : "";
+				const userText = message.role === "user" ? userMessageText(message) : "";
 				if (userText) {
 					const isSynthetic = message.role === "developer" ? true : (message.synthetic ?? false);
 					// Synthetic (agent-attributed) inputs — chiefly the advisor's `Session
@@ -306,35 +518,42 @@ export class ChatTranscriptBuilder {
 					// collapse them behind a compact summary that builds Markdown only on
 					// ctrl+o expand. Real user prompts stay fully rendered.
 					if (isSynthetic) {
-						const collapsed = new CollapsedSyntheticMessageComponent(userText);
-						this.#trackExpandable(collapsed);
-						this.container.addChild(collapsed);
+						this.#addComponent(() => new CollapsedSyntheticMessageComponent(userText), true);
 					} else {
-						this.container.addChild(new UserMessageComponent(userText));
+						const factory = () => new UserMessageComponent(userText);
+						const component = this.#deps.deferComponents
+							? new DeferredUserMessage(factory, this.#materialized)
+							: factory();
+						this.#reactionTarget = component;
+						this.container.addChild(component);
 					}
 				}
 				break;
 			}
 			case "bashExecution": {
-				const component = new BashExecutionComponent(message.command, this.#deps.ui, message.excludeFromContext);
-				if (message.output) component.appendOutput(message.output);
-				component.setComplete(message.exitCode, message.cancelled, {
-					truncation: message.meta?.truncation,
-					artifactError: message.meta?.artifactError,
-					images: message.images,
-					showImages: displayPreferences.showImages,
+				this.#addComponent(() => {
+					const component = new BashExecutionComponent(message.command, this.#deps.ui, message.excludeFromContext);
+					if (message.output) component.appendOutput(message.output);
+					component.setComplete(message.exitCode, message.cancelled, {
+						truncation: message.meta?.truncation,
+						artifactError: message.meta?.artifactError,
+						images: message.images,
+						showImages: displayPreferences.showImages,
+					});
+					return component;
 				});
-				this.container.addChild(component);
 				break;
 			}
 			case "pythonExecution": {
-				const component = new EvalExecutionComponent(message.code, this.#deps.ui, message.excludeFromContext);
-				if (message.output) component.appendOutput(message.output);
-				component.setComplete(message.exitCode, message.cancelled, {
-					truncation: message.meta?.truncation,
-					artifactError: message.meta?.artifactError,
+				this.#addComponent(() => {
+					const component = new EvalExecutionComponent(message.code, this.#deps.ui, message.excludeFromContext);
+					if (message.output) component.appendOutput(message.output);
+					component.setComplete(message.exitCode, message.cancelled, {
+						truncation: message.meta?.truncation,
+						artifactError: message.meta?.artifactError,
+					});
+					return component;
 				});
-				this.container.addChild(component);
 				break;
 			}
 			case "hookMessage":
@@ -348,22 +567,17 @@ export class ChatTranscriptBuilder {
 				this.#appendCustomMessage(message);
 				break;
 			case "compactionSummary": {
-				const component = new CompactionSummaryMessageComponent(message);
-				this.#trackExpandable(component);
-				this.container.addChild(component);
+				this.#addComponent(() => new CompactionSummaryMessageComponent(message), true);
 				break;
 			}
 			case "branchSummary": {
-				const component = new BranchSummaryMessageComponent(message);
-				this.#trackExpandable(component);
-				this.container.addChild(component);
+				this.#addComponent(() => new BranchSummaryMessageComponent(message), true);
 				break;
 			}
 			case "fileMention": {
 				// Indent one column to match the transcript's other rows (the viewer renders
 				// body rows without an outer gutter; rows own their left pad).
-				const block = buildFileMentionBlock(message.files, 1);
-				if (block.children.length > 0) this.container.addChild(block);
+				if (message.files.length > 0) this.#addComponent(() => buildFileMentionBlock(message.files, 1));
 				break;
 			}
 			default:
@@ -380,29 +594,57 @@ export class ChatTranscriptBuilder {
 		const hideThinkingBlock = this.#deps.hideThinkingBlock?.() ?? false;
 		const proseOnlyThinking = this.#deps.proseOnlyThinking ? this.#deps.proseOnlyThinking() : true;
 		const timeline = splitAssistantMessageToolTimeline(message);
-		const assistantComponent = new AssistantMessageComponent(
-			timeline.beforeTools,
-			hideThinkingBlock,
-			() => this.#deps.requestRender(),
-			this.#deps.getMessageRenderer ? undefined : [], // placeholder for thinkingRenderers
-			this.#deps.ui.imageBudget,
-			proseOnlyThinking,
-			this.#deps.linkTargets,
-		);
-		assistantComponent.setImagesVisible(displayPreferences.showImages);
-		assistantComponent.setToolResultImagesVisible(!displayPreferences.hideToolActivity);
-		this.#trackExpandable(assistantComponent);
-		assistantComponent.pickReactionTarget(this.container.children);
-		this.container.addChild(assistantComponent);
-
-		if (displayPreferences.cacheMissMarker) {
-			const invalidation = detectCacheInvalidation(this.#lastAssistantUsage, message.usage);
-			if (invalidation) assistantComponent.setCacheInvalidation(invalidation);
+		const errorPresentation = resolveAssistantErrorPresentation(message);
+		const reactionTarget = this.#reactionTarget;
+		this.#reactionTarget = undefined;
+		const invalidation = displayPreferences.cacheMissMarker
+			? detectCacheInvalidation(this.#lastAssistantUsage, message.usage)
+			: undefined;
+		if (this.#deps.deferComponents && reactionTarget) {
+			const opening = timeline.beforeTools.content.find(
+				content => content.type === "text" && content.text.length > 0,
+			);
+			if (opening?.type === "text") {
+				const reaction = splitReaction(opening.text).emoji;
+				if (reaction !== undefined) reactionTarget.setReaction(reaction);
+			}
 		}
+		const servedModelMismatch = this.#servedModelTracker.check(message);
+		const assistantComponent = this.#component(() => {
+			const component = new AssistantMessageComponent(
+				timeline.beforeTools,
+				hideThinkingBlock,
+				() => this.#deps.requestRender(),
+				this.#deps.getMessageRenderer ? undefined : [],
+				this.#deps.ui.imageBudget,
+				proseOnlyThinking,
+				this.#deps.linkTargets,
+			);
+			component.setImagesVisible(displayPreferences.showImages);
+			component.setToolResultImagesVisible(!displayPreferences.hideToolActivity);
+			component.pickReactionTarget(
+				this.#deps.deferComponents ? (reactionTarget ? [reactionTarget] : []) : this.container.children,
+			);
+			if (invalidation) component.setCacheInvalidation(invalidation);
+			component.setServedModelMismatch(servedModelMismatch);
+			return component;
+		});
+		// Tool-only prefixes cannot paint; keep their exact source slots without
+		// instantiating an empty assistant renderer while seeking through a read run.
+		if (
+			assistantComponent instanceof DeferredTranscriptComponent &&
+			!invalidation &&
+			!servedModelMismatch &&
+			timeline.beforeTools.content.every(content => content.type === "toolCall") &&
+			errorPresentation.kind === "none"
+		) {
+			assistantComponent.retire();
+		}
+		this.#trackExpandable(assistantComponent);
+		this.container.addChild(assistantComponent);
 		if (message.usage.cacheRead + message.usage.cacheWrite + message.usage.input > 0) {
 			this.#lastAssistantUsage = message.usage;
 		}
-		assistantComponent.setServedModelMismatch(this.#servedModelTracker.check(message));
 
 		const hasVisibleAssistantContent = assistantHasVisibleContent(message);
 		if (hasVisibleAssistantContent) {
@@ -411,24 +653,26 @@ export class ChatTranscriptBuilder {
 			this.#readGroup = null;
 		}
 
-		const errorPresentation = resolveAssistantErrorPresentation(message);
 		const hasErrorStop = errorPresentation.kind === "full";
 		const errorMessage = hasErrorStop ? errorPresentation.text : null;
 		const appendAssistantSegment = (segment: Extract<AgentMessage, { role: "assistant" }> | undefined) => {
 			if (!segment || !assistantHasVisibleContent(segment)) return;
-			const component = new AssistantMessageComponent(
-				segment,
-				hideThinkingBlock,
-				() => this.#deps.requestRender(),
-				this.#deps.getMessageRenderer ? undefined : [],
-				undefined,
-				proseOnlyThinking,
-				this.#deps.linkTargets,
-			);
-			component.setImagesVisible(displayPreferences.showImages);
-			component.setToolResultImagesVisible(!displayPreferences.hideToolActivity);
-			this.#trackExpandable(component);
-			this.container.addChild(component);
+			this.#readGroup?.finalize();
+			this.#readGroup = null;
+			this.#addComponent(() => {
+				const component = new AssistantMessageComponent(
+					segment,
+					hideThinkingBlock,
+					() => this.#deps.requestRender(),
+					this.#deps.getMessageRenderer ? undefined : [],
+					undefined,
+					proseOnlyThinking,
+					this.#deps.linkTargets,
+				);
+				component.setImagesVisible(displayPreferences.showImages);
+				component.setToolResultImagesVisible(!displayPreferences.hideToolActivity);
+				return component;
+			}, true);
 		};
 
 		for (const content of message.content) {
@@ -445,7 +689,7 @@ export class ChatTranscriptBuilder {
 						false,
 						content.id,
 					);
-				} else if (afterToolSegment) {
+				} else if (timeline.afterToolCalls.size > 0) {
 					const group = this.#ensureReadGroup();
 					group.updateArgs(content.arguments, content.id);
 					this.#pendingTools.set(content.id, group);
@@ -459,20 +703,24 @@ export class ChatTranscriptBuilder {
 
 			this.#readGroup?.seal();
 			this.#readGroup = null;
-			const component = new ToolExecutionComponent(
-				content.name,
-				content.arguments,
-				{
-					useBuiltInRenderer: this.#deps.isBuiltInTool?.(content.name) ?? true,
-					// Stable ids and Kitty placeholder cells keep images anchored
-					// while the transcript viewport scrolls and reflows.
-					showImages: displayPreferences.showImages,
-				},
-				this.#deps.getTool?.(content.name),
-				this.#deps.ui,
-				this.#deps.cwd,
-				content.id,
-			);
+			const factory = () =>
+				new ToolExecutionComponent(
+					content.name,
+					content.arguments,
+					{
+						useBuiltInRenderer: this.#deps.isBuiltInTool?.(content.name) ?? true,
+						// Stable ids and Kitty placeholder cells keep images anchored
+						// while the transcript viewport scrolls and reflows.
+						showImages: displayPreferences.showImages,
+					},
+					this.#deps.getTool?.(content.name),
+					this.#deps.ui,
+					this.#deps.cwd,
+					content.id,
+				);
+			const component = this.#deps.deferComponents
+				? new DeferredToolExecution(factory, this.#materialized, content.name, content.id)
+				: factory();
 			this.#trackExpandable(component);
 			this.container.addChild(component);
 
@@ -500,7 +748,9 @@ export class ChatTranscriptBuilder {
 
 	#appendToolResult(message: Extract<AgentMessage, { role: "toolResult" }>): void {
 		const pending = this.#pendingTools.get(message.toolCallId);
-		const isReadGroupResult = message.toolName === "read" && (!pending || pending instanceof ReadToolGroupComponent);
+		const isReadGroupResult =
+			message.toolName === "read" &&
+			(!pending || pending instanceof ReadToolGroupComponent || pending instanceof DeferredReadGroup);
 		if (isReadGroupResult) {
 			let component = pending;
 			if (!component) {
@@ -517,11 +767,15 @@ export class ChatTranscriptBuilder {
 		if (!pending) return;
 		pending.updateResult(message, false, message.toolCallId);
 		this.#pendingTools.delete(message.toolCallId);
-		if (message.toolName === "hub" && pending instanceof ToolExecutionComponent && pending.isDisplaceableBlock()) {
+		if (
+			message.toolName === "hub" &&
+			(pending instanceof ToolExecutionComponent || pending instanceof DeferredToolExecution) &&
+			pending.isDisplaceableBlock()
+		) {
 			this.#waitingPoll = pending;
 		} else if (
 			message.toolName === "todo" &&
-			pending instanceof ToolExecutionComponent &&
+			(pending instanceof ToolExecutionComponent || pending instanceof DeferredToolExecution) &&
 			pending.canBeDisplacedBy("todo")
 		) {
 			// A successful todo result supersedes the prior live snapshot. Failed
@@ -534,25 +788,20 @@ export class ChatTranscriptBuilder {
 	#appendCustomMessage(message: Extract<AgentMessage, { role: "custom" | "hookMessage" }>): void {
 		if (!message.display) return;
 		if (message.customType === "async-result") {
-			const component = buildAsyncResultBlock(message);
-			this.container.addChild(component);
+			this.#addComponent(() => buildAsyncResultBlock(message), false, true);
 			return;
 		}
 		if (message.customType === LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE) {
 			const details = (message as CustomMessage<{ files?: LateDiagnosticsFile[] }>).details;
-			const component = new LateDiagnosticsMessageComponent(details?.files ?? []);
-			this.#trackExpandable(component);
-			this.container.addChild(component);
+			this.#addComponent(() => new LateDiagnosticsMessageComponent(details?.files ?? []), true, true);
 			return;
 		}
 		if (message.customType === COLLAB_PROMPT_MESSAGE_TYPE) {
-			this.container.addChild(new CollabPromptMessageComponent(message as CustomMessage<CollabPromptDetails>));
+			this.#addComponent(() => new CollabPromptMessageComponent(message as CustomMessage<CollabPromptDetails>));
 			return;
 		}
 		if (message.customType === SKILL_PROMPT_MESSAGE_TYPE) {
-			const component = new SkillMessageComponent(message as CustomMessage<SkillPromptDetails>);
-			this.#trackExpandable(component);
-			this.container.addChild(component);
+			this.#addComponent(() => new SkillMessageComponent(message as CustomMessage<SkillPromptDetails>), true);
 			return;
 		}
 		if (
@@ -561,33 +810,36 @@ export class ChatTranscriptBuilder {
 			message.customType === "irc:relay" ||
 			message.customType === "irc:workpool"
 		) {
-			this.container.addChild(buildIrcMessageCard(message, () => this.#expanded));
+			this.#addComponent(() => buildIrcMessageCard(message, () => this.#expanded));
 			return;
 		}
 		if (message.customType === "advisor") {
 			const details = (message as CustomMessage<AdvisorMessageDetails>).details;
-			this.container.addChild(createAdvisorMessageCard(details, () => this.#expanded, theme));
+			this.#addComponent(() => createAdvisorMessageCard(details, () => this.#expanded, theme));
 			return;
 		}
 		if (message.customType === LAUNCH_COMPLETION_MESSAGE_TYPE) {
-			this.container.addChild(buildLaunchCompletionBlock(message));
+			this.#addComponent(() => buildLaunchCompletionBlock(message), false, true);
 			return;
 		}
 		if (message.customType === BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE) {
-			this.container.addChild(createBackgroundTanDispatchBlock(message as CustomMessage<unknown>));
+			this.#addComponent(() => createBackgroundTanDispatchBlock(message as CustomMessage<unknown>));
 			return;
 		}
-		const handoffComponent = createHandoffSummaryMessageComponent(message as CustomMessage<unknown>, this.#expanded);
-		if (handoffComponent) {
-			this.#trackExpandable(handoffComponent);
-			this.container.addChild(handoffComponent);
+		if (message.customType === "handoff") {
+			this.#addComponent(
+				() => createHandoffSummaryMessageComponent(message as CustomMessage<unknown>, this.#expanded)!,
+				true,
+			);
 			return;
 		}
-		const component = new CustomMessageComponent(
-			message as CustomMessage<unknown>,
-			this.#deps.getMessageRenderer?.(message.customType),
+		this.#addComponent(
+			() =>
+				new CustomMessageComponent(
+					message as CustomMessage<unknown>,
+					this.#deps.getMessageRenderer?.(message.customType),
+				),
+			true,
 		);
-		this.#trackExpandable(component);
-		this.container.addChild(component);
 	}
 }

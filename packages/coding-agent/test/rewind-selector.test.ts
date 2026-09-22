@@ -106,9 +106,10 @@ describe("RewindSelectorComponent", () => {
 		resetSettingsForTest();
 	});
 
-	it("starts on the newest rendered item and Up steps in transcript order past hidden notices", () => {
+	it("starts on the newest rendered item and Up steps in transcript order past hidden notices", async () => {
 		const selected: string[] = [];
 		const selector = makeSelector(id => selected.push(id));
+		await selector.ready;
 		selector.render(80);
 
 		selector.handleInput(ENTER);
@@ -121,9 +122,10 @@ describe("RewindSelectorComponent", () => {
 		expect(selected).toEqual(["u2", "u1"]);
 	});
 
-	it("folds componentless tool results into the turn that rendered their call", () => {
+	it("folds componentless tool results into the turn that rendered their call", async () => {
 		const selected: string[] = [];
 		const selector = makeSelector(id => selected.push(id));
+		await selector.ready;
 		selector.render(80);
 
 		selector.handleInput(UP);
@@ -134,9 +136,10 @@ describe("RewindSelectorComponent", () => {
 		expect(selected).toEqual(["tr1"]);
 	});
 
-	it("jumps between user turns with Left while Down returns in transcript order", () => {
+	it("jumps between user turns with Left while Down returns in transcript order", async () => {
 		const selected: string[] = [];
 		const selector = makeSelector(id => selected.push(id));
+		await selector.ready;
 		selector.render(80);
 
 		selector.handleInput(LEFT);
@@ -149,11 +152,12 @@ describe("RewindSelectorComponent", () => {
 		expect(selected).toEqual(["u1", "tr1"]);
 	});
 
-	it("slides into a sibling branch with Right and rewinds onto its entries", () => {
+	it("slides into a sibling branch with Right and rewinds onto its entries", async () => {
 		const selected: string[] = [];
 		const siblings = (entryId: string): BranchVariantPath[] =>
 			entryId === "u2" ? [{ rootId: "u2b", entries: [entry("u2b", "a2", userMessage("alternate prompt"))] }] : [];
 		const selector = makeSelector(id => selected.push(id), siblings);
+		await selector.ready;
 		selector.render(120);
 
 		// u2 is the newest target and has a sibling: Right enters the alternate
@@ -168,10 +172,11 @@ describe("RewindSelectorComponent", () => {
 		expect(selected).toEqual(["u2b", "u2"]);
 	});
 
-	it("renders sibling branches as a half-width column strip at the fork", () => {
+	it("renders sibling branches as a half-width column strip at the fork", async () => {
 		const siblings = (entryId: string): BranchVariantPath[] =>
 			entryId === "u2" ? [{ rootId: "u2b", entries: [entry("u2b", "a2", userMessage("alternate prompt"))] }] : [];
 		const selector = makeSelector(() => {}, siblings);
+		await selector.ready;
 		const lines = selector.render(120).map(line => Bun.stripANSI(line));
 		selector.dispose();
 
@@ -185,7 +190,7 @@ describe("RewindSelectorComponent", () => {
 		expect(joined).toContain("first prompt");
 	});
 
-	it("shows a dot rail with edge ellipses when branches overflow the window", () => {
+	it("shows a dot rail with edge ellipses when branches overflow the window", async () => {
 		const siblings = (entryId: string): BranchVariantPath[] =>
 			entryId === "u2"
 				? ["b1", "b2", "b3"].map(id => ({
@@ -194,6 +199,7 @@ describe("RewindSelectorComponent", () => {
 					}))
 				: [];
 		const selector = makeSelector(() => {}, siblings);
+		await selector.ready;
 
 		const first = selector.render(120).map(line => Bun.stripANSI(line));
 		const initialRail = first.find(line => line.includes("◉"));
@@ -214,8 +220,9 @@ describe("RewindSelectorComponent", () => {
 		expect(slidRail!.trimStart().startsWith("…")).toBe(true);
 	});
 
-	it("outlines exactly the selected block with dotted verticals", () => {
+	it("outlines exactly the selected block with dotted verticals", async () => {
 		const selector = makeSelector(() => {});
+		await selector.ready;
 		const lines = selector.render(80).map(line => Bun.stripANSI(line));
 
 		const boxed = lines.filter(line => line.startsWith("┆"));
@@ -225,5 +232,148 @@ describe("RewindSelectorComponent", () => {
 		expect(boxed.join("\n")).toContain("second prompt");
 		expect(boxed.join("\n")).not.toContain("first prompt");
 		expect(lines.join("\n")).toContain("first prompt");
+	});
+	it("keeps source destinations across viewport crossings and Home/End inspection", async () => {
+		const selected: string[] = [];
+		const entries = Array.from({ length: 100 }, (_, index) =>
+			entry(String(index), index === 0 ? null : String(index - 1), userMessage("prompt " + index)),
+		);
+		const selector = new RewindSelectorComponent(entries, {
+			ui: { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI,
+			cwd: "/tmp",
+			requestRender: () => {},
+			onCancel: () => {},
+			onSelect: id => selected.push(id),
+		});
+		await selector.ready;
+		expect(Bun.stripANSI(selector.render(80).join("\n"))).toContain("prompt 99");
+		for (let index = 0; index < 45; index++) {
+			selector.handleInput(UP);
+			selector.render(80);
+		}
+		selector.handleInput(ENTER);
+		selector.handleInput("\x1b[H");
+		expect(Bun.stripANSI(selector.render(80).join("\n"))).toContain("prompt 0");
+		selector.handleInput(ENTER);
+		selector.handleInput("\x1b[F");
+		expect(Bun.stripANSI(selector.render(80).join("\n"))).toContain("prompt 99");
+		selector.handleInput(ENTER);
+		expect(selected).toEqual(["54", "54", "54"]);
+		selector.dispose();
+	});
+
+	it("does not repaint a wheel notch beyond the actual recent tail", async () => {
+		let paints = 0;
+		const selector = new RewindSelectorComponent(makeEntries(), {
+			ui: { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI,
+			cwd: "/tmp",
+			requestRender: () => {
+				paints++;
+			},
+			onCancel: () => {},
+			onSelect: () => {},
+		});
+		await selector.ready;
+		const before = selector.render(80);
+		paints = 0;
+		selector.handleInput("\x1b[<65;1;1M");
+		expect(paints).toBe(0);
+		expect(selector.render(80)).toEqual(before);
+		selector.dispose();
+	});
+
+	it("ignores a completed sibling lookup after its overlay was suspended", async () => {
+		const pending: Array<(paths: BranchVariantPath[]) => void> = [];
+		const selected: string[] = [];
+		const selector = new RewindSelectorComponent(makeEntries(), {
+			ui: { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI,
+			cwd: "/tmp",
+			requestRender: () => {},
+			onSelect: id => selected.push(id),
+			onCancel: () => {},
+			siblingPaths: () => new Promise(resolve => pending.push(resolve)),
+		});
+		await selector.ready;
+		selector.render(80);
+		selector.suspend();
+		selector.resume(
+			id => selected.push(id),
+			() => {},
+		);
+		selector.render(80);
+		pending[0]!([{ rootId: "obsolete", entries: [entry("obsolete", "a1", userMessage("old branch"))] }]);
+		await Promise.resolve();
+		selector.handleInput(RIGHT);
+		selector.handleInput(ENTER);
+		expect(selected).toEqual(["u2"]);
+		pending[1]!([{ rootId: "fresh", entries: [entry("fresh", "a1", userMessage("new branch"))] }]);
+		await Promise.resolve();
+		selector.render(80);
+		selector.handleInput(RIGHT);
+		selector.handleInput(ENTER);
+		expect(selected).toEqual(["u2", "fresh"]);
+		selector.dispose();
+	});
+	it("treats persisted skill requests as user turns in lazy navigation", async () => {
+		const selected: string[] = [];
+		const selector = new RewindSelectorComponent(
+			[
+				entry("u1", null, userMessage("first prompt")),
+				{
+					type: "custom_message",
+					id: "skill",
+					parentId: "u1",
+					timestamp: "2024-01-01T00:00:00Z",
+					customType: "skill-prompt",
+					content: "expanded skill body",
+					display: true,
+					attribution: "user",
+					details: { name: "review", args: "focus", prompt: "/skill:review focus" },
+				},
+				entry("a1", "skill", assistantWithBashCall("call-1")),
+				entry("u2", "a1", userMessage("second prompt")),
+			],
+			{
+				ui: { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI,
+				cwd: process.cwd(),
+				requestRender: () => {},
+				onCancel: () => {},
+				onSelect: id => selected.push(id),
+			},
+		);
+		await selector.ready;
+		selector.render(80);
+		selector.handleInput(LEFT);
+		selector.handleInput(ENTER);
+		selector.handleInput(LEFT);
+		selector.handleInput(ENTER);
+		expect(selected).toEqual(["skill", "u1"]);
+		selector.dispose();
+	});
+	it("keeps an image-only request selectable without adding draft text", async () => {
+		const image = { type: "image" as const, mimeType: "image/png", data: "aW1hZ2U=" };
+		const message: AgentMessage = { role: "user", content: [image], timestamp: 1 };
+		const selected: string[] = [];
+		const selector = new RewindSelectorComponent(
+			[
+				entry("image", null, message),
+				entry("answer", "image", assistantWithBashCall("call-1")),
+				entry("latest", "answer", userMessage("next prompt")),
+			],
+			{
+				ui: { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI,
+				cwd: process.cwd(),
+				requestRender: () => {},
+				onCancel: () => {},
+				onSelect: id => selected.push(id),
+			},
+		);
+		await selector.ready;
+		selector.render(80);
+		selector.handleInput(LEFT);
+		selector.handleInput(ENTER);
+		expect(selected).toEqual(["image"]);
+		expect(message.content).toEqual([image]);
+		selector.dispose();
 	});
 });

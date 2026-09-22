@@ -442,7 +442,9 @@ class SessionEntryIndex {
 	#generation = 0;
 	#branchCache: { leaf: string | null | undefined; generation: number; branch: SessionEntry[] } | undefined;
 
-	clear(): void {
+	constructor(private readonly onChange: () => void) {}
+
+	clear(notify = true): void {
 		this.#entriesById.clear();
 		this.#children.clear();
 		this.#labels.clear();
@@ -450,14 +452,16 @@ class SessionEntryIndex {
 		this.#usage = emptyUsageStatistics();
 		this.#generation++;
 		this.#branchCache = undefined;
+		if (notify) this.onChange();
 	}
 
 	rebuild(entries: readonly SessionEntry[]): void {
-		this.clear();
-		for (const entry of entries) this.insert(entry);
+		this.clear(false);
+		for (const entry of entries) this.insert(entry, false);
+		this.onChange();
 	}
 
-	insert(entry: SessionEntry): void {
+	insert(entry: SessionEntry, notify = true): void {
 		this.#entriesById.set(entry.id, entry);
 		this.#leaf = entry.id;
 		this.#generation++;
@@ -473,6 +477,7 @@ class SessionEntryIndex {
 		}
 
 		addUsage(this.#usage, entryUsage(entry));
+		if (notify) this.onChange();
 	}
 
 	has(id: string): boolean {
@@ -504,9 +509,10 @@ class SessionEntryIndex {
 		this.#leaf = id;
 		this.#generation++;
 		this.#branchCache = undefined;
+		this.onChange();
 	}
 
-	childrenOf(parentId: string): SessionEntry[] {
+	childrenOf(parentId: string | null): SessionEntry[] {
 		return [...(this.#children.get(parentId) ?? [])];
 	}
 
@@ -723,7 +729,8 @@ export class SessionManager {
 	#titleUpdatedAt = "";
 	#hasTitleSlot = true;
 	#entries: SessionEntry[] = [];
-	#index = new SessionEntryIndex();
+	#sourceChangeCallbacks = new Set<() => void>();
+	#index = new SessionEntryIndex(() => this.#notifySourceChanged());
 
 	/** File reflects all current entries; appends can go incrementally. */
 	#fileIsCurrent = false;
@@ -752,6 +759,29 @@ export class SessionManager {
 	 * in-memory (pre-blob-externalization) entry, so inline images survive.
 	 */
 	onEntryAppended?: (entry: SessionEntry) => void;
+
+	/**
+	 * Invalidate derived source views on journal/ancestry mutation. This is not a
+	 * durability or snapshot-publication event: listeners must only invalidate;
+	 * read the final source state after the owning mutator returns.
+	 */
+	subscribeSourceChanges(callback: () => void): () => void {
+		this.#sourceChangeCallbacks.add(callback);
+		return () => {
+			this.#sourceChangeCallbacks.delete(callback);
+		};
+	}
+
+	#notifySourceChanged(): void {
+		if (this.#sourceChangeCallbacks.size === 0) return;
+		for (const callback of this.#sourceChangeCallbacks) {
+			try {
+				callback();
+			} catch (error) {
+				logger.warn("Session source change listener failed", { error: String(error) });
+			}
+		}
+	}
 
 	#turnBudgetTotal: number | null = null;
 	#turnBudgetHard = false;
@@ -2944,6 +2974,7 @@ export class SessionManager {
 	 * outputs). Use sparingly.
 	 */
 	async rewriteEntries(): Promise<void> {
+		this.#notifySourceChanged();
 		if (!this.#persist || !this.#sessionFile) return;
 		await this.#rewriteAtomically();
 	}
@@ -3065,8 +3096,8 @@ export class SessionManager {
 		return this.#index.get(id);
 	}
 
-	/** All direct children of an entry. */
-	getChildren(parentId: string): SessionEntry[] {
+	/** All direct children of an entry, or roots when parentId is null. */
+	getChildren(parentId: string | null): SessionEntry[] {
 		return this.#index.childrenOf(parentId);
 	}
 
@@ -3117,6 +3148,7 @@ export class SessionManager {
 			changed = true;
 		}
 
+		if (changed) this.#notifySourceChanged();
 		return changed;
 	}
 

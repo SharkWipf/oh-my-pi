@@ -123,6 +123,11 @@
 - Subagents with an ordered model fallback keep it reachable on startup when the parent default role shares the same primary model ([#12377](https://github.com/can1357/oh-my-pi/pull/12377) by [@Dante-dan](https://github.com/Dante-dan)).
 - omp-plugins MCP servers now substitute `${CLAUDE_PLUGIN_ROOT}`/`${OMP_PLUGIN_ROOT}` in `command`, `args`, and `cwd` ([#12801](https://github.com/can1357/oh-my-pi/pull/12801) by [@holny](https://github.com/holny)).
 
+### Fixed
+
+- Esc-Esc rewind paints a cancellable loading surface before cooperatively collecting and indexing cold history, renders only its source-anchored viewport, and reuses unchanged source indexes on reopen. Branch lookup uses indexed children, including root siblings; persisted skill/custom requests and image-only prompts remain selectable, and empty returned drafts replace stale editor text.
+- Grouped Read cards refresh their display at render time rather than rebuilding it for every replayed result. Deferred rewind preserves model-substitution and execution-artifact warnings.
+
 ## [18.2.8] - 2026-09-21
 
 ### Added
