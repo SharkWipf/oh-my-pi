@@ -15,6 +15,9 @@
 - Fixed stream finalization when a provider ends without emitting a completion or error event, ensuring the final assistant message is preserved and corresponding message lifecycle events are emitted.
 - Fixed tool execution being incorrectly skipped when host steering callbacks reject during a tool batch.
 - Fixed stream hangs and preserved the original error when host aside-commit or discard callbacks fail.
+### Fixed
+
+- Fixed metadata-only computer screenshots counting as zero in local token estimates. Their single image baseline replaces content-image mirrors, matching computer-result serialization. Original user, developer and custom images retain one-time baseline accounting.
 
 ## [18.2.5] - 2026-09-17
 
