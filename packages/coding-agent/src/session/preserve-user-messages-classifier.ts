@@ -251,7 +251,8 @@ export function buildPreservedUserMessageClassifierRequest(
 		);
 	}
 	// Unreported catalog limits remain provider-enforced; do not invent a context cap.
-	const allowance = model.contextWindow === null ? null : model.contextWindow - outputAllowance(model, options.maxTokens);
+	const allowance =
+		model.contextWindow === null ? null : model.contextWindow - outputAllowance(model, options.maxTokens);
 	const tokenizer = new Tokenizer(model);
 	const build = (previous: UserContent | null, assistants: AssistantContent[], omitted: boolean): Context => {
 		const auxiliaryImages: ImageContent[] = [];
