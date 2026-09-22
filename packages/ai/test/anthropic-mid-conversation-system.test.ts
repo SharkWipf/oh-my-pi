@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { convertAnthropicMessages } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { AssistantMessage, DeveloperMessage, Message, Model, ModelSpec, UserMessage } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { bindMessageSource, getSourceOrigin } from "@oh-my-pi/pi-ai/utils/source-origin";
 
 /**
  * Claude Opus 4.8 and the Fable/Mythos 5 generation support mid-conversation
@@ -222,5 +223,54 @@ describe("Anthropic mid-conversation system messages", () => {
 		const model = makeModel({ compat: { supportsMidConversationSystem: false } });
 		const params = convertAnthropicMessages([user("hi"), developer("Be terse.")], model, false);
 		expect(params.map(p => p.role)).toEqual(["user", "user"]);
+	});
+	it("keeps source coordinates on scoped developer text without attributing control blocks to it", () => {
+		const base = makeModel();
+		const model: Model<"anthropic-messages"> = {
+			...base,
+			compat: {
+				...base.compat,
+				supportsMidConversationSystem: true,
+				supportsTurnScopedSystem: true,
+				supportsPerMessageEffort: true,
+				supportsMidConversationToolChanges: true,
+			},
+		};
+		const controlled = {
+			role: "developer",
+			content: "Preserve this exact instruction.",
+			providerPayload: {
+				type: "anthropicMessage",
+				clearAt: "next_user_message",
+				effort: "low",
+				toolChanges: [{ type: "tool_removal", name: "write" }],
+			},
+			timestamp: 1,
+		} satisfies DeveloperMessage;
+		bindMessageSource(controlled, "instruction", 1, "original");
+		const params = convertAnthropicMessages([user("hi"), controlled], model, false);
+		expect(params[1]).toEqual({
+			role: "system",
+			content: [{ type: "text", text: controlled.content }],
+			clear_at: "next_user_message",
+		});
+		expect(getSourceOrigin(params[1]!)).toMatchObject({
+			kind: "source",
+			parts: [
+				{
+					entryId: "instruction",
+					projection: "original",
+					blockIndex: 0,
+					sourceSpan: { start: 0, end: controlled.content.length },
+					transportBlockIndex: 0,
+				},
+			],
+		});
+		expect(params[2]).toEqual({
+			role: "system",
+			content: [{ type: "tool_removal", tool: { type: "tool_reference", name: "write" } }],
+			output_config: { effort: "low" },
+		});
+		expect(getSourceOrigin(params[2]!)?.kind).toBe("unknown");
 	});
 });

@@ -127,6 +127,14 @@ import { servedModelFromAnthropicSignature } from "./anthropic-signature";
 import { getOpenAIPromptCacheKey } from "./openai-shared";
 import { applyInferenceHeaders } from "./inference-headers";
 import { redactSensitiveCredentials, transformMessages } from "./transform-messages";
+import {
+	combineContentSourceOrigins,
+	getSourceOrigin,
+	invalidateSourceOrigins,
+	setSourceOrigin,
+	transferSourceOrigin,
+	transferTransformedSourceOrigin,
+} from "../utils/source-origin";
 import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
 import {
 	injectedClientBaseUrl,
@@ -970,7 +978,11 @@ function convertContentBlocks(
 			const text = block.text.toWellFormed();
 			if (text.trim().length === 0) continue;
 			sawText = true;
-			blocks.push({ type: "text", text });
+			blocks.push(
+				text === block.text
+					? transferSourceOrigin(block, { type: "text", text })
+					: transferTransformedSourceOrigin(block, { type: "text", text }),
+			);
 			continue;
 		}
 
@@ -994,7 +1006,7 @@ function convertContentBlocks(
 		}
 
 		sawImage = true;
-		blocks.push({ type: "image", source });
+		blocks.push(transferSourceOrigin(block, { type: "image", source }));
 	}
 
 	if (!supportsImages) {
@@ -1631,9 +1643,13 @@ function isReplayableAnthropicCompaction(
 }
 
 /** The wire block for a replayed compaction payload, opaque state included. */
-function compactionBlockParam(payload: AnthropicCompactionPayload): CompactionBlockParam {
+function compactionBlockParam(payload: AnthropicCompactionPayload, message: Message): CompactionBlockParam {
 	const { content, encryptedContent } = payload;
-	return { type: "compaction", content, ...(encryptedContent ? { encrypted_content: encryptedContent } : {}) };
+	const origin = getSourceOrigin(message);
+	return setSourceOrigin(
+		{ type: "compaction", content, ...(encryptedContent ? { encrypted_content: encryptedContent } : {}) },
+		origin?.kind === "aggregate" ? origin : { kind: "unknown", reason: "native-compaction-aggregate-unmapped" },
+	);
 }
 
 /**
@@ -2243,6 +2259,11 @@ const streamAnthropicOnce = (
 				if (replacementPayload !== undefined) {
 					nextParams = replacementPayload as typeof nextParams;
 				}
+				if (options?.onPayload)
+					invalidateSourceOrigins(
+						nextParams,
+						replacementPayload === undefined ? "externally-mutated" : "externally-replaced",
+					);
 				nextParams = toWellFormedDeep(nextParams) as typeof nextParams;
 				rawRequestDump = {
 					provider: model.provider,
@@ -3677,7 +3698,10 @@ function applyCacheControlToLastBlock(blocks: ContentBlockParam[], cacheControl:
 			continue;
 		}
 		if ("cache_control" in block && block.cache_control != null) return false;
-		blocks[index] = { ...block, cache_control: cloneAnthropicCacheControl(cacheControl) };
+		blocks[index] = transferSourceOrigin(block, {
+			...block,
+			cache_control: cloneAnthropicCacheControl(cacheControl),
+		});
 		return true;
 	}
 	return false;
@@ -3704,7 +3728,11 @@ function countHeadBreakpoints(params: MessageCreateParamsStreaming): number {
 function applyCacheControlToMessage(message: MessageParam, cacheControl: AnthropicCacheControl): boolean {
 	if (typeof message.content === "string") {
 		message.content = [
-			{ type: "text", text: message.content, cache_control: cloneAnthropicCacheControl(cacheControl) },
+			transferSourceOrigin(message, {
+				type: "text" as const,
+				text: message.content,
+				cache_control: cloneAnthropicCacheControl(cacheControl),
+			}),
 		];
 		return true;
 	} else if (Array.isArray(message.content)) {
@@ -4636,6 +4664,7 @@ function buildToolResultBlock(
 		// Z.AI workaround (issue #814): include `id` aliased to `tool_use_id`.
 		(block as unknown as Record<string, unknown>).id = msg.toolCallId;
 	}
+	if (Array.isArray(content)) setSourceOrigin(block, combineContentSourceOrigins(content));
 	return block;
 }
 
@@ -4737,8 +4766,9 @@ export function convertAnthropicMessages(
 		) {
 			const compactionParam: AnthropicMessageParam = {
 				role: "assistant",
-				content: [compactionBlockParam(msg.providerPayload)],
+				content: [compactionBlockParam(msg.providerPayload, msg)],
 			};
+			setSourceOrigin(compactionParam, combineContentSourceOrigins(compactionParam.content as ContentBlockParam[]));
 			copyPerCallContextMessage(compactionParam, msg);
 			params.push(compactionParam);
 			// The block carries the verbatim API summary, so the message text
@@ -4787,7 +4817,13 @@ export function convertAnthropicMessages(
 			}
 			if (payload?.toolChanges && model.compat.supportsMidConversationToolChanges) {
 				const blocks: ContentBlockParam[] =
-					typeof content === "string" ? [{ type: "text", text: content }] : content;
+					typeof content === "string"
+						? [
+								content === msg.content
+									? transferSourceOrigin(msg, { type: "text" as const, text: content })
+									: transferTransformedSourceOrigin(msg, { type: "text" as const, text: content }),
+							]
+						: content;
 				for (const change of payload.toolChanges) {
 					blocks.push({
 						type: change.type,
@@ -4811,6 +4847,10 @@ export function convertAnthropicMessages(
 			if (msg.role === "user" && !agentAuthored && !isSyntheticUser(msg)) {
 				param[kConversationalUser] = true;
 			}
+			if (typeof content === "string") {
+				if (typeof msg.content === "string" && content === msg.content) transferSourceOrigin(msg, param);
+				else if (typeof msg.content === "string") transferTransformedSourceOrigin(msg, param);
+			} else setSourceOrigin(param, combineContentSourceOrigins(content));
 			copyPerCallContextMessage(param, msg);
 			params.push(param);
 		} else if (msg.role === "assistant") {
@@ -4824,94 +4864,110 @@ export function convertAnthropicMessages(
 			// on the assistant message; it opened that response, so it opens the
 			// replayed turn.
 			if (opts?.replayCompaction && isReplayableAnthropicCompaction(msg.providerPayload, model)) {
-				blocks.push(compactionBlockParam(msg.providerPayload));
+				blocks.push(compactionBlockParam(msg.providerPayload, msg));
 			}
 
 			for (const block of msg.content) {
-				if (block.type === "text") {
-					if (block.text.trim().length === 0) continue;
-					blocks.push({
-						type: "text",
-						text: block.text.toWellFormed(),
-					});
-				} else if (block.type === "thinking") {
-					if (
-						opts?.dropAllThinking ||
-						(block.thinkingSignature && opts?.droppedThinkingBlocks?.has(`thinking:${block.thinkingSignature}`))
-					) {
-						continue;
-					}
-					if (hasSignedThinking) {
-						if (!block.thinkingSignature || block.thinkingSignature.trim().length === 0) {
-							if (block.thinking.trim().length === 0) continue;
+				const firstEmittedBlock = blocks.length;
+				try {
+					if (block.type === "text") {
+						if (block.text.trim().length === 0) continue;
+						blocks.push({
+							type: "text",
+							text: block.text.toWellFormed(),
+						});
+					} else if (block.type === "thinking") {
+						if (
+							opts?.dropAllThinking ||
+							(block.thinkingSignature &&
+								opts?.droppedThinkingBlocks?.has(`thinking:${block.thinkingSignature}`))
+						) {
+							continue;
+						}
+						if (hasSignedThinking) {
+							if (!block.thinkingSignature || block.thinkingSignature.trim().length === 0) {
+								if (block.thinking.trim().length === 0) continue;
+								blocks.push({
+									type: "text",
+									text: renderDemotedThinking(model.id, block.thinking),
+								});
+								continue;
+							}
 							blocks.push({
-								type: "text",
-								text: renderDemotedThinking(model.id, block.thinking),
+								type: "thinking",
+								thinking: block.thinking,
+								signature: block.thinkingSignature,
 							});
 							continue;
 						}
-						blocks.push({
-							type: "thinking",
-							thinking: block.thinking,
-							signature: block.thinkingSignature,
-						});
-						continue;
-					}
-					if (block.thinking.trim().length === 0) continue;
-					if (!block.thinkingSignature || block.thinkingSignature.trim().length === 0) {
-						if (model.compat.replayUnsignedThinking) {
+						if (block.thinking.trim().length === 0) continue;
+						if (!block.thinkingSignature || block.thinkingSignature.trim().length === 0) {
+							if (model.compat.replayUnsignedThinking) {
+								blocks.push({
+									type: "thinking",
+									thinking: block.thinking.toWellFormed(),
+									signature: "",
+								});
+							} else {
+								blocks.push({
+									type: "text",
+									text: renderDemotedThinking(model.id, block.thinking),
+								});
+							}
+						} else {
 							blocks.push({
 								type: "thinking",
 								thinking: block.thinking.toWellFormed(),
-								signature: "",
-							});
-						} else {
-							blocks.push({
-								type: "text",
-								text: renderDemotedThinking(model.id, block.thinking),
+								signature: block.thinkingSignature,
 							});
 						}
-					} else {
+					} else if (block.type === "redactedThinking") {
+						if (opts?.dropAllThinking || opts?.droppedThinkingBlocks?.has(`redacted:${block.data}`)) continue;
+						if (block.data.trim().length === 0) continue;
 						blocks.push({
-							type: "thinking",
-							thinking: block.thinking.toWellFormed(),
-							signature: block.thinkingSignature,
+							type: "redacted_thinking",
+							data: block.data,
+						});
+					} else if (block.type === "anthropicServerTool") {
+						blocks.push(block.block);
+					} else if (block.type === "fallback") {
+						// Replay ONLY when both sides are aligned: the current
+						// request opted into the beta chain, and the target is
+						// official Anthropic (the only endpoint that accepts the
+						// block on the wire). `transformMessages` already drops
+						// the block for cross-provider / non-official replays, so
+						// this is defense-in-depth for direct convert calls.
+						if (!opts?.serverSideFallbackEnabled || !model.compat.officialEndpoint) continue;
+						blocks.push({
+							type: "fallback",
+							from: block.from,
+							to: block.to,
+						});
+					} else if (block.type === "toolCall") {
+						blocks.push({
+							type: "tool_use",
+							id: block.id,
+							name: encodeAnthropicToolName(block.name, isOAuthToken, model.compat.escapeBuiltinToolNames),
+							// Always sanitize: the model itself can emit lone-surrogate escapes
+							// in tool-argument JSON (streamed out fine, rejected with a 400 on
+							// replay by Anthropic's strict UTF-8 validation). toWellFormedDeep
+							// is identity-preserving, so well-formed arguments stay
+							// byte-identical and prompt-cache prefixes are unaffected.
+							input: toWellFormedDeep(block.arguments ?? {}),
 						});
 					}
-				} else if (block.type === "redactedThinking") {
-					if (opts?.dropAllThinking || opts?.droppedThinkingBlocks?.has(`redacted:${block.data}`)) continue;
-					if (block.data.trim().length === 0) continue;
-					blocks.push({
-						type: "redacted_thinking",
-						data: block.data,
-					});
-				} else if (block.type === "anthropicServerTool") {
-					blocks.push(block.block);
-				} else if (block.type === "fallback") {
-					// Replay ONLY when both sides are aligned: the current
-					// request opted into the beta chain, and the target is
-					// official Anthropic (the only endpoint that accepts the
-					// block on the wire). `transformMessages` already drops
-					// the block for cross-provider / non-official replays, so
-					// this is defense-in-depth for direct convert calls.
-					if (!opts?.serverSideFallbackEnabled || !model.compat.officialEndpoint) continue;
-					blocks.push({
-						type: "fallback",
-						from: block.from,
-						to: block.to,
-					});
-				} else if (block.type === "toolCall") {
-					blocks.push({
-						type: "tool_use",
-						id: block.id,
-						name: encodeAnthropicToolName(block.name, isOAuthToken, model.compat.escapeBuiltinToolNames),
-						// Always sanitize: the model itself can emit lone-surrogate escapes
-						// in tool-argument JSON (streamed out fine, rejected with a 400 on
-						// replay by Anthropic's strict UTF-8 validation). toWellFormedDeep
-						// is identity-preserving, so well-formed arguments stay
-						// byte-identical and prompt-cache prefixes are unaffected.
-						input: toWellFormedDeep(block.arguments ?? {}),
-					});
+				} finally {
+					for (let index = firstEmittedBlock; index < blocks.length; index++) {
+						const emitted = blocks[index]!;
+						if (
+							(block.type === "thinking" &&
+								(emitted.type !== "thinking" || emitted.thinking !== block.thinking)) ||
+							(block.type === "toolCall" && emitted.type === "tool_use" && emitted.input !== block.arguments) ||
+							(block.type === "text" && emitted.type === "text" && emitted.text !== block.text)
+						)
+							transferTransformedSourceOrigin(block, emitted);
+						else transferSourceOrigin(block, emitted);
+					}
 				}
 			}
 			// Anthropic's replay validator rejects any non-`tool_use` block that
@@ -4953,6 +5009,7 @@ export function convertAnthropicMessages(
 				role: "assistant",
 				content: blocks,
 			};
+			setSourceOrigin(assistantParam, combineContentSourceOrigins(blocks));
 			copyPerCallContextMessage(assistantParam, msg);
 			params.push(assistantParam);
 			// Flush queued file metadata unless this turn left tool calls open:
@@ -4995,6 +5052,7 @@ export function convertAnthropicMessages(
 			}
 
 			// Add a single user message with all tool results
+			setSourceOrigin(toolResultParam, combineContentSourceOrigins(toolResults));
 			params.push(toolResultParam);
 			// An open tool_use turn's results are whole again; queued file
 			// metadata can follow without splitting the pairing.
@@ -5037,24 +5095,26 @@ export function convertAnthropicMessages(
 						content: scopedContent,
 						clear_at: "next_user_message",
 					};
+					setSourceOrigin(params[idx], combineContentSourceOrigins(scopedContent));
 					const controlParam: AnthropicMessageParam = {
 						role: "system",
 						content: controlContent,
 						...(hasEffort ? { output_config: { effort: developer.payload?.effort } } : {}),
 					};
+					setSourceOrigin(controlParam, combineContentSourceOrigins(controlContent));
 					copyPerCallContextMessage(controlParam, params[idx]);
 					params.splice(idx + 1, 0, controlParam);
 					continue;
 				}
 			}
 
-			params[idx] = {
+			params[idx] = transferSourceOrigin<AnthropicMessageParam>(params[idx], {
 				...params[idx],
 				role: "system",
 				content,
 				...(turnScoped && !hasEffort && !hasToolChanges ? { clear_at: "next_user_message" } : {}),
 				...(hasEffort ? { output_config: { effort: developer.payload?.effort } } : {}),
-			};
+			});
 		}
 	}
 	// A replayed compaction block opens the assistant response it was produced
@@ -5075,7 +5135,9 @@ export function convertAnthropicMessages(
 		) {
 			continue;
 		}
-		params.splice(i, 2, { ...next, content: [current.content[0], ...next.content] });
+		const merged = { ...next, content: [current.content[0], ...next.content] };
+		setSourceOrigin(merged, combineContentSourceOrigins(merged.content));
+		params.splice(i, 2, merged);
 	}
 	// Dropped empty user/developer turns can leave two assistant params adjacent;
 	// the API rejects consecutive assistant messages. Repair with the same neutral

@@ -12,6 +12,7 @@ import type {
 	ToolChoice,
 } from "../types";
 import { resolveCacheRetention } from "../utils";
+import { invalidateSourceOrigins } from "../utils/source-origin";
 import { createAbortSourceTracker } from "../utils/abort";
 import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
@@ -130,8 +131,10 @@ const streamAzureOpenAIResponsesOnce = (
 			const requestModel = modelForAzureEndpoint(model, baseUrl);
 			let params = buildParams(requestModel, context, options, deploymentName);
 			const replacementPayload = await options?.onPayload?.(params, requestModel);
+			if (options?.onPayload) invalidateSourceOrigins(params);
 			if (replacementPayload !== undefined) {
 				params = replacementPayload as typeof params;
+				invalidateSourceOrigins(params, "externally-replaced");
 			}
 			const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getOpenAIStreamIdleTimeoutMs();
 			const firstEventTimeoutMs =
