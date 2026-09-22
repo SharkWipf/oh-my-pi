@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Long-session footer totals, credential pins, and retained-context reconstruction reuse the session index instead of repeatedly scanning cold history. Recent sibling branches reuse a bounded control-state checkpoint; explicit transcript exports retain full history and persisted images remain lazily resolved.
+
+### Fixed
+
+- Supported in-place session-entry rewrites refresh cumulative usage, derived controls, and credential pins without moving the selected branch.
+
 ### Added
 
 - Added `omp login` command for terminal-based OAuth authentication, including automated model discovery refresh and browser-opening support
