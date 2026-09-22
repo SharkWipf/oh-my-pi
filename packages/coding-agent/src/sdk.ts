@@ -27,6 +27,7 @@ import type { DiscoverAuthStorageOptions } from "@oh-my-pi/pi-ai/auth-broker/dis
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import { prewarmOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { isOpenAICodexWebSocketPreferred } from "@oh-my-pi/pi-ai/providers/openai-codex-transport";
+import { invalidateSourceOrigins } from "@oh-my-pi/pi-ai/utils/source-origin";
 import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { $env, $flag } from "@oh-my-pi/pi-utils/env";
@@ -3596,6 +3597,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		const transformContext = async (messages: AgentMessage[], _signal?: AbortSignal) => {
 			const withContext = await extensionRunner.emitContext(messages);
+			// Arbitrary hooks own their output, including same-object mutations.
+			if (extensionRunner.hasHandlers("context")) invalidateSourceOrigins(withContext, "externally-replaced");
 			return wrapSteeringForModel(withContext);
 		};
 		// Per-request provider-context transforms. Obfuscate FIRST so secrets are
@@ -3647,7 +3650,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			);
 		};
 		const onPayload = async (payload: unknown, model?: Model) => {
-			return await extensionRunner.emitBeforeProviderRequest(payload, model);
+			const result = await extensionRunner.emitBeforeProviderRequest(payload, model);
+			if (extensionRunner.hasHandlers("before_provider_request")) {
+				invalidateSourceOrigins(result, result === payload ? "externally-mutated" : "externally-replaced");
+			}
+			return result;
 		};
 		const onResponse: SimpleStreamOptions["onResponse"] = async (response, model) => {
 			await extensionRunner.emitAfterProviderResponse(response, model);

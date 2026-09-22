@@ -101,10 +101,12 @@ export interface TokenBudgetCheck {
 }
 
 /**
- * Image content has no tokenizer representation; charge a fixed estimate
- * matching what providers typically bill for inline images.
+ * Baseline per original image in user, developer, tool and hook messages.
+ * This local estimate is independent of provider/model/detail, not a bill.
+ * A representation-specific projection must replace this charge (add only
+ * its effective image estimate minus this baseline), never add a second image.
  */
-const IMAGE_TOKEN_ESTIMATE = 1200;
+export const IMAGE_TOKEN_ESTIMATE = 1200;
 
 /**
  * Memoized estimates for one message under this tokenizer's encoding, split by
@@ -221,11 +223,7 @@ export class Tokenizer {
 		switch (message.role) {
 			case "user":
 			case "developer": {
-				// Both roles carry `string | (TextContent | ImageContent)[]` and both are
-				// sent to the provider -- convertMessageToLlm handles developer alongside
-				// user -- so they are counted alike. Without the developer case the switch
-				// fell through to `default: return 0`, and the old annotation narrowed the
-				// blocks to text-only, hiding the image charge the toolResult arm applies.
+				// Both roles carry text and images sent to the provider.
 				const content = message.content;
 				if (typeof content === "string") {
 					fragments.push(content);

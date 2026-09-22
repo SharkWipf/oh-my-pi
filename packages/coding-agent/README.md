@@ -13,6 +13,14 @@ Package-specific references:
 - [MCP server/tool authoring](../../docs/mcp-server-tool-authoring.md)
 - [DEVELOPMENT](./DEVELOPMENT.md)
 
+## Transient inline image accounting
+
+For a prepared provider `Context`, `getInlineFrameAccounting(image)` and `getInlineTextAccounting(textBlock)` from `@oh-my-pi/pi-coding-agent/session/snapcompact-inline` identify actual inline-rendered frames and their control notes. Owners are `system`, `context` (loaded context instructions), or `tool`; tool facts also carry `toolCallId`. Frame `estimatedTokens` comes from the rendering shape and is a local estimate, not exact provider billing. Ordinary original images have no inline fact.
+
+Count the transformed system-prompt stub and emitted text, not the replaced prompt. When starting from `Tokenizer.countMessages`, replace each inline image baseline with its frame estimate by adding only `estimatedTokens - IMAGE_TOKEN_ESTIMATE`. Irreducible prompt accounting includes only the `system`/`context` frames and notes, not ordinary history or tool-result frames.
+
+Facts use the existing source-origin sidecar and survive explicit image-normalization and blob-decoration clones. Arbitrary untracked clones, changed image/text fields, invalidated hook output, and persisted/reloaded origin maps do not provide current inline facts. Inspect the actual prepared pre-hook context; do not infer ownership from equal text or treat missing facts as a known zero cost.
+
 ## Memory backends
 
 The agent supports three mutually-exclusive memory backends, selected via the `memory.backend` setting (Settings → Memory tab, or `~/.omp/config.yml`):

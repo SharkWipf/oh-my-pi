@@ -44,6 +44,11 @@ import {
 } from "@oh-my-pi/pi-ai/utils";
 import { captureOpenAIHttpError } from "@oh-my-pi/pi-ai/utils/openai-http";
 import {
+	importItemOrigins,
+	type NativeItemOrigin,
+	validateNativeItemOrigins,
+} from "@oh-my-pi/pi-ai/utils/source-origin";
+import {
 	applyCodexResidencyHeader,
 	CODEX_BASE_URL,
 	codexRoutingHint,
@@ -249,6 +254,7 @@ export type OpenAiRemoteCompactionItem = {
 export interface OpenAiRemoteCompactionPreserveData {
 	provider?: string;
 	replacementHistory: Array<Record<string, unknown>>;
+	replacementOrigins?: NativeItemOrigin[];
 	compactionItem: OpenAiRemoteCompactionItem;
 }
 
@@ -372,7 +378,12 @@ export function getPreservedOpenAiRemoteCompactionData(
 ): OpenAiRemoteCompactionPreserveData | undefined {
 	const candidate = preserveData?.[OPENAI_REMOTE_COMPACTION_PRESERVE_KEY];
 	if (!candidate || typeof candidate !== "object") return undefined;
-	const maybeData = candidate as { provider?: unknown; replacementHistory?: unknown; compactionItem?: unknown };
+	const maybeData = candidate as {
+		provider?: unknown;
+		replacementHistory?: unknown;
+		replacementOrigins?: unknown;
+		compactionItem?: unknown;
+	};
 	if (!Array.isArray(maybeData.replacementHistory)) return undefined;
 	const maybeItem = maybeData.compactionItem;
 	if (!maybeItem || typeof maybeItem !== "object") return undefined;
@@ -383,7 +394,10 @@ export function getPreservedOpenAiRemoteCompactionData(
 	if (!isClassicCompaction && !isSummaryCompaction) {
 		return undefined;
 	}
+	const replacementOrigins = validateNativeItemOrigins(maybeData.replacementOrigins);
+	importItemOrigins(maybeData.replacementHistory, replacementOrigins);
 	return {
+		replacementOrigins,
 		provider: typeof maybeData.provider === "string" ? maybeData.provider : undefined,
 		replacementHistory: maybeData.replacementHistory as Array<Record<string, unknown>>,
 		compactionItem: compactionItem as unknown as OpenAiRemoteCompactionItem,
