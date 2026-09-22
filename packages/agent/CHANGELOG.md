@@ -22,6 +22,10 @@
 
 ### Fixed
 
+- Native compaction preserves selected original submissions separately from delivered expansions, including source-addressed original images and historical replay coverage.
+- Native V2 retains selected historical users chronologically without refunding the ordinary whole-group budget. Complete admitted non-user atoms are captured from logical sources before conversion and charged once; partial text/image coverage unions into one source slot, with target, source charge, and minimum-clamped residual reported. Identified summary/archive migrations do not consume ordinary user retention.
+- Native V1 sends selected non-user history as attributed context with original images, preserves canonical provider output and unknown extension fields, and never guesses source identities from matching text. Complete native atoms retain provider server-tool fields, metadata-only computer screenshots, and generated images without replaying whole-history snapshots or duplicating executable calls.
+- Anthropic native compaction retains its chronological selected-source layout beside the verbatim summary and encrypted aggregate state, without treating that layout as an OpenAI full-history replacement.
 - Fixed ordinary source token estimates omitting assistant images and known current native text, code, logs, search context, and computer metadata. Normalized native mirrors are charged once, including after controlled source rewrites and JSON reload.
 - Fixed metadata-only computer screenshots counting as zero before source allocation. Their single image baseline replaces content-image mirrors, matching computer-result serialization.
 - Kept compaction source IDs and selected ranges aligned with converted messages across journal metadata and repeated sparse retention.
