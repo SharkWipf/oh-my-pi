@@ -46,6 +46,7 @@ import {
 } from "@oh-my-pi/pi-agent-core";
 import {
 	CompactionCancelledError,
+	type CompactionDiagnostics,
 	type CompactionPreparation,
 	type CompactionResult,
 	calculatePromptTokens,
@@ -896,6 +897,8 @@ export class AgentSession {
 	#sessionGeneration = 0;
 	/** Active history ownership; ordinary appends and policy changes leave it intact. */
 	#compactionOwnership: object = {};
+	#preparedCompactionDiagnostics?: { ownership: object; facts: CompactionDiagnostics };
+	readonly #disposePreparedCompactionDiagnostics: () => void;
 	/** Settles when switchSession commits or restores its previous generation on rollback.
 	 *  newSession never rolls its generation back, so it does not delay stale aside/SDK calls. */
 	#sessionGenerationSettled: Promise<void> | undefined;
@@ -2154,6 +2157,13 @@ export class AgentSession {
 				),
 			obfuscate: context => obfuscateProviderContext(this.#obfuscator, context),
 			readMasks: (entries, isCurrent) => readPreservedUserMessageClassificationMasks(entries, { isCurrent }),
+		});
+		this.#disposePreparedCompactionDiagnostics = this.agent.addBeforeModelCall((context, signal, request) => {
+			if (signal?.aborted) return;
+			this.#preparedCompactionDiagnostics = {
+				ownership: this.#compactionOwnership,
+				facts: this.#maintenance.capturePreparedCompactionDiagnostics(context, request.model),
+			};
 		});
 		this.#preservationSettings = readPreservationPolicySettings(this.settings);
 		this.#preservation = new SessionPreservation({
@@ -4877,6 +4887,8 @@ export class AgentSession {
 		this.#messageClassifier.dispose();
 		this.#preservedMessageListeners.clear();
 		this.#preservedQuery = undefined;
+		this.#disposePreparedCompactionDiagnostics();
+		this.#preparedCompactionDiagnostics = undefined;
 		this.#modelDiscoveryAbortController.abort();
 		this.#queuedMessageDrainBlocked = false;
 		this.#usagePreflightReadyForNextModelCall = false;
@@ -11479,6 +11491,22 @@ export class AgentSession {
 		pendingMessages?: AgentMessage[];
 	}): ContextUsageBreakdown | undefined {
 		return this.#stats.getContextBreakdown(options);
+	}
+
+	/** Explicit detailed inspection; never materialized by the status-line/toggle hot path. */
+	getCompactionDiagnostics(snapshot: "current" | "recorded" = "current") {
+		return this.#maintenance.getCompactionDiagnostics(snapshot);
+	}
+
+	/** Last observed prepared footprint on this history owner, not a cached request body. */
+	getPreparedCompactionDiagnostics(): CompactionDiagnostics | undefined {
+		const receipt = this.#preparedCompactionDiagnostics;
+		return receipt?.ownership === this.#compactionOwnership ? structuredClone(receipt.facts) : undefined;
+	}
+
+	/** Actual installed source coverage, separate from live preservation policy. */
+	getSourceRepresentationDetails(sourceId: string): string[] {
+		return this.#maintenance.getSourceRepresentationDetails(sourceId);
 	}
 
 	getContextUsage(options?: { contextWindow?: number }): ContextUsage | undefined {

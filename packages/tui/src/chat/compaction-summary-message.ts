@@ -5,6 +5,10 @@ import { Markdown } from "../components/markdown";
 import { formatNumber } from "@oh-my-pi/pi-utils";
 import { getMarkdownTheme, theme } from "../theme";
 import type { BranchSummaryMessage, CompactionSummaryMessage, CustomMessage } from "./messages";
+import { formatKeyHints } from "../app-keybindings";
+import { getKeybindings } from "../keybindings";
+import { truncateToWidth } from "../utils";
+import { renderCompactionDiagnosticsSummary } from "../status-line/context-usage";
 
 /** Divider labels per compaction method; unknown/legacy methods fall back to "compacted". */
 const COMPACTION_METHOD_LABELS: Record<string, string> = {
@@ -24,6 +28,7 @@ function compactionAmount(message: CompactionSummaryMessage): string | undefined
 interface SummaryDividerOptions {
 	label: () => string;
 	detailMarkdown: () => string;
+	annotation?: () => string | undefined;
 }
 
 /**
@@ -32,10 +37,12 @@ interface SummaryDividerOptions {
  */
 class DividerSummary implements Component {
 	readonly #label: () => string;
+	readonly #annotation: (() => string | undefined) | undefined;
 	#cache: { width: number; lines: readonly string[] } | undefined;
 
-	constructor(label: () => string) {
+	constructor(label: () => string, annotation?: () => string | undefined) {
 		this.#label = label;
+		this.#annotation = annotation;
 	}
 
 	invalidate(): void {
@@ -45,7 +52,10 @@ class DividerSummary implements Component {
 	render(width: number): readonly string[] {
 		width = Math.max(1, width);
 		if (this.#cache?.width === width) return this.#cache.lines;
-		const lines = ["", this.#divider(width), ""];
+		const lines = ["", this.#divider(width)];
+		const annotation = this.#annotation?.();
+		if (annotation) lines.push(theme.fg("muted", truncateToWidth(annotation, width)));
+		lines.push("");
 		this.#cache = { width, lines };
 		return lines;
 	}
@@ -53,14 +63,14 @@ class DividerSummary implements Component {
 	#divider(width: number): string {
 		const rule = theme.tree.horizontal;
 		const label = this.#label();
-		// sep.dot ships pre-padded (" · "); trim so the hint joins with single spaces.
-		const hint = `${theme.sep.dot.trim()} ctrl+o`;
+		const expandHint = formatKeyHints(getKeybindings().getKeys("app.tools.expand"));
+		const hint = expandHint ? `${theme.sep.dot.trim()} ${expandHint}` : "";
 		const plainWidth = Bun.stringWidth(`${label} ${hint}`, { countAnsiEscapeCodes: false });
 		// ` label hint ` framed by rules on both sides.
 		const remaining = width - plainWidth - 2;
 		if (remaining < 4) {
 			// Too narrow for a framed rule — emit the bare label.
-			return theme.fg("muted", label);
+			return theme.fg("muted", truncateToWidth(label, width));
 		}
 		const left = Math.floor(remaining / 2);
 		const right = remaining - left;
@@ -123,7 +133,7 @@ class SummaryMessageComponent implements Component {
 
 	#createDisclosure(expanded: boolean): Disclosure {
 		return new Disclosure({
-			summary: new DividerSummary(this.#options.label),
+			summary: new DividerSummary(this.#options.label, this.#options.annotation),
 			body: () => this.#detailBox(),
 			expanded,
 		});
@@ -155,25 +165,29 @@ class SummaryMessageComponent implements Component {
  */
 export class CompactionSummaryMessageComponent extends SummaryMessageComponent {
 	constructor(message: CompactionSummaryMessage) {
+		const diagnosticLines = message.diagnostics
+			? renderCompactionDiagnosticsSummary(message.diagnostics).split("\n")
+			: undefined;
 		super({
 			// A dead-end warning stamped by the progress guard badges the bar;
 			// the full text lives in the ctrl+o detail block below.
-			label: () => compactionLabel(message),
-			detailMarkdown: () => compactionDetailMarkdown(message),
+			label: () => compactionLabel(message, diagnosticLines),
+			annotation: () => diagnosticLines?.[1],
+			detailMarkdown: () => compactionDetailMarkdown(message, diagnosticLines),
 		});
 	}
 }
 
-function compactionLabel(message: CompactionSummaryMessage): string {
+function compactionLabel(message: CompactionSummaryMessage, diagnosticLines?: string[]): string {
 	const name = (message.method && COMPACTION_METHOD_LABELS[message.method]) || "compacted";
 	let label = `${theme.icon.camera} ${name}`;
-	const amount = compactionAmount(message);
+	const amount = diagnosticLines?.[0] ?? compactionAmount(message);
 	if (amount) label += `${theme.sep.dot}${amount}`;
 	if (message.warning) label += ` ${theme.fg("warning", theme.icon.warning)}`;
 	return label;
 }
 
-function compactionDetailMarkdown(message: CompactionSummaryMessage): string {
+function compactionDetailMarkdown(message: CompactionSummaryMessage, diagnosticLines?: string[]): string {
 	const tokenLine =
 		message.tokensBefore > 0
 			? message.tokensAfter !== undefined
@@ -186,7 +200,10 @@ function compactionDetailMarkdown(message: CompactionSummaryMessage): string {
 	const frameNote =
 		frameCount > 0 ? `\n\n_${frameCount} snapcompact frame${frameCount === 1 ? "" : "s"} attached_` : "";
 	const warningNote = message.warning ? `\n\n${theme.icon.warning} **Warning:** ${message.warning}` : "";
-	return `**${tokenLine}**${warningNote}\n\n${message.summary}${frameNote}`;
+	const diagnosticNote = diagnosticLines
+		? `\n\n${diagnosticLines.join("\n\n")}\n\nUse /context details for ordered inventory and measurement basis.`
+		: "";
+	return `**${tokenLine}**${warningNote}${diagnosticNote}\n\n${message.summary}${frameNote}`;
 }
 
 /**

@@ -51,6 +51,19 @@ With an empty editor, press Escape twice to open rewind at the recent tail. Up/D
 
 Rewind uses journal-entry anchors rather than guessed global row numbers. Edge arrows indicate more history; cold history remains accessible without pre-rendering it. The first open indexes source descriptors cooperatively with a cancellable loading view. Only demanded transcript components are instantiated, and offscreen components are released. Reopening unchanged history reuses the source index and bounded last-visible window; source rewrites, branch changes, and relevant presentation changes invalidate that view. A single large message or grouped tool card still costs the work required by its own renderer.
 
+## Physical context inspection
+
+`/context details` opens the ordered classified inventory separately from the ordinary usage view. Recorded compaction, current reconstruction, and the last actual-prepared request remain distinct snapshots. The detail view lists fixed prompts/tools/context/skills, summary and gap text, retained and post-compaction content, native payloads, raster frames and original images with source coverage, structural counts, controls and qualified token quantities. Manual and automatic compact summaries use concise ordinary/added/shared results and the method’s actual target.
+
+`AgentSession.getCompactionDiagnostics("current")` materializes the reconstructed inventory only when requested; `getSourceRepresentationDetails(sourceId)` inspects current versus captured source spans without tokenizing the inventory. Neither operation runs on policy toggles or footer updates. Source quota membership and estimates are separate from disjoint physical charges: overlap does not refund quota, and a shared frame is charged once.
+Original and delivered projections of the same journal entry remain separate physical occurrences when their bytes differ. Coverage joins match the projection as well as source identity; source quota membership still refers to the journal source, not an extra bill for each projection.
+
+`getCompactionDiagnostics("recorded")` reads frozen facts from the existing atomic compaction record. It includes the initiating model, settings, fixed counts, source reasons and quotas, and actual ordinary target/calibration, complete non-user precharge and residual allocation. Legacy records without facts remain unavailable, not reconstructed with today’s settings. Settings changes and reload do not rewrite historical facts.
+
+`getPreparedCompactionDiagnostics()` reads the last compact inventory observed at the existing post-inband `beforeModelCall` boundary on the current history owner. It works with memory disabled, never reruns preparation, retains no request Context or image bytes, and returns an independent copy to explicit viewers. The label is actual-prepared, not confirmed sent: later provider hooks, dispatch, acceptance and billing remain unobserved. Boundary-time settings and installed archive settings remain separate.
+
+Text tokenizer quantities, generic local image estimates, actual inline-renderer estimates and unknown native/opaque costs are labeled separately. Archive identity is not a historical renderer price; absent historical pricing stays explicitly unavailable. Original-image identity takes precedence over legacy summary-role guesses, and its physical correction replaces the base estimate once. Native file references, screenshots and generated images retain a baseline image estimate even when pixel bytes are unavailable; remaining unmeasurable metadata stays unknown. None of these local quantities is a provider invoice.
+
 ## Memory backends
 
 The agent supports three mutually-exclusive memory backends, selected via the `memory.backend` setting (Settings → Memory tab, or `~/.omp/config.yml`):
