@@ -165,6 +165,10 @@
 - Esc-Esc rewind paints a cancellable loading surface before cooperatively collecting and indexing cold history, renders only its source-anchored viewport, and reuses unchanged source indexes on reopen. Branch lookup uses indexed children, including root siblings; persisted skill/custom requests and image-only prompts remain selectable, and empty returned drafts replace stale editor text.
 - Grouped Read cards refresh their display at render time rather than rebuilding it for every replayed result. Deferred rewind preserves model-substitution and execution-artifact warnings.
 
+### Fixed
+
+- JavaScript eval now settles pending tool calls after their originating cell finishes or fails, preserving retained promises and attributing late errors to the original cell without losing kernel state.
+
 ## [18.2.8] - 2026-09-21
 
 ### Added
