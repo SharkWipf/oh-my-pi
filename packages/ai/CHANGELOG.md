@@ -52,6 +52,11 @@
 - Fixed Kimi usage reporting so monthly totals and code quotas are shown alongside the five-hour usage window.
 - Bedrock no longer sends provider-invalid payloads when an errored tool result contains an image; the image is hoisted into a sibling block ([#12865](https://github.com/can1357/oh-my-pi/pull/12865) by [@roboomp](https://github.com/roboomp)).
 - Gemini, Vertex, and Cloud Code Assist requests no longer include the unsupported `minP`/`repetitionPenalty` sampling fields, which caused 400s when set globally ([#12850](https://github.com/can1357/oh-my-pi/pull/12850) by [@roboomp](https://github.com/roboomp)).
+### Fixed
+
+- Fixed OpenAI, Azure Responses, and Codex thinking summaries arriving only in final snapshots: late text and unseen suffixes now reach streaming clients before completion, while divergent display text remains append-only and replay signatures retain the authoritative provider item. Later summary parts retain their preceding display text when a completed snapshot extends that part.
+- Buffered raw Responses reasoning until completion so readable summaries take precedence, retaining raw-only fallback and completing reasoning when a terminal snapshot omits per-item completion.
+- Decoded explicitly tagged Codex reasoning envelopes in Responses/Azure/Codex raw reasoning, completed summaries, and split summary streams, including sequential-cutoff delivery. Display receives the reasoning text while native replay payloads and literal message JSON remain unchanged.
 
 ## [18.2.8] - 2026-09-21
 
