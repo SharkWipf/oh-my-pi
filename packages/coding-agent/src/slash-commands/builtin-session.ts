@@ -467,17 +467,32 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		icon: "context",
 		description: "Show estimated context usage breakdown",
 		acpDescription: "Show context usage",
+		acpInputHint: "[usage|details]",
+		subcommands: [
+			{ name: "usage", description: "Show estimated context usage breakdown" },
+			{ name: "details", description: "Inspect ordered context inventory and measurement basis" },
+		],
+		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
 			const usage = runtime.ctx.session.getContextUsage();
 			if (!usage) return "Context: unavailable";
 			return `Context: ${Math.round(usage.percent)}% (${formatTokenCount(usage.tokens)}/${formatTokenCount(usage.contextWindow)})`;
 		},
-		handle: async (_command, runtime) => {
-			await runtime.output(buildContextReportText(runtime));
+		handle: async (command, runtime) => {
+			const { verb, rest } = parseSubcommand(command.args);
+			if (rest || (verb && verb !== "usage" && verb !== "details")) {
+				return usage("Usage: /context [usage|details]", runtime);
+			}
+			await runtime.output(buildContextReportText(runtime, verb === "details" ? "details" : "usage"));
 			return commandConsumed();
 		},
-		handleTui: (_command, runtime) => {
-			runtime.ctx.handleContextCommand();
+		handleTui: (command, runtime) => {
+			const { verb, rest } = parseSubcommand(command.args);
+			if (rest || (verb && verb !== "usage" && verb !== "details")) {
+				runtime.ctx.showStatus("Usage: /context [usage|details]");
+			} else {
+				runtime.ctx.handleContextCommand(verb === "details" ? "details" : "usage");
+			}
 			runtime.ctx.editor.setText("");
 		},
 	},

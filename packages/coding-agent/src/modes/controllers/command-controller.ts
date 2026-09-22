@@ -34,6 +34,7 @@ import { BorderedLoader } from "@oh-my-pi/pi-tui/overlays/bordered-loader";
 import { DynamicBorder } from "@oh-my-pi/pi-tui/chrome/dynamic-border";
 import { EvalExecutionComponent } from "@oh-my-pi/pi-tui/chat/eval-execution";
 import { MoveOverlay, type MoveOverlayResult } from "@oh-my-pi/pi-tui/overlays/move-overlay";
+import { ContextDetailsOverlay } from "@oh-my-pi/pi-tui/overlays/context-details-overlay";
 import { moveDirectorySource } from "../move-directory-source";
 import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { getMarkdownTheme, getSymbolTheme, theme, type Theme } from "@oh-my-pi/pi-tui/theme";
@@ -678,7 +679,35 @@ export class CommandController {
 		showMarkdownPanel(this.ctx, "Available Tools", tools);
 	}
 
-	handleContextCommand(): void {
+	handleContextCommand(argument: "usage" | "details" = "usage"): void {
+		if (argument === "details") {
+			const current = this.ctx.session.getCompactionDiagnostics("current");
+			const recorded = this.ctx.session.getCompactionDiagnostics("recorded");
+			const prepared = this.ctx.session.getPreparedCompactionDiagnostics();
+			const component = new ContextDetailsOverlay(
+				this.ctx.ui,
+				this.ctx.keybindings,
+				current,
+				recorded,
+				() => {
+					handle.hide();
+					component.dispose();
+					this.ctx.ui.setFocus(this.ctx.editorContainer.children[0] ?? this.ctx.editor);
+					this.ctx.ui.requestRender();
+				},
+				prepared,
+			);
+			const handle = this.ctx.ui.showOverlay(component, {
+				anchor: "bottom-center",
+				width: "100%",
+				maxHeight: "100%",
+				margin: 0,
+				fullscreen: true,
+			});
+			this.ctx.ui.setFocus(component);
+			this.ctx.ui.requestRender();
+			return;
+		}
 		const breakdown = computeSessionContextBreakdown(this.ctx.session, { snapcompactSavings: true });
 		if (breakdown.contextWindow <= 0) {
 			this.ctx.showWarning("Context usage is unavailable: no model is selected for this session.");

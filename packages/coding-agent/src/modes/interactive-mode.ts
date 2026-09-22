@@ -6538,8 +6538,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#commandController.handleToolsCommand();
 	}
 
-	handleContextCommand(): void {
-		this.#commandController.handleContextCommand();
+	handleContextCommand(argument: "usage" | "details" = "usage"): void {
+		this.#commandController.handleContextCommand(argument);
 	}
 
 	#vibeSessionTransitionBlocked(): boolean {
