@@ -26,6 +26,7 @@
 - Fixed metadata-only computer screenshots counting as zero before source allocation. Their single image baseline replaces content-image mirrors, matching computer-result serialization.
 - Kept compaction source IDs and selected ranges aligned with converted messages across journal metadata and repeated sparse retention.
 - Authored images interleaved with snap archive frames keep their one-time original-image estimate instead of being priced as rasterized transcript frames.
+- Pre-model-call observation gates now receive the actual prepared request model after provider-context transforms and inband tool encoding.
 
 ## [18.2.5] - 2026-09-17
 
