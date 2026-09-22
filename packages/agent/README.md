@@ -54,6 +54,23 @@ archive offsets stay historical; only intact ranges retain exact current coverag
 Explicit image deletion removes the corresponding original-image reference.
 These descriptors are local metadata, never provider wire fields.
 
+Ordinary retention first chooses the oldest whole-group suffix that fits its
+budget (the newest group survives even when oversized). Selected users are
+then unioned by source identity in chronological order; they never refund the
+ordinary budget. Complete admitted non-user atoms consume that budget once.
+
+Eligible Anthropic models use native compaction automatically at 55,000 input
+tokens unless remote compaction is disabled. Native summary and encrypted state
+remain byte-identical aggregate content; source-aware hosts replay the summary
+block before the chronological source layout. A persisted layout is not an
+OpenAI full-history replacement: later snapshot-to-commit messages remain live
+history. Session owners manage native-summary slots when switching backends.
+
+Codex V1 has no implicit compact endpoint; an explicit endpoint enables that
+route. Streaming V2 keeps its own retained-message budget and minimum residual
+of one token. V1 provider output remains canonical, including unknown extension
+fields; source attribution never guesses identities from matching text.
+
 ### Message Flow
 
 ```

@@ -91,7 +91,17 @@ import {
 import type { CapturedHttpErrorResponse } from "../utils/http-inspector";
 import { getOpenRouterHeaders } from "../utils/openrouter-headers";
 import { isForcedToolChoice } from "../utils/tool-choice";
-import { getSourceOrigin, setSourceOrigin, transferTransformedSourceOrigin } from "../utils/source-origin";
+import {
+	cloneWithSourceOrigins,
+	combineContentSourceOrigins,
+	combineSourceOrigins,
+	getSourceOrigin,
+	type NativeItemOrigin,
+	type NativeSourcePart,
+	setSourceOrigin,
+	transferSourceOrigin,
+	transferTransformedSourceOrigin,
+} from "../utils/source-origin";
 import {
 	buildCopilotDynamicHeaders,
 	getCachedCopilotIntegrationId,
@@ -124,6 +134,14 @@ import type {
 import { applyInferenceHeaders, setHeaderIfAbsent } from "./inference-headers";
 import { transformMessages } from "./transform-messages";
 import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER, partitionVisionContent } from "./vision-guard";
+
+function responsesTextOrigin<T extends object>(source: object, item: T, original: string, emitted: string): T {
+	return original === emitted ? transferSourceOrigin(source, item) : transferTransformedSourceOrigin(source, item);
+}
+
+function responsesContentOrigin<T extends object>(content: readonly object[], item: T): T {
+	return setSourceOrigin(item, combineContentSourceOrigins(content));
+}
 
 export interface OpenAIModelIdentity {
 	provider: string;
@@ -1568,11 +1586,17 @@ export function repairOrphanResponsesToolOutputs(input: ResponseInput): Response
 		}
 		const ORPHAN_OUTPUT_LIMIT = 16_000;
 		if (text.length > ORPHAN_OUTPUT_LIMIT) text = `${text.slice(0, ORPHAN_OUTPUT_LIMIT)}\n...[truncated]`;
-		repaired.push({
-			type: "message",
-			role: "assistant",
-			content: `[Orphan ${toolName} result; call_id=${callId}]: ${text}`,
-		} as ResponseInput[number]);
+		repaired.push(
+			transferTransformedSourceOrigin(
+				item,
+				{
+					type: "message",
+					role: "assistant",
+					content: `[Orphan ${toolName} result; call_id=${callId}]: ${text}`,
+				} as ResponseInput[number],
+				"derived",
+			),
+		);
 	}
 	return repaired ?? input;
 }
@@ -1623,19 +1647,29 @@ export function repairOrphanResponsesToolCalls(input: ResponseInput): ResponseIn
 			continue;
 		}
 		if (kind === "computer") {
-			repaired.push({
-				type: "message",
-				role: "assistant",
-				content: `[Computer call interrupted before a screenshot was recorded; call_id=${callId}]`,
-			} as ResponseInput[number]);
+			repaired.push(
+				setSourceOrigin(
+					{
+						type: "message",
+						role: "assistant",
+						content: `[Computer call interrupted before a screenshot was recorded; call_id=${callId}]`,
+					} as ResponseInput[number],
+					{ kind: "synthetic", reason: "interrupted-computer-call" },
+				),
+			);
 			continue;
 		}
 		repaired.push(item);
-		repaired.push({
-			type: kind === "custom" ? "custom_tool_call_output" : "function_call_output",
-			call_id: callId,
-			output: ORPHAN_TOOL_CALL_PLACEHOLDER,
-		} as ResponseInput[number]);
+		repaired.push(
+			setSourceOrigin(
+				{
+					type: kind === "custom" ? "custom_tool_call_output" : "function_call_output",
+					call_id: callId,
+					output: ORPHAN_TOOL_CALL_PLACEHOLDER,
+				} as ResponseInput[number],
+				{ kind: "synthetic", reason: "interrupted-tool-output" },
+			),
+		);
 	}
 	return repaired;
 }
@@ -1728,13 +1762,13 @@ function clampResponsesImageDetail(
 function convertResponsesInputImage(image: ImageContent, supportsImageDetailOriginal: boolean): ResponseInputImage {
 	const detail = clampResponsesImageDetail(image.detail, supportsImageDetailOriginal);
 	if (image.providerFile?.provider === "openai" && image.providerFile.id) {
-		return { type: "input_image", detail, file_id: image.providerFile.id };
+		return transferSourceOrigin(image, { type: "input_image", detail, file_id: image.providerFile.id });
 	}
-	return {
+	return transferSourceOrigin(image, {
 		type: "input_image",
 		detail,
 		image_url: image.url ?? `data:${image.mimeType};base64,${image.data}`,
-	};
+	});
 }
 
 export function convertResponsesInputContent(
@@ -1760,19 +1794,31 @@ export function convertResponsesInputContent(
 		const raw = item.text.toWellFormed();
 		const text = escapeControlTokens ? escapeHarmonyControlTokens(raw) : raw;
 		if (text.trim().length === 0) continue;
-		normalizedContent.push({
-			type: "input_text",
-			text,
-		} satisfies ResponseInputText);
+		normalizedContent.push(
+			responsesTextOrigin(
+				item,
+				{
+					type: "input_text",
+					text,
+				} satisfies ResponseInputText,
+				item.text,
+				text,
+			),
+		);
 	}
 	for (const item of imageBlocks) {
 		normalizedContent.push(convertResponsesInputImage(item, supportsImageDetailOriginal));
 	}
 	if (omittedImages) {
-		normalizedContent.push({
-			type: "input_text",
-			text: NON_VISION_IMAGE_PLACEHOLDER,
-		} satisfies ResponseInputText);
+		normalizedContent.push(
+			setSourceOrigin(
+				{
+					type: "input_text",
+					text: NON_VISION_IMAGE_PLACEHOLDER,
+				} satisfies ResponseInputText,
+				{ kind: "synthetic", reason: "omitted-image-placeholder" },
+			),
+		);
 	}
 	return normalizedContent.length > 0 ? normalizedContent : undefined;
 }
@@ -1813,33 +1859,39 @@ function adaptResponsesReplayItemsForModel(
 	for (const item of input) {
 		if (!supportsCustomToolCalls && item.type === "custom_tool_call") {
 			changed = true;
-			adapted.push({
-				type: "function_call",
-				...(item.id ? { id: item.id } : {}),
-				call_id: item.call_id,
-				name: resolveReplayCustomToolName(item.name, wireNameMap),
-				arguments: JSON.stringify({ input: item.input }),
-				...(item.namespace ? { namespace: item.namespace } : {}),
-			});
+			adapted.push(
+				transferTransformedSourceOrigin(item, {
+					type: "function_call",
+					...(item.id ? { id: item.id } : {}),
+					call_id: item.call_id,
+					name: resolveReplayCustomToolName(item.name, wireNameMap),
+					arguments: JSON.stringify({ input: item.input }),
+					...(item.namespace ? { namespace: item.namespace } : {}),
+				}),
+			);
 			continue;
 		}
 		if (!supportsCustomToolCalls && item.type === "custom_tool_call_output") {
 			changed = true;
-			adapted.push({
-				type: "function_call_output",
-				call_id: item.call_id,
-				output: item.output,
-			});
+			adapted.push(
+				transferSourceOrigin(item, {
+					type: "function_call_output",
+					call_id: item.call_id,
+					output: item.output,
+				}),
+			);
 			continue;
 		}
 		if (!supportsComputerUse && (item.type === "computer_call" || item.type === "computer_call_output")) {
 			changed = true;
 			const callId = responseInputCallId(item) ?? "unknown";
-			adapted.push({
-				type: "message",
-				role: "assistant",
-				content: `[Previous computer ${item.type === "computer_call" ? "call" : "result"}; call_id=${callId}]: ${stringifyJson(item) ?? ""}`,
-			} as ResponseInput[number]);
+			adapted.push(
+				transferTransformedSourceOrigin(item, {
+					type: "message",
+					role: "assistant",
+					content: `[Previous computer ${item.type === "computer_call" ? "call" : "result"}; call_id=${callId}]: ${stringifyJson(item) ?? ""}`,
+				} as ResponseInput[number]),
+			);
 			continue;
 		}
 		adapted.push(item);
@@ -2119,6 +2171,8 @@ export function escapeReplayedControlTokens(items: ResponseInput): ResponseInput
 				),
 			});
 		}
+		if ("content" in escaped && Array.isArray(escaped.content)) responsesContentOrigin(escaped.content, escaped);
+		if ("output" in escaped && Array.isArray(escaped.output)) responsesContentOrigin(escaped.output, escaped);
 		return escaped;
 	});
 }
@@ -2127,7 +2181,12 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 	const messages: ResponseInput = [];
 	const systemPrompts = options.systemRole ? normalizeSystemPrompts(options.context.systemPrompt) : [];
 	for (const systemPrompt of systemPrompts) {
-		messages.push({ role: options.systemRole as "system" | "developer", content: systemPrompt });
+		messages.push(
+			setSourceOrigin(
+				{ role: options.systemRole as "system" | "developer", content: systemPrompt },
+				{ kind: "synthetic", reason: "system-prefix" },
+			),
+		);
 	}
 
 	// Compat is resolved by the catalog (e.g. Copilot / xai-oauth reject
@@ -2196,19 +2255,24 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 				escapeControlTokens,
 			);
 			if (!content) continue;
+			if (typeof msg.content === "string" && content[0].type === "input_text") {
+				responsesTextOrigin(msg, content[0], msg.content, content[0].text);
+			}
 			const developerText =
 				options.developerStringContent && msg.role === "developer" && typeof msg.content === "string"
 					? msg.content.toWellFormed()
 					: undefined;
-			messages.push({
-				role: "user",
-				content:
-					developerText !== undefined
-						? escapeControlTokens
-							? escapeHarmonyControlTokens(developerText)
-							: developerText
-						: content,
-			});
+			messages.push(
+				responsesContentOrigin(content, {
+					role: "user",
+					content:
+						developerText !== undefined
+							? escapeControlTokens
+								? escapeHarmonyControlTokens(developerText)
+								: developerText
+							: content,
+				}),
+			);
 		} else if (msg.role === "assistant") {
 			const assistantMsg = msg as AssistantMessage;
 			// Providers replay stale native items even when the current request has
@@ -2391,7 +2455,7 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 			}
 			const reasoningItem = parseResponseReasoningReplayItem(block.thinkingSignature);
 			if (reasoningItem) {
-				outputItems.push(reasoningItem);
+				outputItems.push(transferSourceOrigin(block, reasoningItem));
 				reasoningItemEmitted = true;
 			}
 			continue;
@@ -2424,7 +2488,8 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 				...(msgId ? { id: msgId } : {}),
 				...(parsedSignature?.phase ? { phase: parsedSignature.phase } : {}),
 			};
-			outputItems.push(messageItem as ResponseInput[number]);
+			responsesTextOrigin(block, messageItem.content[0], block.text, block.text.toWellFormed());
+			outputItems.push(responsesContentOrigin(messageItem.content, messageItem as ResponseInput[number]));
 			continue;
 		}
 
@@ -2435,24 +2500,32 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 		if (block.providerMetadata?.type === "computer") {
 			if (model.supportsComputerUse !== true) {
 				const callId = normalizeResponsesToolCallId(block.id, "ctc").callId;
-				outputItems.push({
-					type: "message",
-					role: "assistant",
-					content: `[Previous computer call; call_id=${callId}]: ${stringifyJson(block.providerMetadata.actions) ?? ""}`,
-				} as ResponseInput[number]);
+				outputItems.push(
+					transferTransformedSourceOrigin(
+						block,
+						{
+							type: "message",
+							role: "assistant",
+							content: `[Previous computer call; call_id=${callId}]: ${stringifyJson(block.providerMetadata.actions) ?? ""}`,
+						} as ResponseInput[number],
+						"derived",
+					),
+				);
 				continue;
 			}
 			const normalized = normalizeResponsesToolCallId(block.id, "ctc");
 			knownCallIds.add(normalized.callId);
 			computerCallIds?.add(normalized.callId);
-			outputItems.push({
-				type: "computer_call",
-				id: block.providerMetadata.providerItemId,
-				call_id: normalized.callId,
-				actions: structuredCloneJSON(block.providerMetadata.actions),
-				pending_safety_checks: structuredCloneJSON(block.providerMetadata.pendingSafetyChecks),
-				status: "completed",
-			} as ResponseInput[number]);
+			outputItems.push(
+				transferSourceOrigin(block, {
+					type: "computer_call",
+					id: block.providerMetadata.providerItemId,
+					call_id: normalized.callId,
+					actions: structuredCloneJSON(block.providerMetadata.actions),
+					pending_safety_checks: structuredCloneJSON(block.providerMetadata.pendingSafetyChecks),
+					status: "completed",
+				} as ResponseInput[number]),
+			);
 			continue;
 		}
 		const normalized = normalizeResponsesToolCallId(block.id, block.customWireName ? "ctc" : "fc");
@@ -2472,26 +2545,30 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 		if (block.customWireName && supportsCustomToolCalls) {
 			const rawInput = typeof block.arguments?.input === "string" ? block.arguments.input : "";
 			customCallIds?.add(normalized.callId);
-			outputItems.push({
-				type: "custom_tool_call",
-				...(itemId ? { id: itemId } : {}),
-				call_id: normalized.callId,
-				name: block.customWireName,
-				input: rawInput,
-			} as ResponseInput[number]);
+			outputItems.push(
+				transferSourceOrigin(block, {
+					type: "custom_tool_call",
+					...(itemId ? { id: itemId } : {}),
+					call_id: normalized.callId,
+					name: block.customWireName,
+					input: rawInput,
+				} as ResponseInput[number]),
+			);
 			continue;
 		}
 		const functionName =
 			block.customWireName && !supportsCustomToolCalls
 				? resolveReplayCustomToolName(block.customWireName, customToolWireNameMap)
 				: block.name;
-		outputItems.push({
-			type: "function_call",
-			...(itemId ? { id: itemId } : {}),
-			call_id: normalized.callId,
-			name: functionName,
-			arguments: stringifyJson(block.arguments) ?? "null",
-		});
+		outputItems.push(
+			transferSourceOrigin(block, {
+				type: "function_call",
+				...(itemId ? { id: itemId } : {}),
+				call_id: normalized.callId,
+				name: functionName,
+				arguments: stringifyJson(block.arguments) ?? "null",
+			}),
+		);
 	}
 
 	if (requiresReasoningItem && !reasoningItemEmitted && outputItems.length > 0) {
@@ -2516,6 +2593,17 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 			summary: [],
 			content: [{ type: "reasoning_text", text: reasoningText }],
 		} satisfies Omit<ResponseReasoningItem, "id"> & Partial<Pick<ResponseReasoningItem, "id">>;
+		if (carriedReasoningText.length > 0) {
+			setSourceOrigin(
+				reasoningItem,
+				combineSourceOrigins(
+					assistantMsg.content.filter(block => block.type === "thinking" && block.thinking.trim().length > 0),
+				),
+			);
+			transferTransformedSourceOrigin(reasoningItem, reasoningItem);
+		} else {
+			setSourceOrigin(reasoningItem, { kind: "synthetic", reason: "reasoning-replay-placeholder" });
+		}
 		// The vendored SDK type marks `id` required; the wire accepts its absence.
 		outputItems.unshift(reasoningItem as ResponseReasoningItem);
 	}
@@ -2572,13 +2660,55 @@ export function encodeResponsesToolResultOutput<TApi extends Api>(
 			? toolResult.content.map((block): ResponseInputContent => {
 					if (block.type === "image") return convertResponsesInputImage(block, supportsImageDetailOriginal);
 					const text = block.text.toWellFormed();
-					return {
-						type: "input_text",
-						text: escapeControlTokens ? escapeHarmonyControlTokens(text) : text,
-					};
+					const emitted = escapeControlTokens ? escapeHarmonyControlTokens(text) : text;
+					return responsesTextOrigin(
+						block,
+						{
+							type: "input_text",
+							text: emitted,
+						},
+						block.text,
+						emitted,
+					);
 				})
 			: outputText;
 	return { output, outputText };
+}
+
+function responsesToolTextOrigin(toolResult: ToolResultMessage, model: Model<Api>): NativeItemOrigin {
+	const parts: NativeSourcePart[] = [];
+	let offset = 0;
+	let first = true;
+	for (const block of toolResult.content) {
+		if (block.type !== "text") continue;
+		if (!first) offset++;
+		first = false;
+		const origin = getSourceOrigin(block);
+		if (origin?.kind !== "source") return origin ?? { kind: "unknown", reason: "unmapped-tool-text" };
+		const wellFormed = block.text.toWellFormed();
+		const emitted = isHarmonyDialectModel(model) ? escapeHarmonyControlTokens(wellFormed) : wellFormed;
+		for (const part of origin.parts) {
+			const { transportBlockIndex: _index, ...sourcePart } = part;
+			if (block.text === emitted) {
+				parts.push({
+					...sourcePart,
+					transportSpan: {
+						start: offset + (part.transportSpan?.start ?? 0),
+						end: offset + (part.transportSpan?.end ?? emitted.length),
+					},
+				});
+			} else {
+				const { sourceSpan: _span, ...transformedPart } = sourcePart;
+				parts.push({
+					...transformedPart,
+					representation: "transformed-text",
+					transportSpan: { start: offset, end: offset + emitted.length },
+				});
+			}
+		}
+		offset += emitted.length;
+	}
+	return parts.length ? { kind: "source", parts } : { kind: "synthetic", reason: "empty-tool-output" };
 }
 
 /** Appends one Responses tool result. */
@@ -2594,40 +2724,70 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 	computerCallIds?: ReadonlySet<string>,
 ): void {
 	const { output, outputText } = encodeResponsesToolResultOutput(toolResult, model, supportsImageDetailOriginal);
+	const outputOrigin = Array.isArray(output)
+		? combineContentSourceOrigins(output)
+		: responsesToolTextOrigin(toolResult, model);
+	const emitOutput = (item: ResponseInput[number], derived = false): void => {
+		setSourceOrigin(item, outputOrigin);
+		if (derived) transferTransformedSourceOrigin(item, item, "derived");
+
+		messages.push(item);
+	};
 	const normalized = normalizeResponsesToolCallId(toolResult.toolCallId);
 	if (toolResult.providerMetadata?.type === "computer" && model.supportsComputerUse !== true) {
-		messages.push({
-			type: "message",
-			role: "assistant",
-			content: `[Previous computer result; call_id=${normalized.callId}]: ${stringifyJson(toolResult.providerMetadata.screenshot) ?? ""}`,
-		} as ResponseInput[number]);
+		messages.push(
+			transferTransformedSourceOrigin(
+				toolResult.providerMetadata.screenshot,
+				{
+					type: "message",
+					role: "assistant",
+					content: `[Previous computer result; call_id=${normalized.callId}]: ${stringifyJson(toolResult.providerMetadata.screenshot) ?? ""}`,
+				} as ResponseInput[number],
+				"derived",
+			),
+		);
 		return;
 	}
 	if (computerCallIds?.has(normalized.callId)) {
 		if (toolResult.providerMetadata?.type !== "computer") {
 			const limit = 16_000;
 			const noteText = outputText.length > limit ? `${outputText.slice(0, limit)}\n...[truncated]` : outputText;
-			messages.push({
-				type: "message",
-				role: "assistant",
-				content: `[Computer tool failed before a screenshot was produced; call_id=${normalized.callId}]: ${noteText}`,
-			} as ResponseInput[number]);
+			emitOutput(
+				{
+					type: "message",
+					role: "assistant",
+					content: `[Computer tool failed before a screenshot was produced; call_id=${normalized.callId}]: ${noteText}`,
+				} as ResponseInput[number],
+				true,
+			);
 			return;
 		}
 		if (strictResponsesPairing && !knownCallIds.has(normalized.callId)) {
-			messages.push({
-				type: "message",
-				role: "assistant",
-				content: `[Orphan computer result; call_id=${normalized.callId}]`,
-			} as ResponseInput[number]);
+			messages.push(
+				setSourceOrigin(
+					{
+						type: "message",
+						role: "assistant",
+						content: `[Orphan computer result; call_id=${normalized.callId}]`,
+					} as ResponseInput[number],
+					{ kind: "synthetic", reason: "orphan-computer-result" },
+				),
+			);
 			return;
 		}
-		messages.push({
-			type: "computer_call_output",
-			call_id: normalized.callId,
-			output: structuredCloneJSON(toolResult.providerMetadata.screenshot),
-			acknowledged_safety_checks: structuredCloneJSON(toolResult.providerMetadata.acknowledgedSafetyChecks),
-		} as ResponseInput[number]);
+		const screenshot = cloneWithSourceOrigins(toolResult.providerMetadata.screenshot);
+		setSourceOrigin(screenshot, combineContentSourceOrigins([screenshot]));
+		const safetyChecks = cloneWithSourceOrigins(toolResult.providerMetadata.acknowledgedSafetyChecks);
+		const item = setSourceOrigin(
+			{
+				type: "computer_call_output",
+				call_id: normalized.callId,
+				output: screenshot,
+				acknowledged_safety_checks: safetyChecks,
+			} as ResponseInput[number],
+			combineSourceOrigins([screenshot, ...(safetyChecks ?? [])]),
+		);
+		messages.push(isHarmonyDialectModel(model) ? escapeReplayedControlTokens([item])[0] : item);
 		return;
 	}
 	if (strictResponsesPairing && !knownCallIds.has(normalized.callId)) {
@@ -2636,21 +2796,24 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 		// into an assistant note instead (same shape as repairOrphanResponsesToolOutputs).
 		const limit = 16_000;
 		const noteText = outputText.length > limit ? `${outputText.slice(0, limit)}\n...[truncated]` : outputText;
-		messages.push({
-			type: "message",
-			role: "assistant",
-			content: `[Orphan ${toolResult.toolName || "tool"} result; call_id=${normalized.callId}]: ${noteText}`,
-		} as ResponseInput[number]);
+		emitOutput(
+			{
+				type: "message",
+				role: "assistant",
+				content: `[Orphan ${toolResult.toolName || "tool"} result; call_id=${normalized.callId}]: ${noteText}`,
+			} as ResponseInput[number],
+			true,
+		);
 		return;
 	}
 	if (supportsCustomToolCalls && customCallIds?.has(normalized.callId)) {
-		messages.push({
+		emitOutput({
 			type: "custom_tool_call_output",
 			call_id: normalized.callId,
 			output,
 		} as ResponseInput[number]);
 	} else {
-		messages.push({
+		emitOutput({
 			type: "function_call_output",
 			call_id: normalized.callId,
 			output,
