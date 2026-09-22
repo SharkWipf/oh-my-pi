@@ -200,7 +200,6 @@ await agent.continue();
 Computer tool results count the screenshot in their typed provider metadata as one image, even when no content image is present. Content-image mirrors are not charged separately because computer-result serialization consumes the metadata screenshot instead. This baseline applies to both ordinary estimates and the compaction floor.
 
 Current native response deltas contribute their known original logical text, code, logs, search context, and generated/interpreter images through the shared typed source visitor. Normalized native mirrors are counted through current content only, including after controlled source rewrites and JSON reload; deleted mirrors and opaque native snapshots do not become new source charges. Existing provider-reasoning and native server-tool estimates retain their ordinary-versus-compaction-floor behavior. Custom messages retain neutral text and image pricing; pricing does not select a preservation policy.
-
 ### State Management
 
 ```typescript

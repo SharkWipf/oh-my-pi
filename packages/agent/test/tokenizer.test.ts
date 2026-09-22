@@ -201,7 +201,6 @@ describe("Tokenizer", () => {
 			1200 + tokenizer.countTokens("current rewritten text"),
 		);
 	});
-
 	test("defaults to null encoding and byte estimation", () => {
 		const tokenizer = new Tokenizer();
 		expect(tokenizer.encoding).toBeNull();
