@@ -407,7 +407,8 @@ export class SessionTools {
 
 	setRequirementsFragment(fragment: string): void {
 		this.#requirementsFragment = fragment;
-		this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
+		// Refresh recall without replacing the policy still applied to a continuation.
+		this.#applyAgentSystemPrompt(this.#appliedPromptBase ?? this.#baseSystemPrompt);
 	}
 
 	capturePromptState(): { base: string[]; turnOverride: string[] | undefined } {
@@ -440,7 +441,6 @@ export class SessionTools {
 
 	clearTurnSystemPromptOverride(): void {
 		this.#turnSystemPromptOverride = undefined;
-		this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
 	}
 
 	/** Skills currently rendered into the system prompt. */

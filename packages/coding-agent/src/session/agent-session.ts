@@ -7102,6 +7102,7 @@ export class AgentSession {
 						this.#tools.setTurnSystemPromptOverride(result.systemPrompt);
 					} else {
 						this.#tools.clearTurnSystemPromptOverride();
+						this.#tools.setBaseSystemPrompt(this.#tools.baseSystemPrompt);
 					}
 					return messages;
 				},
