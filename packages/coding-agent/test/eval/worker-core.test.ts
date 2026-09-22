@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { shadowSnapshotDigest } from "@oh-my-pi/pi-coding-agent/eval/js/shared/runtime";
-import { WorkerCore } from "@oh-my-pi/pi-coding-agent/eval/js/worker-core";
+import { WorkerCore, type WorkerCoreOptions } from "@oh-my-pi/pi-coding-agent/eval/js/worker-core";
 import type {
 	SessionSnapshot,
 	Transport,
@@ -18,7 +18,12 @@ interface WorkerHarness {
 	onMessage(handler: (message: WorkerOutbound) => void): () => void;
 }
 
-function createWorkerHarness(): WorkerHarness {
+function createWorkerHarness(
+	options: WorkerCoreOptions = {
+		mode: "inline",
+		interceptUnhandledRejections: postmortem.interceptUnhandledRejections,
+	},
+): WorkerHarness & { dispose(): void } {
 	const hostListeners = new Set<(message: WorkerOutbound) => void>();
 	const workerListeners = new Set<(message: WorkerInbound) => void>();
 	const transport: Transport = {
@@ -33,11 +38,9 @@ function createWorkerHarness(): WorkerHarness {
 		},
 		close: () => {},
 	};
-	new WorkerCore(transport, {
-		mode: "inline",
-		interceptUnhandledRejections: postmortem.interceptUnhandledRejections,
-	});
+	const core = new WorkerCore(transport, options);
 	return {
+		dispose: () => core.dispose(),
 		send(message) {
 			queueMicrotask(() => {
 				for (const listener of workerListeners) listener(message);
@@ -93,6 +96,191 @@ function installFatalCapture(): {
 }
 
 describe("WorkerCore", () => {
+	describe("tool replies after a cell finishes", () => {
+		const snapshot = { cwd: process.cwd(), sessionId: "late-tool-replies" };
+
+		function runCell(harness: WorkerHarness, runId: string, code: string): Promise<WorkerOutbound> {
+			const result = waitForMessage(harness, message => message.type === "result" && message.runId === runId);
+			harness.send({ type: "run", runId, code, filename: `[${runId}].js`, snapshot });
+			return result;
+		}
+
+		async function retainedRead(): Promise<unknown> {
+			const saved = (globalThis as { __omp_worker_late_read?: Promise<unknown> }).__omp_worker_late_read;
+			if (!saved) throw new Error("cell did not retain its read");
+			const deadline = Promise.withResolvers<never>();
+			const timer = setTimeout(() => deadline.reject(new Error("retained read did not settle")), 1000);
+			try {
+				return await Promise.race([saved, deadline.promise]);
+			} finally {
+				clearTimeout(timer);
+			}
+		}
+
+		it("resolves a read retained by a failed cell for a subsequent await", async () => {
+			const harness = createWorkerHarness();
+			await initializeWorker(harness, snapshot);
+			try {
+				const call = waitForMessage(harness, message => message.type === "tool-call");
+				const failed = await runCell(
+					harness,
+					"failed-read-cell",
+					'(globalThis.__omp_worker_late_read = read("artifact://late-read")).slice(0, 4);',
+				);
+				expect(failed).toMatchObject({ type: "result", ok: false, error: { name: "TypeError" } });
+				const request = await call;
+				if (request.type !== "tool-call") throw new Error("expected read call");
+				// The real reply is deliberately held until the cell has already failed.
+				harness.send({
+					type: "tool-reply",
+					id: request.id,
+					reply: { ok: true, value: { text: "read completed" } },
+				});
+				expect(await retainedRead()).toBe("read completed");
+				const display = waitForMessage(
+					harness,
+					message => message.type === "display" && message.runId === "await-retained-read",
+				);
+				expect(
+					await runCell(harness, "await-retained-read", "display({ value: await __omp_worker_late_read });"),
+				).toMatchObject({ ok: true });
+				expect(await display).toMatchObject({ output: { type: "json", data: { value: "read completed" } } });
+			} finally {
+				harness.dispose();
+			}
+		});
+
+		it("rejects a successful cell's background read when its late reply fails", async () => {
+			const harness = createWorkerHarness();
+			await initializeWorker(harness, snapshot);
+			try {
+				const call = waitForMessage(harness, message => message.type === "tool-call");
+				expect(
+					await runCell(
+						harness,
+						"background-read-cell",
+						'globalThis.__omp_worker_late_read = read("artifact://late-error"); __omp_worker_late_read.catch(() => {}); void 0;',
+					),
+				).toMatchObject({ ok: true });
+				const request = await call;
+				if (request.type !== "tool-call") throw new Error("expected read call");
+				const outcome = retainedRead().then(
+					value => ({ value }),
+					error => ({ error }),
+				);
+				harness.send({
+					type: "tool-reply",
+					id: request.id,
+					reply: { ok: false, error: { message: "read unavailable", isToolError: true } },
+				});
+				expect(await outcome).toMatchObject({ error: { message: "read unavailable" } });
+				const next = await runCell(harness, "await-rejected-read", "await __omp_worker_late_read;");
+				expect(next).toMatchObject({ ok: false, error: { message: "read unavailable", isToolError: true } });
+			} finally {
+				harness.dispose();
+			}
+		});
+
+		for (const phase of ["idle", "next-cell"] as const) {
+			it("attributes a late bridge rejection to its finished cell while " + phase, async () => {
+				let intercept: ((reason: unknown) => boolean) | undefined;
+				const harness = createWorkerHarness({
+					mode: "isolated",
+					interceptUnhandledRejections: handler => {
+						intercept = handler;
+						return postmortem.interceptUnhandledRejections(handler);
+					},
+				});
+				const entered = Promise.withResolvers<void>();
+				const gate = Promise.withResolvers<void>();
+				const globals = globalThis as {
+					__omp_worker_late_gate?: { entered(): void; wait: Promise<void> };
+				};
+				globals.__omp_worker_late_gate = { entered: () => entered.resolve(), wait: gate.promise };
+				await initializeWorker(harness, snapshot);
+				let next: Promise<WorkerOutbound> | undefined;
+				try {
+					const call = waitForMessage(harness, message => message.type === "tool-call");
+					expect(
+						await runCell(
+							harness,
+							"failed-origin",
+							'(globalThis.__omp_worker_late_read = read("artifact://late-failure")).slice(0, 4);',
+						),
+					).toMatchObject({ ok: false, error: { name: "TypeError" } });
+					const request = await call;
+					if (request.type !== "tool-call") throw new Error("expected read call");
+					// Observe the real deserialized error, then pass it through the installed
+					// interceptor without introducing a process-wide unhandled rejection in bun test.
+					const outcome = retainedRead().catch((error: unknown) => error);
+					if (phase === "next-cell") {
+						next = runCell(
+							harness,
+							"unrelated-next-cell",
+							"__omp_worker_late_gate.entered(); await __omp_worker_late_gate.wait; 42;",
+						);
+						await entered.promise;
+					}
+					const remoteStack = "ToolError: host read failed\n    at hostRead (/host/read.ts:12:3)";
+					harness.send({
+						type: "tool-reply",
+						id: request.id,
+						reply: { ok: false, error: { message: "host read failed", stack: remoteStack, isToolError: true } },
+					});
+					const reason = await outcome;
+					expect(reason).toBeInstanceOf(Error);
+					if (!intercept) throw new Error("worker did not install its rejection interceptor");
+					const warning = waitForMessage(harness, message => message.type === "log" && message.level === "warn");
+					expect(intercept(reason)).toBe(true);
+					expect(await warning).toMatchObject({
+						meta: { filename: "[failed-origin].js", error: { message: "host read failed", stack: remoteStack } },
+					});
+					gate.resolve();
+					if (next) expect(await next).toMatchObject({ ok: true });
+					// An unrelated idle rejection must still fall through to global fatal handling.
+					expect(intercept(new Error("unrelated host rejection"))).toBe(false);
+				} finally {
+					gate.resolve();
+					if (next) await next;
+					delete globals.__omp_worker_late_gate;
+					harness.dispose();
+				}
+			});
+		}
+
+		for (const shutdown of ["close", "dispose"] as const) {
+			it(`rejects finished-cell background calls on ${shutdown}`, async () => {
+				const harness = createWorkerHarness();
+				await initializeWorker(harness, snapshot);
+				try {
+					const call = waitForMessage(harness, message => message.type === "tool-call");
+					expect(
+						await runCell(
+							harness,
+							"unfinished-background-read",
+							'globalThis.__omp_worker_late_read = read("artifact://shutdown"); __omp_worker_late_read.catch(() => {}); void 0;',
+						),
+					).toMatchObject({ ok: true });
+					await call;
+					const outcome = retainedRead().then(
+						value => ({ value }),
+						error => ({ error }),
+					);
+					if (shutdown === "close") {
+						const closed = waitForMessage(harness, message => message.type === "closed");
+						harness.send({ type: "close" });
+						await closed;
+					} else {
+						harness.dispose();
+					}
+					expect(await outcome).toMatchObject({ error: { name: "ToolError" } });
+				} finally {
+					harness.dispose();
+				}
+			});
+		}
+	});
+
 	it("reports same-realm cwd conflicts through the worker protocol", async () => {
 		const first = createWorkerHarness();
 		const second = createWorkerHarness();
