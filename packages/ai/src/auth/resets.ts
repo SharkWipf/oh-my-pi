@@ -2,7 +2,12 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { USAGE_REPORT_TTL_MS } from "./sqlite-credential-store";
 import type { UsageReport } from "../usage";
 import { claudeResetClearedBlockScopes, consumeClaudeResetCredit, listClaudeResetCredits } from "../usage/claude-reset";
-import { consumeCodexResetCredit, listCodexResetCredits, pickSoonestExpiringCredit } from "../usage/openai-codex-reset";
+import {
+	consumeCodexResetCredit,
+	listCodexResetCreditHistory,
+	listCodexResetCredits,
+	pickSoonestExpiringCredit,
+} from "../usage/openai-codex-reset";
 import type { CredentialBlocks } from "./blocks";
 import { providerTypeKey } from "./blocks";
 import type { OAuthAccounts } from "./oauth";
@@ -44,17 +49,19 @@ export class ResetCredits implements ResetsApi {
 		this.#deps = deps;
 	}
 
-	/** List live saved-reset balances and eligibility for one provider's stored OAuth accounts. */
+	/** List live balances; optional Codex history shares the OAuth/detail request deadline. */
 	async list(options?: ListResetCreditsOptions): Promise<ResetCreditAccountStatus[]> {
 		const provider = options?.provider ?? "openai-codex";
 		if (provider !== "openai-codex" && provider !== "anthropic") return [];
+		const timeoutSignal = AbortSignal.timeout(this.#deps.usage.requestTimeoutMs);
+		const signal = options?.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
 		const accounts = this.#deps.oauth.accounts(provider, options?.sessionId);
 		const baseUrl = options?.baseUrlResolver?.(provider);
 		return Promise.all(
 			accounts.map(async (account): Promise<ResetCreditAccountStatus> => {
 				const base = { ...account, provider };
 				const access = await this.#deps.oauth.accessById(provider, account.credentialId, {
-					signal: options?.signal,
+					signal,
 				});
 				if (!access?.ok)
 					return {
@@ -63,17 +70,25 @@ export class ResetCredits implements ResetsApi {
 						credits: [],
 						error: access?.error ?? "Account no longer available",
 					};
-				const auth = { ...access, baseUrl, fetch: this.#deps.usage.fetch, signal: options?.signal };
-				const list =
-					provider === "anthropic" ? await listClaudeResetCredits(auth) : await listCodexResetCredits(auth);
+				const auth = { ...access, baseUrl, fetch: this.#deps.usage.fetch, signal };
+				const [creditsResult, history] = await Promise.all([
+					(provider === "anthropic" ? listClaudeResetCredits(auth) : listCodexResetCredits(auth)).then(list => ({
+						list,
+						creditsFetchedAt: Date.now(),
+					})),
+					provider === "openai-codex" && options?.includeHistory ? listCodexResetCreditHistory(auth) : undefined,
+				]);
+				const { list, creditsFetchedAt } = creditsResult;
 				if (!list)
 					return {
 						...base,
+						...history,
+						creditsFetchedAt,
 						availableCount: 0,
 						credits: [],
 						error: "Failed to load saved resets",
 					};
-				return { ...base, ...list };
+				return { ...base, ...list, ...history, creditsFetchedAt };
 			}),
 		);
 	}

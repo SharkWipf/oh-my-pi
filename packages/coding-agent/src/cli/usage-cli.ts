@@ -13,6 +13,7 @@ import {
 	type AuthStorage,
 	type DisabledCredentialSummary,
 	type OAuthAccountIdentity,
+	type ResetCreditAccountStatus,
 	resolveUsedFraction,
 	type UsageHistoryEntry,
 	type UsageLimit,
@@ -37,6 +38,8 @@ export interface UsageCommandArgs {
 	json?: boolean;
 	provider?: string;
 	redact?: boolean;
+	/** Enrich the live snapshot with Codex saved resets and full reset history. */
+	resetCredits?: boolean;
 	/** Show recorded usage-limit history instead of a live snapshot. */
 	history?: boolean;
 	/** History window in days (with `history` or the `clients` action). */
@@ -415,7 +418,7 @@ function formatAccountHeader(
 	}
 	const planType = report.metadata?.planType;
 	if (typeof planType === "string" && planType) header += chalk.dim(` · plan: ${planType}`);
-	const resets = summarizeUsageResetCredits(report.resetCredits, nowMs);
+	const resets = summarizeUsageResetCredits(report.resetCredits, nowMs, report.provider);
 	if (resets && resets.bankedCount > 0) {
 		header += chalk.cyan(` · ✦ ${resets.bankedCount} saved reset${resets.bankedCount === 1 ? "" : "s"}`);
 		if (resets.redeemableCount !== resets.bankedCount) {
@@ -1120,6 +1123,43 @@ export function formatClientUsage(clients: ClientUsageClientSummary[], sinceMs: 
 	return lines.join("\n");
 }
 
+/** Attribute live reset facts only to an unambiguous Codex account id. */
+function overlayResetCreditAccounts(reports: UsageReport[], accounts: ResetCreditAccountStatus[]): UsageReport[] {
+	const byAccountId = new Map<string, ResetCreditAccountStatus | null>();
+	for (const account of accounts) {
+		if (!account.accountId) continue;
+		byAccountId.set(account.accountId, byAccountId.has(account.accountId) ? null : account);
+	}
+	return reports.map(report => {
+		if (report.provider !== "openai-codex") return report;
+		let accountId = report.metadata?.accountId;
+		if (typeof accountId !== "string" || !accountId) {
+			const scopeIds = new Set(report.limits.map(limit => limit.scope.accountId).filter(Boolean));
+			accountId = scopeIds.size === 1 ? scopeIds.values().next().value : undefined;
+		}
+		if (typeof accountId !== "string") return report;
+		const account = byAccountId.get(accountId);
+		if (!account) return report;
+		// Rebuild, rather than merge, so failed live reads cannot retain stale broker detail.
+		return {
+			...report,
+			resetCredits: {
+				availableCount:
+					account.error !== undefined ? (report.resetCredits?.availableCount ?? 0) : account.availableCount,
+				...(account.error !== undefined
+					? { creditsError: account.error }
+					: { credits: account.credits, creditsFetchedAt: account.creditsFetchedAt }),
+				history: account.history,
+				historyFetchedAt: account.historyFetchedAt,
+				historyComplete: account.historyComplete,
+				historyWindowStart: account.historyWindowStart,
+				historyAsOf: account.historyAsOf,
+				historyError: account.historyError,
+			},
+		};
+	});
+}
+
 export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 	const settings = await Settings.loadReadOnly();
 	const authStorage = await discoverAuthStorage(undefined, { settings });
@@ -1236,9 +1276,43 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			disabled = disabled.filter(summary => summary.provider.toLowerCase() === wanted);
 		}
 
-		const redaction = cmd.redact
-			? buildRedactionMap(collectIdentityStrings(filteredReports, accounts, disabled))
-			: undefined;
+		let resetCreditAccounts: (ResetCreditAccountStatus & { provider: "openai-codex" })[] | undefined;
+		let resetCreditsError: string | undefined;
+		if (cmd.resetCredits && (!cmd.provider || cmd.provider.toLowerCase() === "openai-codex")) {
+			try {
+				const statuses = await authStorage.resets.list({
+					provider: "openai-codex",
+					includeHistory: true,
+					baseUrlResolver: provider => modelRegistry.getProviderBaseUrl(provider),
+				});
+				resetCreditAccounts = statuses.map(account => ({ ...account, provider: "openai-codex" }));
+				filteredReports = overlayResetCreditAccounts(filteredReports, statuses);
+			} catch (error) {
+				// Reset enrichment must never hide the ordinary quota snapshot.
+				resetCreditsError = error instanceof Error ? error.message : String(error);
+				filteredReports = filteredReports.map(report =>
+					report.provider === "openai-codex" && report.resetCredits
+						? {
+								...report,
+								resetCredits: {
+									availableCount: report.resetCredits.availableCount,
+									creditsError: resetCreditsError,
+								},
+							}
+						: report,
+				);
+			}
+		}
+
+		let redaction: Map<string, string> | undefined;
+		if (cmd.redact) {
+			const identities = collectIdentityStrings(filteredReports, accounts, disabled);
+			for (const account of resetCreditAccounts ?? []) {
+				if (account.email) identities.push(account.email);
+				if (account.accountId) identities.push(account.accountId);
+			}
+			redaction = buildRedactionMap(identities);
+		}
 
 		if (cmd.json) {
 			// Drop the heavy provider-specific `raw` payload — same shape as the
@@ -1255,6 +1329,11 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 					enterpriseUrl: maskIdentity(redaction, account.enterpriseUrl),
 					orgId: maskIdentity(redaction, account.orgId),
 					orgName: maskIdentity(redaction, account.orgName),
+				}));
+				resetCreditAccounts = resetCreditAccounts?.map(account => ({
+					...account,
+					email: maskIdentity(redaction, account.email),
+					accountId: maskIdentity(redaction, account.accountId),
 				}));
 			}
 			const capacity: Record<string, ProviderWindowStat[]> = {};
@@ -1279,11 +1358,16 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 				accountsWithoutUsage: unreportedAccounts,
 				disabledCredentials: disabledForJson,
 				capacity,
+				...(resetCreditAccounts !== undefined ? { resetCreditAccounts } : {}),
+				...(resetCreditsError !== undefined ? { resetCreditsError } : {}),
 			};
 			process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
 			return;
 		}
 
+		if (resetCreditsError !== undefined) {
+			process.stderr.write(chalk.yellow(`Failed to load Codex saved resets: ${sanitizeText(resetCreditsError)}\n`));
+		}
 		if (filteredReports.length === 0 && accounts.length === 0) {
 			const scope = cmd.provider ? ` for provider "${cmd.provider}"` : "";
 			// Credentials exist but every one is for a provider without a usage

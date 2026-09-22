@@ -28,6 +28,10 @@ export default class Usage extends Command {
 			description: "Show recorded usage-limit history (hourly snapshots) instead of a live snapshot",
 			default: false,
 		}),
+		"reset-credits": Flags.boolean({
+			description: "Fetch live Codex saved resets and full reset history (normal usage only)",
+			default: false,
+		}),
 		days: Flags.integer({ char: "d", description: "History window in days (with --history or clients)", default: 7 }),
 	};
 
@@ -36,6 +40,7 @@ export default class Usage extends Command {
 		"# Only Anthropic accounts\n  omp usage --provider anthropic",
 		"# Redact account identifiers for screenshots\n  omp usage --redact",
 		"# Machine-readable output\n  omp usage --json",
+		"# Live Codex saved resets and complete reset history as JSON\n  omp usage --provider openai-codex --reset-credits --json",
 		"# Usage-limit trend over the last 30 days\n  omp usage --history --days 30",
 		"# Per-client token burn (which machine/app spent what) over the last 30 days\n  omp usage clients --days 30",
 		"# Invalidate cached usage reports for all providers\n  omp usage invalidate",
@@ -50,6 +55,7 @@ export default class Usage extends Command {
 			provider: flags.provider,
 			redact: flags.redact,
 			history: flags.history,
+			resetCredits: flags["reset-credits"],
 			days: flags.days,
 		});
 	}

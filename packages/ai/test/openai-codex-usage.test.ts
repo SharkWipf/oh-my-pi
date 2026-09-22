@@ -289,7 +289,8 @@ describe("openai-codex usage parser", () => {
 			},
 			{ fetch: fetchImpl },
 		);
-		expect(report?.resetCredits).toEqual({ availableCount: 1 });
+		expect(report?.resetCredits).toMatchObject({ availableCount: 1, credits: [] });
+		expect(report?.resetCredits?.creditsFetchedAt).toBeGreaterThanOrEqual(report!.fetchedAt);
 	});
 
 	it("omits resetCredits when the account has no saved resets block", async () => {
@@ -302,7 +303,7 @@ describe("openai-codex usage parser", () => {
 		);
 		expect(report?.resetCredits).toBeUndefined();
 	});
-	it("populates resetCredits.credits with expiry dates when available_count > 0", async () => {
+	it("retains available and redeemed credit details without changing the available count", async () => {
 		const usagePayload = { ...makePayload(), rate_limit_reset_credits: { available_count: 2 } };
 		const creditsPayload = {
 			available_count: 2,
@@ -343,31 +344,74 @@ describe("openai-codex usage parser", () => {
 			{ fetch: fetchImpl },
 		);
 		expect(report?.resetCredits?.availableCount).toBe(2);
-		// Redeemed credits are filtered out; only available ones surface
-		expect(report?.resetCredits?.credits).toHaveLength(2);
-		expect(report?.resetCredits?.credits?.[0]?.expiresAt).toBe("2025-02-14T00:00:00Z");
-		expect(report?.resetCredits?.credits?.[1]?.expiresAt).toBe("2025-02-19T00:00:00Z");
+		expect(report?.resetCredits?.credits?.map(credit => [credit.id, credit.status, credit.expiresAt])).toEqual([
+			["RateLimitResetCredit_1", "available", "2025-02-14T00:00:00Z"],
+			["RateLimitResetCredit_2", "available", "2025-02-19T00:00:00Z"],
+			["RateLimitResetCredit_3", "redeemed", "2025-01-31T00:00:00Z"],
+		]);
 	});
 
-	it("does not call listCodexResetCredits when available_count is 0", async () => {
+	it("retains spent history at zero availability without redeeming credits", async () => {
 		const usagePayload = { ...makePayload(), rate_limit_reset_credits: { available_count: 0 } };
-		let extraFetchCalls = 0;
-		const fetchImpl: FetchImpl = (async (url: string | URL | Request) => {
-			const path = typeof url === "string" ? url : url.toString();
-			if (path.includes("rate-limit-reset-credits")) extraFetchCalls++;
-			return new Response(JSON.stringify(usagePayload), {
-				status: 200,
-				headers: { "content-type": "application/json" },
-			});
-		}) as unknown as FetchImpl;
-		await openaiCodexUsageProvider.fetchUsage(
-			{
-				provider: "openai-codex",
-				credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1", email: "u@example.com" },
-			},
+		const requests: string[] = [];
+		const fetchImpl: FetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+			const path = url.toString();
+			requests.push(`${init?.method ?? "GET"} ${path}`);
+			const body = path.endsWith("/wham/usage")
+				? usagePayload
+				: {
+						available_count: 0,
+						credits: [
+							{
+								id: "spent-credit",
+								reset_type: "codex_rate_limits",
+								status: "redeemed",
+								granted_at: "2026-09-01T00:00:00Z",
+								expires_at: "2026-10-01T00:00:00Z",
+								redeem_started_at: null,
+								redeemed_at: "2026-09-10T12:00:00Z",
+							},
+							{ id: "expired-credit", status: "expired" },
+						],
+					};
+			return Response.json(body);
+		}) as FetchImpl;
+		const report = await openaiCodexUsageProvider.fetchUsage(
+			{ provider: "openai-codex", credential: { type: "oauth", accessToken: accessTokenFixture } },
 			{ fetch: fetchImpl },
 		);
-		expect(extraFetchCalls).toBe(0);
+		expect(report?.resetCredits?.availableCount).toBe(0);
+		expect(report?.resetCredits?.credits).toMatchObject([
+			{
+				id: "spent-credit",
+				resetType: "codex_rate_limits",
+				status: "redeemed",
+				grantedAt: "2026-09-01T00:00:00Z",
+				expiresAt: "2026-10-01T00:00:00Z",
+				redeemStartedAt: null,
+				redeemedAt: "2026-09-10T12:00:00Z",
+			},
+			{ id: "expired-credit", status: "expired" },
+		]);
+		expect(requests).toEqual([
+			"GET https://chatgpt.com/backend-api/wham/usage",
+			"GET https://chatgpt.com/backend-api/wham/rate-limit-reset-credits",
+		]);
+	});
+
+	it("preserves quota and count without claiming empty history when detail listing fails", async () => {
+		const usagePayload = { ...makePayload(), rate_limit_reset_credits: { available_count: 2 } };
+		const report = await openaiCodexUsageProvider.fetchUsage(
+			{ provider: "openai-codex", credential: { type: "oauth", accessToken: accessTokenFixture } },
+			{
+				fetch: (async (url: string | URL | Request) =>
+					url.toString().endsWith("/wham/usage")
+						? Response.json(usagePayload)
+						: new Response("unavailable", { status: 503 })) as FetchImpl,
+			},
+		);
+		expect(report?.resetCredits).toEqual({ availableCount: 2 });
+		expect(report?.limits.map(limit => limit.amount.usedFraction)).toEqual([0.04, 0.01, 0.17, 0.61]);
 	});
 
 	it("ignores non-canonical provider baseUrl overrides for wham/usage (#3679)", async () => {

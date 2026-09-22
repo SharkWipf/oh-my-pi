@@ -85,7 +85,7 @@ function renderUsageReports(
 			lines.push(`  ${sanitizeText(note.replace(/[\r\n]+/g, " ").replace(/\t/g, "  "))}`);
 		for (const report of providerReports) {
 			const inUse = reportMatchesActiveAccount(report, activeAccount);
-			const resets = summarizeUsageResetCredits(report.resetCredits, nowMs);
+			const resets = summarizeUsageResetCredits(report.resetCredits, nowMs, report.provider);
 			if (resets && resets.bankedCount > 0) {
 				const resetIdentity =
 					typeof report.metadata?.email === "string"

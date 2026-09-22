@@ -4,9 +4,10 @@
  * OpenAI lets paid Codex accounts bank a usage-window reset and spend it on
  * demand (announced 2026-06-11). The count is surfaced on `/wham/usage` as
  * `rate_limit_reset_credits.available_count` (see `./openai-codex.ts`), but the
- * actual credit objects and the redeem action live on two dedicated routes:
+ * actual credit objects, history, and redeem action live on dedicated routes:
  *
  *   GET  /wham/rate-limit-reset-credits           → list redeemable credits
+ *   GET  /wham/rate-limit-reset-credits/history   → paginated reset events
  *   POST /wham/rate-limit-reset-credits/consume   → spend one credit
  *        body: { credit_id, redeem_request_id, account_id? }
  *
@@ -21,10 +22,12 @@
 import { toNumber } from "@oh-my-pi/pi-catalog/utils";
 import { USER_AGENT } from "@oh-my-pi/pi-utils";
 import type { FetchImpl } from "../types";
+import type { UsageResetHistory } from "../usage";
 import { isRecord } from "../utils";
 import { normalizeCodexBaseUrl } from "./openai-codex-base-url";
 
 const RESET_CREDITS_PATH = "wham/rate-limit-reset-credits";
+const RESET_CREDITS_HISTORY_PATH = "wham/rate-limit-reset-credits/history";
 const RESET_CREDITS_CONSUME_PATH = "wham/rate-limit-reset-credits/consume";
 
 /** A single redeemable (or already-spent) saved reset. */
@@ -145,6 +148,74 @@ export async function listCodexResetCredits(auth: CodexResetAuth): Promise<Codex
 			? Math.max(0, Math.trunc(reported))
 			: credits.filter(c => (c.status ?? "available") === "available").length;
 	return { credits, availableCount };
+}
+
+/**
+ * Read every history page without interpreting the backend's event kinds.
+ * The first page's window/as-of metadata anchors the returned history, even
+ * when later pages report a newer snapshot. Partial results are never complete.
+ */
+export async function listCodexResetCreditHistory(auth: CodexResetAuth): Promise<UsageResetHistory> {
+	const result: UsageResetHistory = { history: [], historyFetchedAt: Date.now(), historyComplete: false };
+	const cursors = new Set<string>();
+	let cursor: string | undefined;
+	try {
+		const url = buildUrl(auth.baseUrl, RESET_CREDITS_HISTORY_PATH);
+		const headers = buildHeaders(auth, false);
+		while (true) {
+			const pageUrl = cursor === undefined ? url : `${url}?cursor=${encodeURIComponent(cursor)}`;
+			const response = await auth.fetch(pageUrl, { headers, signal: auth.signal });
+			if (!response.ok) throw new Error(`Saved reset history request failed (HTTP ${response.status})`);
+			const payload: unknown = await response.json();
+			if (!isRecord(payload) || !Array.isArray(payload.events)) {
+				throw new Error("Invalid saved reset history page");
+			}
+			let invalidEvent = false;
+			for (const event of payload.events) {
+				if (
+					!isRecord(event) ||
+					typeof event.id !== "string" ||
+					!event.id.trim() ||
+					typeof event.kind !== "string" ||
+					!event.kind.trim() ||
+					typeof event.occurred_at !== "string" ||
+					!Number.isFinite(Date.parse(event.occurred_at))
+				) {
+					invalidEvent = true;
+					continue;
+				}
+				result.history.push({ id: event.id, kind: event.kind, occurredAt: event.occurred_at });
+			}
+			if (
+				typeof payload.window_start !== "string" ||
+				!Number.isFinite(Date.parse(payload.window_start)) ||
+				typeof payload.as_of !== "string" ||
+				!Number.isFinite(Date.parse(payload.as_of))
+			) {
+				throw new Error("Invalid saved reset history window metadata");
+			}
+			if (cursor === undefined) {
+				result.historyWindowStart = payload.window_start;
+				result.historyAsOf = payload.as_of;
+			}
+			if (invalidEvent) throw new Error("Invalid saved reset history event");
+			const nextCursor = payload.next_cursor;
+			if (nextCursor === null || nextCursor === undefined) {
+				result.historyComplete = true;
+				break;
+			}
+			if (typeof nextCursor !== "string" || !nextCursor) {
+				throw new Error("Invalid saved reset history cursor");
+			}
+			if (cursors.has(nextCursor)) throw new Error("Repeated saved reset history cursor");
+			cursors.add(nextCursor);
+			cursor = nextCursor;
+		}
+	} catch (error) {
+		result.historyError = error instanceof Error ? error.message : String(error);
+	}
+	result.historyFetchedAt = Date.now();
+	return result;
 }
 
 /**

@@ -67,6 +67,9 @@
 - Fixed OpenAI, Azure Responses, and Codex thinking summaries arriving only in final snapshots: late text and unseen suffixes now reach streaming clients before completion, while divergent display text remains append-only and replay signatures retain the authoritative provider item. Later summary parts retain their preceding display text when a completed snapshot extends that part.
 - Buffered raw Responses reasoning until completion so readable summaries take precedence, retaining raw-only fallback and completing reasoning when a terminal snapshot omits per-item completion.
 - Decoded explicitly tagged Codex reasoning envelopes in Responses/Azure/Codex raw reasoning, completed summaries, and split summary streams, including sequential-cutoff delivery. Display receives the reasoning text while native replay payloads and literal message JSON remain unchanged.
+### Fixed
+
+- Codex usage reports now retain all observed reset-credit statuses and identifiers, including spent history when no resets remain available. Detail-list failures preserve quota reporting without claiming an empty credit history; successful observations include their fetch time. Optional reset-history listing follows the provider cursor to completion and preserves partial captures distinctly from successful empty history.
 
 ## [18.2.8] - 2026-09-21
 

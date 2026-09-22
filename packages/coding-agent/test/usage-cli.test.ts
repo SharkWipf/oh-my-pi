@@ -736,7 +736,7 @@ describe("formatUsageBreakdown", () => {
 		expect(text).toContain("30.0% used");
 		expect(text).toContain("resets in 31d");
 	});
-	it("renders saved reset expiry state for future and expired credits", () => {
+	it("renders available Codex expiry without history while preserving banked Claude expiry", () => {
 		const now = Date.parse("2026-01-01T00:00:00.000Z");
 		const reports: UsageReport[] = [
 			{
@@ -746,7 +746,12 @@ describe("formatUsageBreakdown", () => {
 				metadata: { email: "future@example.test" },
 				resetCredits: {
 					availableCount: 1,
-					credits: [{ expiresAt: "2026-01-03T00:00:00.000Z" }],
+					credits: [
+						{ id: "available", status: "available", expiresAt: "2026-01-03T00:00:00.000Z" },
+						{ id: "redeemed", status: "redeemed", expiresAt: "2026-01-02T00:00:00.000Z" },
+						{ id: "expired", status: "expired", expiresAt: "2026-01-02T00:00:00.000Z" },
+						{ id: "unknown", status: "future-status", expiresAt: "2026-01-02T00:00:00.000Z" },
+					],
 				},
 			},
 			{
@@ -775,6 +780,7 @@ describe("formatUsageBreakdown", () => {
 							program: "cedar_ember",
 							remainingCount: 3,
 							usable: false,
+							status: "paused",
 							requiresLimit: true,
 							clears: ["anthropic:5h", "anthropic:7d"],
 							blocking: [],
@@ -789,11 +795,13 @@ describe("formatUsageBreakdown", () => {
 		const text = stripVTControlCharacters(formatUsageBreakdown(reports, [], now));
 		expect(text).toContain("future@example.test");
 		expect(text).toContain("soonest expires in 2d (2026-01-03)");
+		expect(text).not.toContain("2026-01-02");
 		expect(text).toContain("expired@example.test");
 		expect(text).toContain("expired (2025-12-30)");
 		expect(text).toContain("claude@example.test");
 		expect(text).toContain("3 saved resets");
 		expect(text).toContain("0 usable now");
+		expect(text).toContain("soonest expires in 3d (2026-01-04)");
 		expect(text).toContain("unavailable: weekly cooldown");
 	});
 
