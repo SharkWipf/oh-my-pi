@@ -53,6 +53,7 @@
 - Bedrock no longer sends provider-invalid payloads when an errored tool result contains an image; the image is hoisted into a sibling block ([#12865](https://github.com/can1357/oh-my-pi/pull/12865) by [@roboomp](https://github.com/roboomp)).
 - Gemini, Vertex, and Cloud Code Assist requests no longer include the unsupported `minP`/`repetitionPenalty` sampling fields, which caused 400s when set globally ([#12850](https://github.com/can1357/oh-my-pi/pull/12850) by [@roboomp](https://github.com/roboomp)).
 - Added guarded transient inline-rendering facts to source-origin metadata. Known clone operations preserve them; changed blocks, unknown hook output, and persisted metadata cannot retain stale physical attribution.
+- Added shared `OriginalSubmission` and `UserMessageProducer` metadata contracts for host-recorded user input and producer identity, separate from delivered content and billing attribution.
 
 ### Fixed
 

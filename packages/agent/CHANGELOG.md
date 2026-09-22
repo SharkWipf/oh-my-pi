@@ -18,6 +18,7 @@
 ### Added
 
 - Exported the existing per-image `IMAGE_TOKEN_ESTIMATE` baseline so source projections can replace it with representation-specific estimates without counting images twice.
+- Pre-model-call observation gates now receive the actual prepared request model after provider-context transforms and inband tool encoding.
 
 ## [18.2.5] - 2026-09-17
 
