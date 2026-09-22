@@ -1,4 +1,4 @@
-import { $env, isRecord, parseImageMetadata } from "@oh-my-pi/pi-utils";
+import { $env, isRecord, parseImageMetadata, stringifyJson } from "@oh-my-pi/pi-utils";
 import type { ResponseInput, ResponseInputItem } from "./providers/openai-responses-wire";
 import { redactSensitiveCredentials } from "./providers/transform-messages";
 import type {
@@ -745,7 +745,7 @@ export function visitOpenAIResponsesLogicalContent(
 					if (isRecord(part) && part.type === "summary_text" && typeof part.text === "string")
 						visitor.sourceText(part.text);
 			} else if (typeof value === "string") visitor.sourceText(value);
-			else if (!Array.isArray(value) || value.length > 0) visitor.sourceText(JSON.stringify(value));
+			else if (!Array.isArray(value) || value.length > 0) visitor.sourceText(stringifyJson(value) ?? "null");
 		}
 	visitor.text?.(logical, metadataOrigin);
 	for (const [field, value] of [
