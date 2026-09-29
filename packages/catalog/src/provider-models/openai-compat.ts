@@ -7297,7 +7297,9 @@ function normalizeCommandCodeBasePath(baseUrl: string | undefined): string {
  * Command Code policy (effort ladders, pricing, limits, modalities) is
  * applied later by `buildModel` from `providers/commandcode.kdl` — the
  * mapper never inherits another provider's reasoning, rates, image support,
- * or context window.
+ * or context window. A successful fetch also appends the KDL `seed` rows
+ * (typesafe/jev), rebased onto the configured base, because
+ * `dynamicModelsAuthoritative` would prune `staticModels`.
  */
 export function commandCodeModelManagerOptions(config?: CommandCodeModelManagerConfig): ModelManagerOptions<Api> {
 	const basePath = normalizeCommandCodeBasePath(config?.baseUrl);
@@ -7309,8 +7311,8 @@ export function commandCodeModelManagerOptions(config?: CommandCodeModelManagerC
 			baseUrl: discoveryBaseUrl,
 		}),
 		dynamicModelsAuthoritative: true,
-		fetchDynamicModels: () => {
-			return fetchOpenAICompatibleModels<Api>({
+		fetchDynamicModels: async () => {
+			const discovered = await fetchOpenAICompatibleModels<Api>({
 				api: "openai-completions",
 				provider: "commandcode",
 				baseUrl: discoveryBaseUrl,
@@ -7350,6 +7352,8 @@ export function commandCodeModelManagerOptions(config?: CommandCodeModelManagerC
 				},
 				fetch: config?.fetch,
 			});
+			if (!discovered) return null;
+			return [...discovered, ...seedModels("commandcode").map(seed => ({ ...seed, baseUrl: basePath }))];
 		},
 	};
 }
