@@ -9,10 +9,11 @@ export const CODEX_BASE_URL = "https://chatgpt.com/backend-api";
  * Updated from npm by `bun run check-spoofed-versions --update`.
  *
  * The backend version-gates model availability against this value on both
- * `/models?client_version=` and `/responses`; 0.155.1 exposes GPT-6 Sol and Luna.
+ * `/models?client_version=` and `/responses` (per-model `minimal_client_version`,
+ * e.g. 0.153.0 for GPT-6.1 Sol and 0.155.0 for GPT-6 Sol/Luna in codex-rs).
  * An older pin silently hides newer SKUs from discovery.
  */
-export const CODEX_CLIENT_VERSION = "0.155.1";
+export const CODEX_CLIENT_VERSION = "0.159.0";
 
 export const OPENAI_HEADERS = {
 	BETA: "OpenAI-Beta",
