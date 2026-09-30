@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added explicit per-account Codex paid-credit consent (`useCredits`) and exact-decimal allocation references for Symfonish generation selection. Unknown, stale, exhausted, unlisted, or opted-out account credit state cannot authorize paid overage; standalone behavior without this policy is unchanged.
+- Added caller-supplied Codex reset idempotency keys and refusal when refreshed OAuth account identity differs from the explicitly confirmed reset target.
 - Implemented `SessionAffinity` for persistent, sticky session-to-credential mapping
 - Added persistent rate-limit block tracking with auto-healing and account-specific routing policy support
 - Introduced `KeyCascade` for unified hierarchical authentication resolution

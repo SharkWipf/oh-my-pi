@@ -1,4 +1,6 @@
+import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
+import { SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import * as path from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import type { UsageReport } from "@oh-my-pi/pi-ai";
@@ -921,5 +923,41 @@ describe("usage command configuration", () => {
 		expect(error).toBe("");
 		expect(exitCode).toBe(0);
 		expect(output).toBe("Invalidated cached usage reports for all providers.\n");
+	});
+	it("refuses duplicate actual Codex accounts without pruning credentials or attempting a reset", async () => {
+		using tempDir = TempDir.createSync("@omp-reset-ambiguous-");
+		const dbPath = tempDir.join("agent.db");
+		(await SqliteAuthCredentialStore.open(dbPath)).close();
+		const data = JSON.stringify({ accountId: "duplicate-account", access: "simulated-only",
+			refresh: "simulated-only", expires: Date.now() + 86_400_000 });
+		const db = new Database(dbPath);
+		try {
+			const insert = db.query("INSERT INTO auth_credentials(provider,credential_type,data,identity_key) VALUES(?,?,?,?)");
+			insert.run("openai-codex", "oauth", data, "account:duplicate-account");
+			insert.run("openai-codex", "oauth", data, "account:duplicate-account");
+		} finally { db.close(); }
+		const networkMarker = tempDir.join("network-attempt");
+		const guard = tempDir.join("network-guard.ts");
+		await Bun.write(guard, `globalThis.fetch = async () => {
+			await Bun.write(${JSON.stringify(networkMarker)}, "attempted");
+			throw new Error("network disabled for duplicate-account regression");
+		};`);
+		const cliEntry = path.join(import.meta.dir, "..", "src", "cli.ts");
+		const proc = Bun.spawn([process.execPath, "--preload", guard, cliEntry, "usage", "redeem-reset",
+			"--account-id", "duplicate-account", "--credit-id", "simulated-grant"], {
+			cwd: tempDir.path(), stdout: "pipe", stderr: "pipe",
+			env: { PATH: process.env.PATH, HOME: tempDir.path(), PI_CODING_AGENT_DIR: tempDir.path() },
+		});
+		const [exitCode, output, error] = await Promise.all([
+			proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text(),
+		]);
+		expect(error).toBe("");
+		expect(exitCode).toBe(0);
+		expect(JSON.parse(output)).toMatchObject({ ok: false, code: "ambiguous_account" });
+		expect(await Bun.file(networkMarker).exists()).toBe(false);
+		const after = new Database(dbPath, { readonly: true });
+		try {
+			expect(after.query<{ count: number }, []>("SELECT count(*) AS count FROM auth_credentials WHERE disabled_cause IS NULL").get()?.count).toBe(2);
+		} finally { after.close(); }
 	});
 });

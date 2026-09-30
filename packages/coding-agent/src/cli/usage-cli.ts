@@ -21,6 +21,7 @@ import {
 	type UsageUnit,
 } from "@oh-my-pi/pi-ai";
 import { AuthBrokerClient } from "@oh-my-pi/pi-ai/auth-broker";
+import { SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import type { ClientUsageClientSummary } from "@oh-my-pi/pi-ai/usage";
 import { formatProviderName } from "@oh-my-pi/pi-tui/chrome/format";
 import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
@@ -37,6 +38,10 @@ export interface UsageCommandArgs {
 	action?: string;
 	json?: boolean;
 	provider?: string;
+	/** Exact provider account and explicitly confirmed saved reset for headless redemption. */
+	accountId?: string;
+	creditId?: string;
+	requestId?: string;
 	redact?: boolean;
 	/** Enrich the live snapshot with Codex saved resets and full reset history. */
 	resetCredits?: boolean;
@@ -1168,9 +1173,52 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 		} })}\n`);
 		return;
 	}
+	if (cmd.action === "reset-capability") {
+		process.stdout.write(`${JSON.stringify({ codexAccountReset: {
+			version: 1, accountIdentity: "accountId", idempotencyKey: true, creditIdRequired: true,
+		} })}\n`);
+		return;
+	}
+	if (cmd.action === "redeem-reset" && (!cmd.accountId?.trim() || !cmd.creditId?.trim() ||
+		(cmd.requestId !== undefined && !cmd.requestId.trim()) ||
+		(cmd.provider !== undefined && cmd.provider !== "openai-codex"))) {
+		throw new Error("redeem-reset requires exact --account-id and --credit-id for openai-codex");
+	}
+	// Discovery prunes duplicate OAuth identities; refuse ambiguous local rows before that happens.
+	if (cmd.action === "redeem-reset" && !(await resolveAuthBrokerConfig())) {
+		const store = await SqliteAuthCredentialStore.open();
+		try {
+			const matches = store.listAuthCredentials("openai-codex").filter(entry =>
+				entry.credential.type === "oauth" && entry.credential.accountId === cmd.accountId);
+			if (matches.length !== 1) {
+				process.stdout.write(`${JSON.stringify({ provider: "openai-codex", accountId: cmd.accountId,
+					creditId: cmd.creditId, ok: false, code: matches.length === 0 ? "no_account" : "ambiguous_account" })}\n`);
+				return;
+			}
+		} finally {
+			store.close();
+		}
+	}
 	const settings = await Settings.loadReadOnly();
 	const authStorage = await discoverAuthStorage(undefined, { settings });
 	try {
+		if (cmd.action === "redeem-reset") {
+			const provider = "openai-codex";
+			const accounts = authStorage.oauth.accounts(provider).filter(account => account.accountId === cmd.accountId);
+			if (accounts.length !== 1) {
+				process.stdout.write(`${JSON.stringify({ provider, accountId: cmd.accountId, creditId: cmd.creditId,
+					ok: false, code: accounts.length === 0 ? "no_account" : "ambiguous_account" })}\n`);
+				return;
+			}
+			const modelRegistry = new ModelRegistry(authStorage, undefined, { settings });
+			const outcome = await authStorage.resets.redeem({
+				target: { provider, credentialId: accounts[0]!.credentialId, accountId: cmd.accountId, creditId: cmd.creditId },
+				redeemRequestId: cmd.requestId,
+				baseUrlResolver: id => modelRegistry.getProviderBaseUrl(id),
+			});
+			process.stdout.write(`${JSON.stringify(outcome)}\n`);
+			return;
+		}
 		if (cmd.action === "invalidate") {
 			const provider = cmd.provider?.toLowerCase();
 			await authStorage.usage.invalidate(provider);

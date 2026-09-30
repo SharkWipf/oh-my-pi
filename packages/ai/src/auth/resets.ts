@@ -114,6 +114,9 @@ export class ResetCredits implements ResetsApi {
 			orgId: match.orgId,
 		};
 		if (!match.ok) return { ...resolvedIdentity, ok: false, code: "account_unavailable" };
+		if (target.accountId !== undefined && match.accountId !== target.accountId) {
+			return { ...identity, ok: false, code: "account_changed", creditId };
+		}
 		const accountKey = JSON.stringify([provider, baseUrl, target.credentialId]);
 		const inFlight = this.#resetInFlight.get(accountKey);
 		if (inFlight) {
@@ -123,6 +126,7 @@ export class ResetCredits implements ResetsApi {
 		const promise = this.#redeemAccountReset(provider, match, accountKey, {
 			creditId,
 			baseUrl,
+			redeemRequestId: options.redeemRequestId,
 			signal: options.signal,
 		}).finally(() => this.#resetInFlight.delete(accountKey));
 		this.#resetInFlight.set(accountKey, { creditId, promise });
@@ -133,7 +137,7 @@ export class ResetCredits implements ResetsApi {
 		provider: string,
 		access: OAuthAccess,
 		accountKey: string,
-		options: { creditId?: string; baseUrl?: string; signal?: AbortSignal },
+		options: { creditId?: string; redeemRequestId?: string; baseUrl?: string; signal?: AbortSignal },
 	): Promise<ResetCreditRedeemOutcome> {
 		const identity = { provider, accountId: access.accountId, email: access.email, orgId: access.orgId };
 		const auth = { ...access, baseUrl: options.baseUrl, fetch: this.#deps.usage.fetch, signal: options.signal };
@@ -228,7 +232,7 @@ export class ResetCredits implements ResetsApi {
 				if (!credit) return { ...identity, ok: false, code: "no_credit" };
 				creditId = credit.id;
 			}
-			const consumed = await consumeCodexResetCredit({ ...auth, creditId });
+			const consumed = await consumeCodexResetCredit({ ...auth, creditId, redeemRequestId: options.redeemRequestId });
 			result = { ...identity, ok: consumed.ok, code: consumed.code, creditId };
 		}
 		if (result.ok) {

@@ -15,7 +15,7 @@ import { isRecord } from "../utils";
 // Provider credits are decimal quantities, not floating-point currency or reset counts.
 function creditDecimal(value: unknown): { units: bigint; scale: bigint } | undefined {
 	const text = typeof value === "number" && Number.isFinite(value) ? String(value) : value;
-	if (typeof text !== "string" || text.length > 256 || !/^\d+(?:\.\d+)?$/.test(text)) return undefined;
+	if (typeof text !== "string" || !/^\d+(?:\.\d+)?$/.test(text)) return undefined;
 	const [whole, fraction = ""] = text.split(".");
 	return { units: BigInt(whole! + fraction), scale: 10n ** BigInt(fraction.length) };
 }

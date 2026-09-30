@@ -25,6 +25,7 @@
 
 ### Added
 
+- Added offline `omp usage reset-capability` and explicit `omp usage redeem-reset --account-id ID --credit-id ID --request-id ID` for confirmed Codex saved resets. Missing or ambiguous actual-account identities refuse redemption; local duplicate credentials remain untouched.
 - Added `omp login` command for terminal-based OAuth authentication, including automated model discovery refresh and browser-opening support
 - Enabled `org-scoped-identity` and `oauth-token-env` configuration parsing for authentication providers
 - Adopted namespaced `authStorage` API for CLI and session management

@@ -706,6 +706,8 @@ export type ListResetCreditsOptions = {
 /** Select a saved reset credit and optional provider endpoint. */
 export type RedeemResetCreditOptions = {
 	target: ResetCreditTarget;
+	/** Explicit Codex consume idempotency key, e.g. a worker's durable confirmed action id. */
+	redeemRequestId?: string;
 	baseUrlResolver?: (provider: string) => string | undefined;
 	signal?: AbortSignal;
 };
