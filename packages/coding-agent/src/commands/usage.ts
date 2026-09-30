@@ -12,7 +12,7 @@ export default class Usage extends Command {
 		action: Args.string({
 			description: "Optional subcommand to execute",
 			required: false,
-			options: ["invalidate", "clients"],
+			options: ["invalidate", "clients", "policy-capability"],
 		}),
 	};
 

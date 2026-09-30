@@ -53,6 +53,8 @@ export type TryOAuthOptions = {
 	blockScopes?: readonly string[];
 	/** When false, a definitive failure of THIS credential returns undefined instead of falling back to the ranked/round-robin selector (target-only resolution). */
 	allowFallback?: boolean;
+	/** Target-only account management (usage/reset access), never generation credential selection. */
+	accountControl?: boolean;
 };
 
 /** Services consulted by CredentialSelector for policy, usage, blocks, refresh, and session affinity. */
@@ -897,10 +899,12 @@ export class CredentialSelector {
 		const planGate = providedPlanGate ?? this.#deps.strategies(provider)?.planGate?.({ modelId: options?.modelId });
 		const hasPlanRequirement = planGate !== undefined;
 		const applyPlanFilter = enforcePlanRequirement ?? hasPlanRequirement;
+		const enforceCreditPolicy = !usageOptions.accountControl && provider === "openai-codex" &&
+			this.#deps.policies.codexCreditPolicies() !== undefined;
 		let usage: UsageReport | null = null;
 		let usageChecked = false;
 
-		if ((checkUsage && !allowBlocked) || hasPlanRequirement) {
+		if ((checkUsage && !allowBlocked) || hasPlanRequirement || enforceCreditPolicy) {
 			if (usagePrechecked) {
 				usage = prefetchedUsage;
 				usageChecked = true;
@@ -911,6 +915,7 @@ export class CredentialSelector {
 				});
 				usageChecked = true;
 			}
+			if (enforceCreditPolicy && !this.#deps.policies.allowsCodexRequest(selection.credential, usage)) return undefined;
 			if (applyPlanFilter && planGate?.(usage) !== true) {
 				return undefined;
 			}
@@ -971,7 +976,7 @@ export class CredentialSelector {
 				const rowId = this.#deps.pool.entries(provider)[selection.index]?.id;
 				if (rowId !== undefined) this.#deps.pool.replaceById(provider, rowId, updated);
 			}
-			if ((checkUsage && !allowBlocked) || hasPlanRequirement) {
+			if ((checkUsage && !allowBlocked) || hasPlanRequirement || enforceCreditPolicy) {
 				const sameAccount = selection.credential.accountId === updated.accountId;
 				if (!usageChecked || !sameAccount) {
 					usage = await this.#deps.usage.report(provider, updated, {
@@ -980,6 +985,7 @@ export class CredentialSelector {
 					});
 					usageChecked = true;
 				}
+				if (enforceCreditPolicy && !this.#deps.policies.allowsCodexRequest(updated, usage)) return undefined;
 				if (applyPlanFilter && planGate?.(usage) !== true) {
 					return undefined;
 				}

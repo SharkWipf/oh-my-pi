@@ -33,6 +33,7 @@ import {
 } from "./usage-cache";
 import type { UsageCache, UsageRequestDescriptor } from "./usage-cache";
 import type { CredentialPool } from "./pool";
+import type { AccountPolicies } from "./policy";
 import type { RankingStrategyResolver } from "../usage/registry";
 import { OAUTH_REFRESH_SKEW_MS } from "./refresh";
 import type { OAuthRefresher } from "./refresh";
@@ -92,6 +93,7 @@ export interface UsageServiceDeps {
 	store: AuthCredentialStore;
 	pool: CredentialPool;
 	overrides: KeyOverrides;
+	policies?: AccountPolicies;
 	refresher: OAuthRefresher;
 	cache: UsageCache;
 	blocks: CredentialBlocks;
@@ -255,6 +257,7 @@ export class UsageService implements UsageApi {
 		if (providerImpl.supports && !providerImpl.supports(params)) return null;
 
 		try {
+			params.codexCreditPolicies = this.#deps.policies?.codexCreditPolicies();
 			const report = await providerImpl.fetchUsage(params, {
 				fetch: this.fetch,
 				logger: this.logger,

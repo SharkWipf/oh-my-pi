@@ -120,7 +120,8 @@ function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
 		}
 		const policy = entry as Record<string, unknown>;
 		const unknownPolicyFields = Object.keys(policy).filter(
-			key => key !== "provider" && key !== "account" && key !== "priority" && key !== "reservePct",
+			key => key !== "provider" && key !== "account" && key !== "priority" && key !== "reservePct" &&
+				key !== "useCredits" && key !== "creditAllocation",
 		);
 		if (unknownPolicyFields.length > 0) {
 			throw new AIError.ConfigurationError(`${path} has unknown fields: ${unknownPolicyFields.join(", ")}`);
@@ -170,6 +171,13 @@ function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
 			throw new AIError.ConfigurationError(`${path}.reservePct must be between 0 and 100`);
 		}
 
+		if (policy.useCredits !== undefined && typeof policy.useCredits !== "boolean") {
+			throw new AIError.ConfigurationError(`${path}.useCredits must be a boolean`);
+		}
+		if (policy.creditAllocation !== undefined && typeof policy.creditAllocation !== "string") {
+			throw new AIError.ConfigurationError(`${path}.creditAllocation must be an exact decimal string`);
+		}
+
 		return {
 			provider,
 			account: {
@@ -180,6 +188,8 @@ function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
 			},
 			...(typeof policy.priority === "number" ? { priority: policy.priority } : {}),
 			...(typeof policy.reservePct === "number" ? { reservePct: policy.reservePct } : {}),
+			...(typeof policy.useCredits === "boolean" ? { useCredits: policy.useCredits } : {}),
+			...(typeof policy.creditAllocation === "string" ? { creditAllocation: policy.creditAllocation } : {}),
 		};
 	});
 }

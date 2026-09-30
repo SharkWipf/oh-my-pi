@@ -9,6 +9,34 @@ import type {
 } from "./types";
 import { DEFAULT_USAGE_RESERVE_PCT } from "./types";
 
+import type { UsageReport } from "../usage";
+import { isRecord } from "../utils";
+
+// Provider credits are decimal quantities, not floating-point currency or reset counts.
+function creditDecimal(value: unknown): { units: bigint; scale: bigint } | undefined {
+	const text = typeof value === "number" && Number.isFinite(value) ? String(value) : value;
+	if (typeof text !== "string" || text.length > 256 || !/^\d+(?:\.\d+)?$/.test(text)) return undefined;
+	const [whole, fraction = ""] = text.split(".");
+	return { units: BigInt(whole! + fraction), scale: 10n ** BigInt(fraction.length) };
+}
+
+/** Consent belongs to the exact provider account and never authorizes an unlimited/unknown balance. */
+export function codexCreditConsent(
+	policies: AuthAccountPolicies,
+	accountId: string | undefined,
+	payload: unknown,
+): boolean {
+	if (!accountId || !isRecord(payload) || !isRecord(payload.credits)) return false;
+	const policy = policies.find(entry => entry.provider === "openai-codex" && entry.account.accountId === accountId);
+	if (policy?.useCredits !== true) return false;
+	const credits = payload.credits;
+	if (credits.has_credits !== true || credits.unlimited === true || credits.overage_limit_reached === true) return false;
+	if (isRecord(payload.spend_control) && payload.spend_control.reached === true) return false;
+	const balance = creditDecimal(credits.balance);
+	const allocation = creditDecimal(policy.creditAllocation);
+	return balance !== undefined && allocation !== undefined && allocation.units > 0n &&
+		balance.units * allocation.scale * 20n > allocation.units * balance.scale;
+}
 /** Whether every identity field set on `selector` matches `identity`. */
 export function matchesAuthAccountSelector(selector: AuthAccountSelector, identity: OAuthAccountIdentity): boolean {
 	return (
@@ -69,6 +97,20 @@ export class AccountPolicies {
 				(!Number.isFinite(policy.reservePct) || policy.reservePct < 0 || policy.reservePct > 100)
 			) {
 				throw new AIError.ConfigurationError(`${path}.reservePct must be a finite number between 0 and 100`);
+			}
+			if (policy.useCredits !== undefined || policy.creditAllocation !== undefined) {
+				if (policy.provider !== "openai-codex" || !policy.account.accountId?.trim()) {
+					throw new AIError.ConfigurationError(`${path} credit policy requires an exact openai-codex accountId`);
+				}
+				if (policy.useCredits !== undefined && typeof policy.useCredits !== "boolean") {
+					throw new AIError.ConfigurationError(`${path}.useCredits must be a boolean`);
+				}
+				const allocation = creditDecimal(policy.creditAllocation);
+				if ((policy.creditAllocation !== undefined && typeof policy.creditAllocation !== "string") ||
+					(policy.creditAllocation !== undefined && !allocation) ||
+					(policy.useCredits === true && (!allocation || allocation.units <= 0n))) {
+					throw new AIError.ConfigurationError(`${path}.creditAllocation must be an exact positive decimal string when enabled`);
+				}
 			}
 		}
 	}
@@ -132,6 +174,27 @@ export class AccountPolicies {
 		return this.#accountPolicies.find(
 			policy => policy.provider === provider && matchesAuthAccountSelector(policy.account, identity),
 		);
+	}
+
+	/** Undefined preserves standalone behavior; an explicit envelope defaults every account to opt-out. */
+	codexCreditPolicies(): AuthAccountPolicies | undefined {
+		return this.#accountPolicies.some(policy => policy.provider === "openai-codex" &&
+			(policy.useCredits !== undefined || policy.creditAllocation !== undefined)) ? this.#accountPolicies : undefined;
+	}
+
+	/** Non-bypassable generation gate, including last resorts, unknown usage and post-refresh rotation. */
+	allowsCodexRequest(identity: OAuthAccountIdentity, report: UsageReport | null, now = Date.now()): boolean {
+		const policies = this.codexCreditPolicies();
+		if (!policies) return true;
+		if (!report || !identity.accountId || report.metadata?.accountId !== identity.accountId ||
+			!Number.isFinite(report.fetchedAt) || report.fetchedAt > now || now - report.fetchedAt > 300_000 ||
+			!isRecord(report.raw) || !isRecord(report.raw.rate_limit)) return false;
+		const plan = report.raw.rate_limit;
+		if (plan.limit_reached === true) return codexCreditConsent(policies, identity.accountId, report.raw);
+		if (plan.allowed !== true || plan.limit_reached !== false) return false;
+		return [plan.primary_window, plan.secondary_window].every(window => window === null || window === undefined ||
+			(isRecord(window) && typeof window.used_percent === "number" &&
+				Number.isFinite(window.used_percent) && window.used_percent >= 0 && window.used_percent < 100));
 	}
 
 	/** Return the configured policy for a stored OAuth credential. */

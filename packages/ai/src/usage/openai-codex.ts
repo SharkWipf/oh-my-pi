@@ -17,6 +17,7 @@ import type {
 } from "../usage";
 import { isRecord } from "../utils";
 import { normalizeCodexBaseUrl } from "./openai-codex-base-url";
+import { codexCreditConsent } from "../auth/policy";
 import { listCodexResetCredits } from "./openai-codex-reset";
 import { HOUR_MS } from "./shared";
 
@@ -526,7 +527,8 @@ export const openaiCodexUsageProvider: UsageProvider = {
 			parsed?.planType ??
 			(isRecord(payload) && typeof payload.plan_type === "string" ? payload.plan_type : undefined);
 
-		const creditOverage = parsed?.creditOverage === true;
+		const creditOverage = parsed?.creditOverage === true &&
+			(params.codexCreditPolicies === undefined || codexCreditConsent(params.codexCreditPolicies, accountId, payload));
 		const limits: UsageLimit[] = [];
 		const meterStates: Record<string, { allowed?: boolean; limitReached?: boolean }> = {
 			chat: buildPlanMeterState(parsed?.allowed, parsed?.limitReached, creditOverage),

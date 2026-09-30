@@ -62,6 +62,10 @@ export interface AuthAccountPolicy {
 	readonly priority?: number;
 	/** Protected remaining quota percentage for this account. */
 	readonly reservePct?: number;
+	/** Explicit Codex paid-overage consent; absent is false inside a credit-policy envelope. */
+	readonly useCredits?: boolean;
+	/** Exact provider-credit reference balance. Paid overage stops at 5% of this allocation. */
+	readonly creditAllocation?: string;
 }
 
 /** Read-only set of per-account routing policies. */

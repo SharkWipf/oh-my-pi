@@ -414,6 +414,8 @@ export interface UsageFetchParams {
 	credential: UsageCredential;
 	/** Stable credential identity key derived by the auth storage layer. */
 	accountKey?: string;
+	/** Explicit Symfonish Codex account policies; undefined preserves standalone overage behavior. */
+	codexCreditPolicies?: import("./auth/types").AuthAccountPolicies;
 	baseUrl?: string;
 	signal?: AbortSignal;
 }

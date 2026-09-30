@@ -179,7 +179,7 @@ export class OAuthAccounts implements OAuthApi {
 				providerKey,
 				undefined,
 				options,
-				{ checkUsage: false, allowBlocked: true, allowFallback: false },
+				{ checkUsage: false, allowBlocked: true, allowFallback: false, accountControl: true },
 			);
 			if (!resolved) {
 				return {

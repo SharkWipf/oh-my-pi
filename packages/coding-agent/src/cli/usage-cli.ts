@@ -1161,6 +1161,13 @@ function overlayResetCreditAccounts(reports: UsageReport[], accounts: ResetCredi
 }
 
 export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
+	// Capability detection must never load credentials, query providers, or redeem resets.
+	if (cmd.action === "policy-capability") {
+		process.stdout.write(`${JSON.stringify({ codexCreditPolicy: {
+			version: 1, defaultEnabled: false, accountIdentity: "accountId", selectionEnforced: true,
+		} })}\n`);
+		return;
+	}
 	const settings = await Settings.loadReadOnly();
 	const authStorage = await discoverAuthStorage(undefined, { settings });
 	try {
@@ -1315,9 +1322,24 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 		}
 
 		if (cmd.json) {
-			// Drop the heavy provider-specific `raw` payload — same shape as the
-			// broker/gateway `/v1/usage` endpoints.
-			let trimmed = filteredReports.map(({ raw: _raw, ...rest }) => rest);
+			// Only the existing scalar credit/spend-control fields are public; never the rest of raw.
+			let trimmed = filteredReports.map(({ raw, ...rest }) => {
+				if (rest.provider !== "openai-codex" || !raw || typeof raw !== "object") return rest;
+				const rawCredits = Reflect.get(raw, "credits");
+				const rawSpend = Reflect.get(raw, "spend_control");
+				const credits: Record<string, string | number | boolean> = {};
+				if (rawCredits && typeof rawCredits === "object") {
+					for (const key of ["has_credits", "unlimited", "overage_limit_reached"] as const) {
+						const value = Reflect.get(rawCredits, key);
+						if (typeof value === "boolean") credits[key] = value;
+					}
+					const balance = Reflect.get(rawCredits, "balance");
+					if (typeof balance === "string" || (typeof balance === "number" && Number.isFinite(balance))) credits.balance = balance;
+				}
+				const reached = rawSpend && typeof rawSpend === "object" ? Reflect.get(rawSpend, "reached") : undefined;
+				return { ...rest, ...(Object.keys(credits).length ? { credits } : {}),
+					...(typeof reached === "boolean" ? { spend_control: { reached } } : {}) };
+			});
 			let unreportedAccounts = collectUnreportedAccounts(filteredReports, accounts);
 			if (redaction) {
 				trimmed = trimmed.map(report => redactReportForJson(report, redaction));

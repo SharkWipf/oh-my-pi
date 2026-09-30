@@ -7,6 +7,7 @@ import { AUTHENTICATED_SENTINEL } from "../registry/types";
 import { getEnvApiKey, getEnvApiKeyName } from "../stream";
 import type { SessionAffinity } from "./affinity";
 import type { CredentialPool } from "./pool";
+import type { AccountPolicies } from "./policy";
 import type { CredentialSelector } from "./select";
 import type { AuthApiKeyOptions, AuthCredential, AuthSource, AuthSourceOptions, KeysApi, LimitsApi } from "./types";
 
@@ -106,6 +107,7 @@ export interface KeyCascadeDeps {
 	pool: CredentialPool;
 	overrides: KeyOverrides;
 	selector: CredentialSelector;
+	policies: AccountPolicies;
 	affinity: SessionAffinity;
 	/** LimitsApi.rotate, injected to avoid a cascade↔rotation import cycle. */
 	rotate: LimitsApi["rotate"];
@@ -277,6 +279,10 @@ export class KeyCascade implements KeysApi {
 	 * 6. Stored API key (e.g. a broker-migrated copy) — last resort, so an explicit env var wins
 	 */
 	async get(provider: string, sessionId?: string, options?: AuthApiKeyOptions): Promise<string | undefined> {
+		// Opaque keys cannot establish the exact account or its paid-overage consent.
+		if (provider === "openai-codex" && this.#deps.policies.codexCreditPolicies() !== undefined) {
+			return (await this.#deps.selector.resolveOAuth(provider, sessionId, options))?.apiKey;
+		}
 		// Runtime override takes highest priority
 		const runtimeKey = this.#deps.overrides.runtimeKey(provider);
 		if (runtimeKey) {
