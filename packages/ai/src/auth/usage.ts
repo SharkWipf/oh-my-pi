@@ -311,8 +311,13 @@ export class UsageService implements UsageApi {
 
 		const now = Date.now();
 		const cached = forceRefresh ? undefined : this.#deps.cache.get<UsageReport | null>(cacheKey);
-		// Fresh cache hit: return whatever's there (success or null fallback).
-		if (cached && cached.expiresAt > now) {
+		const enforceCodexFreshness = request.provider === "openai-codex" &&
+			this.#deps.policies?.codexCreditPolicies() !== undefined;
+		// Legacy positive-jitter entries may outlive the generation policy's
+		// freshness deadline. A failed refresh still honors its own cooldown;
+		// the unchanged policy gate denies stale last-good usage during it.
+		if (cached && cached.expiresAt > now && (!enforceCodexFreshness ||
+			cached.refreshFailed || cached.value === null || now - cached.value.fetchedAt <= USAGE_REPORT_TTL_MS)) {
 			return cached.value;
 		}
 
@@ -332,7 +337,9 @@ export class UsageService implements UsageApi {
 				// times decorrelate within a few cycles.
 				this.#deps.cache.set(cacheKey, {
 					value: report,
-					expiresAt: Date.now() + USAGE_REPORT_TTL_MS + ttlJitter,
+					expiresAt: enforceCodexFreshness
+						? Math.min(Date.now() + USAGE_REPORT_TTL_MS + ttlJitter, report.fetchedAt + USAGE_REPORT_TTL_MS)
+						: Date.now() + USAGE_REPORT_TTL_MS + ttlJitter,
 				});
 				this.#recordUsageHistory(request, report);
 				this.#deps.blocks.reconcileRequest(request, report);
@@ -350,7 +357,7 @@ export class UsageService implements UsageApi {
 			const failureBackoffMs = providerImpl?.failureBackoffMs ?? USAGE_FAILURE_BACKOFF_MS;
 			const backoffJitter = failureBackoffMs * (Math.random() * 0.5 - 0.25);
 			const coolDown = Date.now() + failureBackoffMs + backoffJitter;
-			this.#deps.cache.set(cacheKey, { value: lastGood, expiresAt: coolDown });
+			this.#deps.cache.set(cacheKey, { value: lastGood, expiresAt: coolDown, refreshFailed: true });
 			return lastGood;
 		})().finally(() => {
 			this.#usageRequestInFlight.delete(inFlightKey);

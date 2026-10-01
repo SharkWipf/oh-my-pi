@@ -32,14 +32,14 @@ export type UsageRequestDescriptor = { provider: Provider; credential: UsageCred
 /** Forced-refresh markers active for one reports pass; used by UsageService. */
 export type ForcedUsageRefresh = { all: boolean; providers: Set<Provider> };
 /** Cached value and its logical expiry; used by UsageService. */
-export type UsageCacheEntry<T> = { value: T; expiresAt: number };
+export type UsageCacheEntry<T> = { value: T; expiresAt: number; refreshFailed?: boolean };
 
 function parseUsageCacheEntry<T>(raw: string): UsageCacheEntry<T> | undefined {
 	try {
-		const parsed = JSON.parse(raw) as { value?: T; expiresAt?: unknown };
+		const parsed = JSON.parse(raw) as { value?: T; expiresAt?: unknown; refreshFailed?: unknown };
 		const expiresAt = typeof parsed.expiresAt === "number" ? parsed.expiresAt : undefined;
 		if (!expiresAt || !Number.isFinite(expiresAt)) return undefined;
-		return { value: parsed.value as T, expiresAt };
+		return { value: parsed.value as T, expiresAt, refreshFailed: parsed.refreshFailed === true };
 	} catch {
 		return undefined;
 	}
@@ -166,6 +166,7 @@ export class UsageCache {
 		const payload = JSON.stringify({
 			value: entry.value,
 			expiresAt: entry.expiresAt,
+			refreshFailed: entry.refreshFailed,
 		});
 		const durableExpiresAt =
 			entry.value === null ? entry.expiresAt : Math.max(entry.expiresAt, Date.now() + USAGE_LAST_GOOD_RETENTION_MS);

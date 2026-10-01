@@ -11,6 +11,7 @@ import { DEFAULT_USAGE_RESERVE_PCT } from "./types";
 
 import type { UsageReport } from "../usage";
 import { isRecord } from "../utils";
+import { USAGE_REPORT_TTL_MS } from "./sqlite-credential-store";
 
 // Provider credits are decimal quantities, not floating-point currency or reset counts.
 function creditDecimal(value: unknown): { units: bigint; scale: bigint } | undefined {
@@ -187,7 +188,7 @@ export class AccountPolicies {
 		const policies = this.codexCreditPolicies();
 		if (!policies) return true;
 		if (!report || !identity.accountId || report.metadata?.accountId !== identity.accountId ||
-			!Number.isFinite(report.fetchedAt) || report.fetchedAt > now || now - report.fetchedAt > 300_000 ||
+			!Number.isFinite(report.fetchedAt) || report.fetchedAt > now || now - report.fetchedAt > USAGE_REPORT_TTL_MS ||
 			!isRecord(report.raw) || !isRecord(report.raw.rate_limit)) return false;
 		const plan = report.raw.rate_limit;
 		if (plan.limit_reached === true) return codexCreditConsent(policies, identity.accountId, report.raw);
