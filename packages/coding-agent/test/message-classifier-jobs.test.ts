@@ -210,6 +210,61 @@ describe("message classifier session jobs", () => {
 		await dir.remove();
 	});
 
+	it("fails queued role-selected work after its alias chain is disabled without canceling submitted inference", async () => {
+		const first = user("synthetic authorized first classification");
+		const second = user("synthetic disabled queued classification");
+		session.settings.setModelRole("tiny", `${model.provider}/${model.id}`);
+		session.settings.setModelRole("classifierHelper", "@tiny");
+		session.settings.override("compaction.keepUserMessagesLlmModel", "pi/classifierHelper:low");
+		const started = await session.startMessageClassificationBackfill(1);
+		await until(() => provider.requests.length === 1);
+		session.settings.setModelRole("tiny", "none");
+		expect(provider.requests[0]!.signal?.aborted).toBe(false);
+		provider.requests[0]!.finish();
+		await until(() => job(started).state !== "running" || provider.requests.length === 2);
+		provider.requests[1]?.finish();
+		await settled(started);
+		expect(provider.requests).toHaveLength(1);
+		expect(job(started).state).toBe("failed");
+		expect(session.getMessageClassificationRowStatus(second)?.state).toBe("failed");
+		expect(session.getMessageClassificationRowStatus(second)?.error).toContain("disabled");
+		expect(await facts(await reopen())).toEqual(new Map([[first, 0]]));
+	});
+
+	it("rejects role-disabled admission after credential lookup before any provider request", async () => {
+		await session.dispose();
+		const paused = new PausedRegistry(auth, dir.join("models.yml"));
+		registry = paused;
+		manager = SessionManager.create(dir.path(), dir.path());
+		session = createSession(manager);
+		session.settings.setModelRole("tiny", `${model.provider}/${model.id}`);
+		session.settings.override("compaction.keepUserMessagesLlmModel", "@tiny");
+		const id = user("synthetic disabled credential preflight");
+		paused.armed = true;
+		try {
+			const starting = session.startMessageClassification(id);
+			await paused.entered.promise;
+			session.settings.setModelRole("tiny", "none");
+			paused.released.resolve();
+			await expect(starting).rejects.toThrow("disabled");
+			expect(provider.requests).toEqual([]);
+			expect((await facts()).has(id)).toBe(false);
+		} finally {
+			paused.released.resolve();
+		}
+	});
+
+	it("keeps a concrete classifier model authorized independently of the disabled tiny role", async () => {
+		const id = user("synthetic explicitly configured model");
+		session.settings.setModelRole("tiny", "none");
+		const started = await session.startMessageClassification(id);
+		await until(() => provider.requests.length === 1);
+		provider.requests[0]!.finish();
+		await settled(started);
+		expect(job(started).state).toBe("completed");
+		expect((await facts(await reopen())).get(id)).toBe(0);
+	});
+
 	it("persists complete all-false classifications as success, retaining prior facts through failed and pending reclassification", async () => {
 		const id = user("synthetic prior fact");
 		save(id, 1 << 10);

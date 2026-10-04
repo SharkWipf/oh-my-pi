@@ -21,6 +21,7 @@ import {
 	extractRequirementsBatch,
 	REQUIREMENTS_FORMAT,
 	type RequirementsEvidencePackage,
+	RequirementsPipelineError,
 	reviewRequirementsCandidates,
 } from "../src/requirements/pipeline";
 import { RequirementsStore } from "../src/requirements/store";
@@ -217,6 +218,23 @@ function controlledProvider(
 		providerSource,
 	);
 }
+
+test("disabling a requirements stage after a transient 503 prevents its retry dispatch", async () => {
+	const f = await fixture();
+	let calls = 0;
+	controlledProvider(f.api, payload => {
+		calls++;
+		if (calls === 1) {
+			f.host.settings.setModelRole("requirements", "none");
+			throw Object.assign(new Error("Temporary provider failure"), { status: 503 });
+		}
+		return !payload.candidates && !payload.candidate ? f.envelope() : approvedReview(payload);
+	});
+	await expect(extractRequirementsBatch(f.host, f.input, new AbortController().signal)).rejects.toBeInstanceOf(
+		RequirementsPipelineError,
+	);
+	expect(calls).toBe(1);
+});
 
 test("all eight candidates survive, contextual referents remain available, sanity has no source or inherited identity", async () => {
 	const f = await fixture("Keep x < y; preserve 8 technical requirements and UTF-8.");

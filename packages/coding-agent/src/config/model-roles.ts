@@ -172,13 +172,21 @@ export const MODEL_ROLES: Record<ModelRole, ModelRoleInfo> = {
 		accepts: acceptsChat,
 		purpose: "Enabled second-opinion review; sends conversation and tool activity.",
 	},
-	requirements: { tag: "REQ", name: "Requirements Extractor", color: "accent", section: "chat", accepts: acceptsChat },
+	requirements: {
+		tag: "REQ",
+		name: "Requirements Extractor",
+		color: "accent",
+		section: "chat",
+		accepts: acceptsChat,
+		purpose: "Enabled requirements extraction; sends original messages and contextual evidence.",
+	},
 	requirementsEvidence: {
 		tag: "EVIDENCE",
 		name: "Requirements Evidence",
 		color: "accent",
 		section: "chat",
 		accepts: acceptsChat,
+		purpose: "Enabled requirements evidence review; sends candidates and their original supporting sources.",
 	},
 	requirementsSanity: {
 		tag: "SANITY",
@@ -186,6 +194,8 @@ export const MODEL_ROLES: Record<ModelRole, ModelRoleInfo> = {
 		color: "accent",
 		section: "chat",
 		accepts: acceptsChat,
+		purpose:
+			"Enabled isolated requirements sanity review; sends candidates without session history or recalled memories.",
 	},
 	image: {
 		tag: "IMAGE",

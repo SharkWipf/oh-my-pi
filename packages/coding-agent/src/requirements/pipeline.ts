@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { completeSimple, type ImageContent, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import type { ModelRegistry } from "../config/model-registry";
+import { isModelRoleDisabled } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import evidencePrompt from "../prompts/requirements-evidence.md" with { type: "text" };
 import extractionPrompt from "../prompts/requirements-extraction.md" with { type: "text" };
@@ -588,6 +589,9 @@ async function call(
 	const prompt = stage === "extractor" ? extractionPrompt : stage === "evidence" ? evidencePrompt : sanityPrompt;
 	const response = await retryTransientCompletion(async () => {
 		signal.throwIfAborted();
+		if (isModelRoleDisabled(roles[stage], host.settings)) {
+			throw new RequirementsPipelineError(stage, roles[stage] + " model role is disabled");
+		}
 		// Fresh identity on every attempt. Credential ownership is NOT conversation ownership.
 		const identity = `requirements-${stage}-${randomUUID()}`;
 		const result = await completeSimple(

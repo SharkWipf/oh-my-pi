@@ -3,8 +3,8 @@ import type { StreamFn } from "@oh-my-pi/pi-agent-core";
 import type { Context, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import { logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
-import { resolveModelRoleValue } from "../config/model-resolver";
-import { roleCandidatePool } from "../config/model-roles";
+import { resolveExplicitModelRole, resolveModelRoleValue } from "../config/model-resolver";
+import { isModelRoleDisabled, roleCandidatePool } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import {
 	classifyPreservedUserMessage,
@@ -78,6 +78,7 @@ interface Job {
 	boundaryId: string | null;
 	controller: AbortController;
 	model: Model;
+	modelRole?: string;
 	iterator: Iterator<ClassifierTarget> | AsyncIterator<ClassifierTarget>;
 	sharedResults: Set<Promise<void>>;
 	invalidatedTargets: Set<string>;
@@ -150,15 +151,19 @@ export class SessionMessageClassifier {
 			}
 		}
 	}
-	#resolveModel(): Model {
+	#resolveModel(selector = this.#host.settings.get("compaction.keepUserMessagesLlmModel") || "@tiny"): Model {
 		const { settings, modelRegistry } = this.#host;
-		const selector = settings.get("compaction.keepUserMessagesLlmModel") || "@tiny";
 		const { model } = resolveModelRoleValue(selector, roleCandidatePool("tiny", settings, modelRegistry), {
 			settings,
 		});
 		if (!model)
 			throw new Error(`Classifier model ${selector} is unavailable. Configure a supported classifier model.`);
 		return model;
+	}
+	#assertModelRoleEnabled(role: string | undefined): void {
+		if (role && isModelRoleDisabled(role, this.#host.settings)) {
+			throw new Error(`Classifier model role ${role} is disabled. Configure a supported classifier model.`);
+		}
 	}
 	async getAvailability(): Promise<MessageClassificationAvailability> {
 		try {
@@ -326,7 +331,8 @@ export class SessionMessageClassifier {
 		targetId?: string,
 	): Promise<string> {
 		if (this.#host.isDisposed()) throw new Error("Session disposed.");
-		const model = this.#resolveModel();
+		const selector = this.#host.settings.get("compaction.keepUserMessagesLlmModel") || "@tiny";
+		const model = this.#resolveModel(selector);
 		const job: Job = {
 			targetId,
 			startPromise: targetId ? this.#starts.get(targetId) : undefined,
@@ -352,6 +358,7 @@ export class SessionMessageClassifier {
 			boundaryId: scope.boundaryId,
 			controller: new AbortController(),
 			model,
+			modelRole: resolveExplicitModelRole(selector, this.#host.settings),
 			iterator: createIterator(
 				() => this.#current(job),
 				entryId => job.invalidatedTargets.has(entryId),
@@ -361,6 +368,7 @@ export class SessionMessageClassifier {
 		const apiKey = await this.#host.modelRegistry.getApiKey(model, job.status.sessionId, {
 			signal: job.controller.signal,
 		});
+		this.#assertModelRoleEnabled(job.modelRole);
 		if (!this.#current(job)) throw new Error("Classifier launch interrupted by a session or branch transition.");
 		if (targetId && this.#starts.get(targetId) !== job.startPromise)
 			throw new Error("Classifier input changed during launch; retry with current input.");
@@ -508,9 +516,10 @@ export class SessionMessageClassifier {
 						},
 						job.model,
 					);
-					const stream = await untilAborted(signal, async () =>
-						this.#host.sideStreamFn(job.model, this.#host.obfuscate(context), options),
-					);
+					const stream = await untilAborted(signal, async () => {
+						this.#assertModelRoleEnabled(job.modelRole);
+						return this.#host.sideStreamFn(job.model, this.#host.obfuscate(context), options);
+					});
 					return untilAborted(signal, stream.result());
 				},
 			});
