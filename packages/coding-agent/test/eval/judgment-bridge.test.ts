@@ -37,6 +37,7 @@ function makeSession(opts: { typesafe?: boolean } = {}): ToolSession {
 	const settings = Settings.isolated({
 		"async.enabled": false,
 		"task.isolation.enabled": false,
+		"eval.judgmentEnabled": true,
 		modelRoles: { judge: opts.typesafe ? "typesafe/jev-preview" : "p/smol" },
 		"retry.fallbackChains": { judge: ["p/smol"] },
 	});
@@ -83,6 +84,20 @@ afterEach(() => {
 });
 
 describe("eval judge() bridge", () => {
+	it("rejects disabled judgment without resolving credentials or dispatching", async () => {
+		const session = makeSession({ typesafe: true });
+		session.settings.override("eval.judgmentEnabled", false);
+		const discover = vi.spyOn(session.modelRegistry!, "getAvailable");
+		const infer = vi.spyOn(ai, "completeSimple").mockResolvedValue(reply("tests: yes"));
+		const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected request"));
+		await expect(runEvalJudgment({ state: "private state", questions: QUESTIONS }, { session })).rejects.toThrow(
+			"disabled",
+		);
+		expect(discover).not.toHaveBeenCalled();
+		expect(infer).not.toHaveBeenCalled();
+		expect(fetch).not.toHaveBeenCalled();
+	});
+
 	it("rejects malformed questions before touching any backend", async () => {
 		const session = makeSession();
 		const spy = vi.spyOn(ai, "completeSimple");

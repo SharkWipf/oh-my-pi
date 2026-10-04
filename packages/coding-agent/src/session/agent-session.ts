@@ -107,6 +107,7 @@ import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import type { ModelRegistry } from "../config/model-registry";
+import { isModelRoleDisabled } from "../config/model-roles";
 import type { ResolvedModelRoleValue } from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import { buildServiceTierByFamily } from "../config/service-tier";
@@ -2455,6 +2456,7 @@ export class AgentSession {
 	 * per call so model, credential, and session switches apply.
 	 */
 	ruleJudge(): Judge | undefined {
+		if (isModelRoleDisabled("judge", this.settings)) return undefined;
 		const mode = this.settings.get("ttsr.judge");
 		if (mode === "off" || (mode === "auto" && !hasNativeJudge(this.settings, this.#modelRegistry))) return undefined;
 		return resolveJudge({
@@ -6323,6 +6325,8 @@ export class AgentSession {
 				taskBatch: this.settings.get("task.batch"),
 				scoutAvailable: this.#isScoutAvailable(),
 				evalTools: this.settings.get("eval.tools.enabled"),
+				completionEnabled: this.settings.get("eval.completionEnabled"),
+				judgmentEnabled: this.settings.get("eval.judgmentEnabled") && !isModelRoleDisabled("judge", this.settings),
 			};
 			// A notice whose contract needs an inactive tool would demand an
 			// unavailable capability; skip it rather than mislead the model.
@@ -8090,7 +8094,7 @@ export class AgentSession {
 	}
 
 	#scheduleReplanTitleRefresh(): void {
-		if ($env.PI_NO_TITLE) return;
+		if (!this.settings.get("title.enabled") || isModelRoleDisabled("tiny", this.settings) || $env.PI_NO_TITLE) return;
 		// Headless subagent sessions have no operator-visible title, so a todo-init
 		// replan refresh only burns a tiny-model call whose result lands in JSONL
 		// and is never shown (issue #5910). In an interactive host the operator can
@@ -8126,6 +8130,7 @@ export class AgentSession {
 	 * extension-command policy.
 	 */
 	maybeStartTitleGeneration(firstMessage: string, onStart?: () => (() => void) | void): void {
+		if (!this.settings.get("title.enabled") || isModelRoleDisabled("tiny", this.settings)) return;
 		const extensionCommandSpace = firstMessage.indexOf(" ");
 		const isLocalExtensionCommand =
 			firstMessage.startsWith("/") &&
@@ -8201,6 +8206,7 @@ export class AgentSession {
 		customSystemPrompt?: string,
 		signal?: AbortSignal,
 	): Promise<string | null> {
+		if (!this.settings.get("title.enabled") || isModelRoleDisabled("tiny", this.settings)) return null;
 		const parentSessionId = this.sessionId;
 		const sessionGeneration = this.#sessionGeneration;
 		const sessionId = this.#resolveTitleProviderSessionId(parentSessionId);

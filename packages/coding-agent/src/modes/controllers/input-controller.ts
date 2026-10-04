@@ -210,12 +210,14 @@ export class InputController {
 
 	/** Prewarm only the local worker selected by the current tiny role. */
 	prewarmTinyTitleModel(): void {
+		if (!this.ctx.settings.get("title.enabled")) return;
 		const modelKey = this.#resolveTinyTitleLocalModelKey();
 		if (modelKey) tinyTitleClient.prewarm(modelKey);
 	}
 
 	/** Session-level title starts (user `/skill:` via promptCustomMessage) reuse this UI. */
 	notifyTitleGenerationStart(): (() => void) | undefined {
+		if (!this.ctx.settings.get("title.enabled")) return undefined;
 		const modelKey = this.#resolveTinyTitleLocalModelKey();
 		return modelKey ? this.#showTinyTitleDownloadProgress(modelKey) : undefined;
 	}

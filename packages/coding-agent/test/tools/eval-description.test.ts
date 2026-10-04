@@ -54,6 +54,20 @@ function wireCellFields(tool: EvalTool): {
 }
 
 describe("eval tool description", () => {
+	it("advertises auxiliary inference only after the corresponding permission is enabled", () => {
+		const session = makeSession({});
+		const tool = new EvalTool(session);
+		expect(tool.description).not.toContain("completion(prompt");
+		expect(tool.description).not.toContain("await judge(state");
+		session.settings.override("eval.completionEnabled", true);
+		expect(tool.description).toContain("completion(prompt");
+		expect(tool.description).not.toContain("await judge(state");
+		session.settings.override("eval.judgmentEnabled", true);
+		expect(tool.description).toContain("await judge(state");
+		session.settings.setModelRole("judge", "none");
+		expect(tool.description).not.toContain("await judge(state");
+	});
+
 	it("advertises agent() when spawns are allowed", () => {
 		const text = getEvalToolDescription({ py: true, js: true, spawns: true });
 		expect(text).toContain("agent(prompt");

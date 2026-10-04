@@ -15,6 +15,7 @@ export interface SetupUiHost {
 	};
 }
 
+export type SetupSearchProvider = SearchProviderId | "auto" | "none";
 /** Application-owned preferences and effects consumed by setup scenes. */
 export interface SetupHost extends SetupUiHost {
 	readonly statusLine: ComposerPreviewStatusSource | undefined;
@@ -34,7 +35,7 @@ export interface SetupHost extends SetupUiHost {
 	saveColorBlindMode(enabled: boolean): void;
 	saveTheme(mode: "dark" | "light", name: string): void;
 	isSearchProviderAvailable(id: SearchProviderId): Promise<boolean>;
-	saveSearchProvider(id: SearchProviderId | "auto"): void;
+	saveSearchProvider(id: SetupSearchProvider): void;
 	captureBrowserSession(request: OAuthBrowserSessionRequest, signal?: AbortSignal): Promise<string>;
 	copyToClipboard(text: string): Promise<void>;
 	openInBrowser(url: string): void;

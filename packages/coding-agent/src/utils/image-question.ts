@@ -9,6 +9,7 @@ import {
 	getModelMatchPreferences,
 	resolveModelFromString,
 } from "../config/model-resolver";
+import { isModelRoleDisabled } from "../config/model-roles";
 import imageQuestionSystemPromptTemplate from "../prompts/tools/image-question-system.md" with { type: "text" };
 import { concreteThinkingLevel, resolveThinkingLevelForModel, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../tools";
@@ -28,8 +29,18 @@ export interface ImageQuestionResult {
 	usage: Usage;
 }
 
+function assertImageQuestionsEnabled(session: ToolSession): void {
+	if (!session.settings.get("images.questionEnabled")) {
+		throw new ToolError("Image questions are disabled. Enable images.questionEnabled to permit vision inference.");
+	}
+	if (isModelRoleDisabled("vision", session.settings)) {
+		throw new ToolError("Image questions are disabled by modelRoles.vision=none.");
+	}
+}
+
 /** Resolve the vision model used by `read <image>?q=<question>`. */
 export function resolveImageQuestionModel(session: ToolSession): ResolvedImageQuestionModel {
+	assertImageQuestionsEnabled(session);
 	const modelRegistry = session.modelRegistry;
 	if (!modelRegistry) {
 		throw new ToolError("Model registry is unavailable for image questions.");
@@ -84,6 +95,7 @@ export async function askImageQuestion(
 	signal: AbortSignal | undefined,
 	completeImpl: typeof completeSimple = completeSimple,
 ): Promise<ImageQuestionResult> {
+	assertImageQuestionsEnabled(session);
 	if (session.settings.get("images.blockImages")) {
 		throw new ToolError(
 			"Image submission is disabled by settings (images.blockImages=true). Disable it to ask about images.",

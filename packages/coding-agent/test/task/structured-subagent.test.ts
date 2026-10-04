@@ -338,6 +338,19 @@ describe("structured subagent primitive", () => {
 		await fs.rm(evalLabeled.artifactsDir, { recursive: true, force: true });
 	});
 
+	it("rejects an explicitly disabled selected role without falling back to the parent model", async () => {
+		mockDiscovery({ ...AGENT, model: ["@task"] });
+		const childSession = session({ modelRoles: { task: "none" } });
+		childSession.getActiveModelString = () => "anthropic/claude-primary";
+		await expect(resolveEffectiveSubagentPolicy(request({ session: childSession }))).rejects.toMatchObject({
+			kind: "preflight",
+		});
+		const override = await resolveEffectiveSubagentPolicy(
+			request({ session: childSession, model: "openai/explicit-worker" }),
+		);
+		expect(override.modelOverride).toEqual(["openai/explicit-worker"]);
+	});
+
 	it("derives modelRole from the raw selector source in request, override, definition order", async () => {
 		const customAgent = { ...AGENT, model: ["@definition"] };
 		mockDiscovery(customAgent);

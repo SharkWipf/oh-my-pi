@@ -58,6 +58,7 @@ describe("AgentSession title generation disposal", () => {
 		const providerSessionId = "provider-session";
 
 		const settings = Settings.isolated({
+			"title.enabled": true,
 			"compaction.enabled": false,
 			modelRoles: { tiny: `${model.provider}/${model.id}` },
 		});
@@ -120,6 +121,7 @@ describe("AgentSession title generation disposal", () => {
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
 
 		const settings = Settings.isolated({
+			"title.enabled": true,
 			"compaction.enabled": false,
 			modelRoles: { tiny: `${model.provider}/${model.id}` },
 		});
@@ -157,6 +159,7 @@ describe("AgentSession title generation disposal", () => {
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
 
 		const settings = Settings.isolated({
+			"title.enabled": true,
 			"compaction.enabled": false,
 			modelRoles: { tiny: `${model.provider}/${model.id}` },
 		});

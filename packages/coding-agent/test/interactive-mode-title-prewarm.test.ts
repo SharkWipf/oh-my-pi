@@ -63,7 +63,7 @@ describe("InteractiveMode tiny-title prewarm", () => {
 				},
 			}),
 			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
-			settings: Settings.isolated(),
+			settings: Settings.isolated({ "title.enabled": true }),
 			modelRegistry,
 		});
 		mode = new InteractiveMode(session, "test", undefined, () => {}, [], undefined, undefined);
@@ -92,6 +92,15 @@ describe("InteractiveMode tiny-title prewarm", () => {
 	afterAll(() => {
 		authStorage.close();
 		tempDir.removeSync();
+	});
+
+	it("does not start a local worker when title generation is disabled", async () => {
+		session.settings.override("title.enabled", false);
+		session.settings.setModelRole("tiny", "local/lfm2.5-230m");
+		const prewarm = vi.spyOn(tinyTitleClient, "prewarm").mockImplementation(() => {});
+		await mode.init();
+		await new Promise<void>(resolve => setImmediate(resolve));
+		expect(prewarm).not.toHaveBeenCalled();
 	});
 
 	it("prewarms the configured local tiny role on startup for an unnamed session", async () => {

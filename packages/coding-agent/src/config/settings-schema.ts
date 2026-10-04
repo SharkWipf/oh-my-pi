@@ -872,15 +872,26 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"images.questionEnabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Vision",
+			label: "Image Question Requests",
+			description:
+				"Allow read image?q=question to make an extra vision-model request; sends the image and question to the selected vision provider",
+		},
+	},
 	"images.describeForTextModels": {
 		type: "boolean",
-		default: true,
+		default: false,
 		ui: {
 			tab: "model",
 			group: "Vision",
 			label: "Describe Images for Text Models",
 			description:
-				"When an image is attached to a model without vision support, save it under local:// and inject a description from a vision-capable model instead of dropping it",
+				"Allow an extra vision-model request for images attached to text-only models; sends image pixels to the selected vision provider",
 		},
 	},
 
@@ -2633,13 +2644,13 @@ export const SETTINGS_SCHEMA = {
 
 	"compaction.asyncEnabled": {
 		type: "boolean",
-		default: true,
+		default: false,
 		ui: {
 			tab: "context",
 			group: "Compaction",
 			label: "Async Compaction",
 			description:
-				"Speculatively summarize in the background as context nears the compaction threshold, then splice the ready result in when the threshold is crossed",
+				"Allow extra speculative compaction-model requests before the normal threshold; summarizes conversation in the background and reuses the result when needed",
 		},
 	},
 
@@ -3472,13 +3483,13 @@ export const SETTINGS_SCHEMA = {
 	"ttsr.judge": {
 		type: "enum",
 		values: ["auto", "on", "off"] as const,
-		default: "auto",
+		default: "off",
 		ui: {
 			tab: "context",
 			group: "Rules (TTSR)",
 			label: "Judged Rules",
 			description:
-				"Ask the judge model role each `question` rule about completed replies, reasoning, and tool calls; a yes injects the rule as a warning",
+				"Allow extra judge-role requests for question rules on completed replies, reasoning and tool calls; may send those contents to TypeSafe/OpenRouter Jev when selected",
 			options: [
 				{
 					value: "auto",
@@ -4045,6 +4056,28 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"eval.completionEnabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "shell",
+			group: "Eval & Runtimes",
+			label: "Eval Model Completions",
+			description:
+				"Allow completion() in JS, Python, browser and computer Eval runtimes to issue extra model requests with model-supplied prompts and the requested model role",
+		},
+	},
+	"eval.judgmentEnabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "shell",
+			group: "Eval & Runtimes",
+			label: "Eval Model Judgments",
+			description:
+				"Allow judge() and judge_batch() in Eval runtimes to send supplied states and questions to the judge role, including TypeSafe/OpenRouter Jev when selected",
+		},
+	},
 	"eval.tools.enabled": {
 		type: "boolean",
 		default: true,
@@ -4308,7 +4341,7 @@ export const SETTINGS_SCHEMA = {
 	"find.enabled": {
 		type: "enum",
 		values: ["auto", "on", "off"] as const,
-		default: "auto",
+		default: "off",
 		ui: {
 			tab: "tools",
 			group: "Available Tools",
@@ -4960,14 +4993,26 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"title.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "AI Titles and Labels",
+			description:
+				"Allow extra Tiny-role inference for session titles, task labels and plan filenames; may send cleaned message excerpts to the selected provider",
+		},
+	},
 	"title.refreshOnReplan": {
 		type: "boolean",
-		default: true,
+		default: false,
 		ui: {
 			tab: "tasks",
 			group: "Modes",
 			label: "Refresh Title on Replan",
-			description: "Refresh generated session titles after todo init replans unless the title was set by the user",
+			description:
+				"When AI Titles and Labels is enabled, make another title-model request after todo replans; never replace a user-written title",
 		},
 	},
 
@@ -5642,7 +5687,8 @@ export const SETTINGS_SCHEMA = {
 				{
 					value: "smart",
 					label: "Smart",
-					description: "Mechanical + small-model classification of text-only stops",
+					description:
+						"Mechanical + an extra judge-role model request for text-only stops; sends recent conversation excerpts",
 				},
 			],
 		},
@@ -6221,6 +6267,7 @@ export interface RecapSettings {
 }
 
 export interface TitleSettings {
+	enabled: boolean;
 	refreshOnReplan: boolean;
 }
 

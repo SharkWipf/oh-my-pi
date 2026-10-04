@@ -7,11 +7,12 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import {
 	buildSharpshooterEnvelope,
 	maybeStartSharpshooterExtraction,
+	resolveSharpshooterModel,
 } from "@oh-my-pi/pi-coding-agent/sharpshooter/extract";
 import { listSharpshooterDeltas } from "@oh-my-pi/pi-coding-agent/sharpshooter/queue";
 
@@ -77,6 +78,20 @@ async function waitFor(predicate: () => boolean | Promise<boolean>, message: str
 
 afterEach(() => {
 	vi.restoreAllMocks();
+});
+
+describe("Sharpshooter configured helper selection", () => {
+	it("does not replace a missing local extraction model with smol", async () => {
+		const model = getBundledModel("anthropic", "claude-haiku-4-5")!;
+		const settings = Settings.isolated({
+			"sharpshooter.model": "local/missing-extraction-model",
+			modelRoles: { smol: `${model.provider}/${model.id}` },
+		});
+		const registry = { getAll: () => [model], getAvailable: () => [model] } as unknown as ModelRegistry;
+		expect(await resolveSharpshooterModel(settings, registry)).toBeUndefined();
+		settings.override("sharpshooter.model", "none");
+		expect(await resolveSharpshooterModel(settings, registry)).toBeUndefined();
+	});
 });
 
 describe("buildSharpshooterEnvelope", () => {

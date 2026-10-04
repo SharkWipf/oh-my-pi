@@ -83,6 +83,37 @@ afterEach(() => {
 });
 
 describe("ChainJudge", () => {
+	it("disabling a warm judge blocks requests immediately, including session-model fallback", async () => {
+		const settings = Settings.isolated({ modelRoles: { judge: `${ONLINE.provider}/${ONLINE.id}` } });
+		const registry = makeRegistry([ONLINE], { [ONLINE.provider]: "online-key" });
+		const completion = vi.spyOn(ai, "completeSimple").mockResolvedValue(reply(ONLINE, "level: high"));
+		const keyLookup = vi.spyOn(registry, "getApiKey");
+		const judge = new ChainJudge({ settings, registry, sessionModel: ONLINE });
+		const request = { state: "redesign the scheduler", questions: { level: TIER_QUESTION } };
+		await judge.judge(request);
+		settings.setModelRole("judge", "none");
+		completion.mockClear();
+		keyLookup.mockClear();
+		await expect(judge.judge(request)).rejects.toThrow(/disabled/);
+		expect(completion).not.toHaveBeenCalled();
+		expect(keyLookup).not.toHaveBeenCalled();
+	});
+
+	it("a failed explicitly local judge never sends the state to the session model", async () => {
+		const settings = Settings.isolated({ modelRoles: { judge: `${LOCAL.provider}/${LOCAL.id}` } });
+		const registry = makeRegistry([LOCAL, ONLINE], { [ONLINE.provider]: "online-key" });
+		vi.spyOn(tinyModelClient, "complete").mockRejectedValue(new Error("local backend unavailable"));
+		const completion = vi.spyOn(ai, "completeSimple").mockResolvedValue(reply(ONLINE, "level: high"));
+		const keyLookup = vi.spyOn(registry, "getApiKey");
+		await expect(
+			new ChainJudge({ settings, registry, sessionModel: ONLINE }).judge({
+				state: "private source",
+				questions: { level: TIER_QUESTION },
+			}),
+		).rejects.toThrow("local backend unavailable");
+		expect(completion).not.toHaveBeenCalled();
+		expect(keyLookup).not.toHaveBeenCalled();
+	});
 	it("falls from a coarse local question to a tiered online question", async () => {
 		const settings = Settings.isolated({
 			modelRoles: { judge: `${LOCAL.provider}/${LOCAL.id}` },

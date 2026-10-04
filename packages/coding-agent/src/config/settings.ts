@@ -40,7 +40,7 @@ import { isLightTheme, setAutoThemeMapping, setColorBlindMode, setSymbolPreset }
 import { JSONC, YAML } from "bun";
 import { invalidate as invalidateCapabilityFsCache } from "../capability/fs";
 import { type Settings as SettingsCapabilityItem, settingsCapability } from "../capability/settings";
-import type { ModelRole } from "../config/model-roles";
+import { isDisabledModelRoleValue, type ModelRole } from "../config/model-roles";
 import { loadCapability } from "../discovery";
 import { AgentStorage } from "../session/agent-storage";
 import { type CompactionMethod, DEFAULT_COMPACTION_METHOD_ORDER } from "../session/compaction-methods";
@@ -2872,14 +2872,15 @@ export class Settings {
 				(typeof legacyUnexpectedStopModel === "string" && legacyUnexpectedStopModel !== "online");
 			if (nonDefaultJudge) {
 				const judgeCandidates: string[] = [];
-				if (legacyJudgmentProvider !== "llm") judgeCandidates.push("typesafe/jev-latest");
+				if (legacyJudgmentProvider === "typesafe") judgeCandidates.push("typesafe/jev-latest");
 				if (typeof legacyAutoThinkingModel === "string" && legacyAutoThinkingModel !== "online") {
 					judgeCandidates.push(`local/${legacyAutoThinkingModel}`);
 				}
 				if (typeof legacyUnexpectedStopModel === "string" && legacyUnexpectedStopModel !== "online") {
 					judgeCandidates.push(`local/${legacyUnexpectedStopModel}`);
 				}
-				judgeCandidates.push("@tiny", "@smol", "@default");
+				if (legacyJudgmentProvider === "llm" && judgeCandidates.length === 0)
+					judgeCandidates.push("@tiny", "@smol", "@default");
 				setRoleChain("judge", dedupe(judgeCandidates));
 			}
 
@@ -2887,6 +2888,7 @@ export class Settings {
 				if (typeof model !== "string" || model === "online" || model.length === 0) return;
 				const selector = `local/${model}`;
 				const configured = typeof roles[role] === "string" ? roles[role] : undefined;
+				if (isDisabledModelRoleValue(configured)) return;
 				const patterns = configured
 					? configured
 							.split(",")

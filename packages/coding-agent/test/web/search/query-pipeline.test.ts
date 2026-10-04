@@ -43,6 +43,17 @@ async function stubRoleProvider(id: SearchProviderId, behaviour: (params: Search
 }
 
 describe("web search directive pipeline", () => {
+	it("honors session-local disabled roles even with an explicit provider override", async () => {
+		const context = await stubRoleProvider("brave", async () => ({ provider: "brave", sources: SOURCES }));
+		const isolated = Settings.isolated({ modelRoles: { web: "none" } });
+		const result = await runSearchQuery(
+			{ query: "private query", model: "web/brave" },
+			{ ...context, settings: isolated },
+		);
+		expect(result.details.error).toContain("disabled");
+		expect(context.getProvider).not.toHaveBeenCalled();
+	});
+
 	afterEach(() => {
 		vi.restoreAllMocks();
 		resetSettingsForTest();

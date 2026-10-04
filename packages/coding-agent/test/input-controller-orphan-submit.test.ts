@@ -275,6 +275,7 @@ describe("InputController orphaned submit", () => {
 			const modelRegistry = new ModelRegistry(authStorage);
 			const sessionManager = SessionManager.inMemory(tempDir.path());
 			const settings = Settings.isolated({
+				"title.enabled": true,
 				"compaction.enabled": false,
 				modelRoles: { tiny: `${model.provider}/${model.id}` },
 			});

@@ -1,12 +1,4 @@
-/**
- * `omp read <image>?q=<question>` delegates to a vision model, which requires a
- * model registry to resolve modelRoles.vision / @default and fetch credentials.
- * The read CLI built a lightweight session with no registry, so the read tool
- * aborted with "Model registry is unavailable for image questions." before any
- * resolution (issue #11338). This drives the real `omp read` command in an
- * isolated agent dir carrying a custom vision provider and asserts it reaches
- * the completion attempt instead of the registry guard.
- */
+/** Exercise the read CLI's vision consent boundary against a local provider. */
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -15,14 +7,11 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 // 1x1 PNG so the read tool's image loader accepts the file.
 const PNG_1X1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
-// Custom vision provider with a real (dummy) inline key so it counts as
-// available; its baseUrl points at a dead local port, so the completion attempt
-// fails fast with a connection error — never the registry guard, and never a
-// real network call.
+// A local provider accepts the same wire request as an external vision API.
 const MODELS_YML = `providers:
   testvision:
     api: openai-completions
-    baseUrl: http://127.0.0.1:1/v1
+    baseUrl: LOCAL_BASE_URL
     apiKey: "test-key"
     models:
       - id: vmodel
@@ -42,8 +31,40 @@ const MODELS_YML = `providers:
 const READ_CLI_URL = new URL("../src/cli/read-cli.ts", import.meta.url).href;
 
 describe("omp read <image>?q=", () => {
-	it("resolves a vision model instead of failing with the registry guard", async () => {
+	it("sends image bytes only after explicit vision-question opt-in", async () => {
 		const tempDir = TempDir.createSync("@pi-read-cli-imgq-");
+		const requests: Array<{ messages: Array<{ content: unknown }> }> = [];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			async fetch(request) {
+				requests.push((await request.json()) as (typeof requests)[number]);
+				const chunk = { id: "local-vision", object: "chat.completion.chunk", created: 1, model: "vmodel" };
+				return new Response(
+					[
+						"data: " +
+							JSON.stringify({
+								...chunk,
+								choices: [
+									{
+										index: 0,
+										delta: { role: "assistant", content: "A one-pixel image." },
+										finish_reason: null,
+									},
+								],
+							}),
+						"data: " +
+							JSON.stringify({
+								...chunk,
+								choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+								usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+							}),
+						"data: [DONE]",
+					].join("\n\n") + "\n\n",
+					{ headers: { "content-type": "text/event-stream" } },
+				);
+			},
+		});
 		try {
 			const agentDir = tempDir.join("agent");
 			const home = tempDir.join("home");
@@ -51,32 +72,26 @@ describe("omp read <image>?q=", () => {
 			fs.mkdirSync(agentDir, { recursive: true });
 			fs.mkdirSync(home, { recursive: true });
 			fs.mkdirSync(path.join(project, ".omp"), { recursive: true });
-			// Bound the completion attempt so a dead endpoint aborts quickly instead
-			// of running the provider SDK's full connection backoff.
-			fs.writeFileSync(path.join(project, ".omp", "config.yml"), "images:\n  questionTimeoutMs: 3000\n");
-			fs.writeFileSync(path.join(agentDir, "models.yml"), MODELS_YML);
+			const configPath = path.join(project, ".omp", "config.yml");
+			const roleConfig = "modelRoles:\n  vision: testvision/vmodel\n";
+			fs.writeFileSync(configPath, roleConfig);
+			fs.writeFileSync(
+				path.join(agentDir, "models.yml"),
+				MODELS_YML.replace("LOCAL_BASE_URL", "http://127.0.0.1:" + server.port + "/v1"),
+			);
 			const pngPath = path.join(project, "test.png");
 			fs.writeFileSync(pngPath, Buffer.from(PNG_1X1, "base64"));
-
-			// The runner imports the CLI entry by file URL so it resolves
-			// independently of its own location; it lives in the TempDir (never
-			// the repo checkout) so a crash before cleanup leaves nothing
-			// behind in git status. cwd is the isolated project so
-			// getProjectDir() never picks up repo settings.
-			const runnerPath = tempDir.join(`read-cli-runner-${process.pid}.ts`);
+			const runnerPath = tempDir.join("read-cli-runner.ts");
 			fs.writeFileSync(
 				runnerPath,
-				`import { runReadCommand } from ${JSON.stringify(READ_CLI_URL)};\nawait runReadCommand({ path: process.argv[2] });\n`,
+				"import { runReadCommand } from " +
+					JSON.stringify(READ_CLI_URL) +
+					";\nawait runReadCommand({ path: process.argv[2] });\n",
 			);
-			try {
-				const child = Bun.spawn(["bun", runnerPath, `${pngPath}?q=describe this image`], {
+			async function readQuestion() {
+				const child = Bun.spawn(["bun", runnerPath, pngPath + "?q=describe this image"], {
 					cwd: project,
-					env: {
-						...process.env,
-						HOME: home,
-						PI_CODING_AGENT_DIR: agentDir,
-						PI_TEST_RUNTIME: "1",
-					},
+					env: { ...process.env, HOME: home, PI_CODING_AGENT_DIR: agentDir, PI_TEST_RUNTIME: "1" },
 					stdout: "pipe",
 					stderr: "pipe",
 				});
@@ -85,16 +100,25 @@ describe("omp read <image>?q=", () => {
 					new Response(child.stderr).text(),
 					child.exited,
 				]);
-				const output = `${stdout}\n${stderr}`;
-				// The command fails (dead endpoint) but must get past the registry
-				// guard AND model resolution to an actual completion attempt.
-				expect(exitCode).not.toBe(0);
-				expect(output).not.toContain("Model registry is unavailable for image questions.");
-				expect(output).not.toContain("No models available for image questions.");
-			} finally {
-				fs.rmSync(runnerPath, { force: true });
+				return { stdout, stderr, exitCode };
 			}
+			const denied = await readQuestion();
+			expect(denied.exitCode).not.toBe(0);
+			expect(requests).toHaveLength(0);
+			fs.writeFileSync(configPath, roleConfig + "images:\n  questionEnabled: true\n  questionTimeoutMs: 3000\n");
+			const allowed = await readQuestion();
+			expect(allowed).toMatchObject({ exitCode: 0 });
+			expect(allowed.stdout).toContain("A one-pixel image.");
+			expect(requests).toHaveLength(1);
+			const wire = JSON.stringify(requests[0]!.messages);
+			expect(wire).toMatch(new RegExp("data:image/[a-z]+;base64,"));
+			expect(wire).toContain("describe this image");
+			fs.writeFileSync(configPath, "modelRoles:\n  vision: none\nimages:\n  questionEnabled: true\n");
+			const disabledRole = await readQuestion();
+			expect(disabledRole.exitCode).not.toBe(0);
+			expect(requests).toHaveLength(1);
 		} finally {
+			await server.stop(true);
 			tempDir.removeSync();
 		}
 	}, 60_000);

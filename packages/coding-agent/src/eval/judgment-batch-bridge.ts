@@ -27,7 +27,14 @@ import { withBridgeTimeoutPause } from "./bridge-timeout";
 import { EVAL_HANDLE_CONCURRENCY, evalRequestSlots } from "./completion-bridge";
 import { JUDGMENT_BATCH_PROGRESS_EVENT_CHANNEL, type JudgmentBatchProgress } from "./judgment-batch-events";
 import type { JsStatusEvent } from "./js/shared/types";
-import { type CellAnswer, parseQuestions, parseState, sessionJudge, toEvalJudgmentResult } from "./judgment-bridge";
+import {
+	assertEvalJudgmentEnabled,
+	type CellAnswer,
+	parseQuestions,
+	parseState,
+	sessionJudge,
+	toEvalJudgmentResult,
+} from "./judgment-bridge";
 
 /** Synthetic bridge name reserved for the `judge_batch()` helper across both runtimes. */
 export const EVAL_JUDGMENT_BATCH_BRIDGE_NAME = "__judge_batch__";
@@ -388,6 +395,7 @@ export class JudgmentBatch {
 				return { key: input.key, error: "cancelled" };
 			}
 			try {
+				assertEvalJudgmentEnabled(this.#session);
 				const result = toEvalJudgmentResult(
 					await judge.judge({ state: input.state, questions: this.#questions }, { signal }),
 				);
@@ -495,6 +503,7 @@ export async function runEvalJudgmentBatch(
 	const { session } = options;
 	switch (args.op) {
 		case "create": {
+			assertEvalJudgmentEnabled(session);
 			const items = parseItems(args.items);
 			const questions = parseQuestions(args.questions);
 			const batch = new JudgmentBatch(

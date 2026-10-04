@@ -329,7 +329,13 @@ Slash commands shift how a whole session runs:
 
 ## Sixty-plus providers, a thousand models, _one /model away_.
 
-Nine roles route work by intent. `default` for normal turns. `smol` for cheap subagent fan-out. `slow` for deep reasoning. `plan` for plan mode. `commit` for changelogs. Plus `vision`, `task`, `advisor`, and `tiny` for their namesakes. Override at launch with `--smol`, `--slow`, or `--plan`; cycle through the configured models for the active role with `Ctrl+P`. Swap the active model mid-session with the `/model` slash command.
+Model roles route work by intent. `default` for normal turns. `smol` for cheap subagent fan-out. `slow` for deep reasoning. `plan` for plan mode. `commit` for changelogs. Plus `vision`, `task`, `advisor`, `tiny`, `memory` and dedicated media/search/judge roles. Override at launch with `--smol`, `--slow`, or `--plan`; cycle through the configured models for the active role with `Ctrl+P`. Swap the active model mid-session with the `/model` slash command.
+
+In `/model` → Roles, `d` disables a non-default role and prevents automatic selection or fallback through that role. `x` clears its assignment and restores **Auto**; clearing is not disabling. The role view explains its consumers. Explicitly selected local helper roles do not silently fall through to online models; deliberately configured retry candidates remain available.
+
+Optional extra inference requires opt-in in `/settings`: **Eval Model Completions** and **Eval Model Judgments** (Shell), **AI Titles and Labels** and **Refresh Title on Replan** (Tasks), **Image Question Requests** and **Describe Images for Text Models** (Model), **Judged Rules** and **Async Compaction** (Context), and **Find** (Tools) default off. Existing explicit settings are respected. These helpers may send prompts, excerpts, images or judgment states to their selected providers; normal agent turns, mechanical tools and ordinary compaction are unchanged.
+
+Disabling Find alone does not disable the judge role: Eval `judge()`/`judge_batch()`, automatic reasoning selection, smart unexpected-stop detection and judged TTSR rules can also use it. Smart stop detection and automatic reasoning require their own selections; mechanical stop recovery does not make model requests. Disable the judge role to stop all judge-role inference, including TypeSafe/OpenRouter Jev.
 
 Auth tags below: `oauth` signs in with your provider account, `plan` routes through a coding-plan subscription, `local` runs against a local server with the key optional.
 

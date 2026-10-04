@@ -189,6 +189,17 @@ describe("classifyUnexpectedStop", () => {
 		expect(completeSimpleMock).not.toHaveBeenCalled();
 	});
 
+	it("leaves smart recovery unanswered when the judge role is disabled", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const settings = Settings.isolated({ modelRoles: { judge: "none", smol: `${model.provider}/${model.id}` } });
+		const registry = makeRegistry([model], { anthropic: "test-key" });
+		const online = vi.spyOn(ai, "completeSimple");
+		expect(
+			await classifyUnexpectedStop("Doing that now.", { settings, registry, sessionId: "s", model }),
+		).toBeUndefined();
+		expect(online).not.toHaveBeenCalled();
+	});
+
 	it("returns undefined instead of throwing when every judge fails", async () => {
 		const settings = Settings.isolated({ modelRoles: { judge: "missing/judge" } });
 		const registry = makeRegistry([]);

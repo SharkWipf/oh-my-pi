@@ -50,12 +50,22 @@ describe("orchestrate notice", () => {
 });
 
 describe("workflow notice", () => {
-	it("defaults to workpools and hides eval-defined tools when disabled", () => {
-		const enabled = renderWorkflowNotice({ taskBatch: true, scoutAvailable: true, evalTools: true });
-		const disabled = renderWorkflowNotice({ taskBatch: true, scoutAvailable: true, evalTools: false });
-		expect(enabled).toContain("Default to `workpool()`");
+	it("hides eval-defined tools when disabled", () => {
+		const enabled = renderWorkflowNotice({
+			taskBatch: true,
+			scoutAvailable: true,
+			evalTools: true,
+			completionEnabled: false,
+			judgmentEnabled: false,
+		});
+		const disabled = renderWorkflowNotice({
+			taskBatch: true,
+			scoutAvailable: true,
+			evalTools: false,
+			completionEnabled: false,
+			judgmentEnabled: false,
+		});
 		expect(enabled).toContain("`@tool`");
-		expect(disabled).toContain("Default to `workpool()`");
 		expect(disabled).not.toContain("`@tool`");
 		expect(disabled).not.toContain("tools=None");
 	});

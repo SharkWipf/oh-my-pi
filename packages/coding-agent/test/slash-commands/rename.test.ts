@@ -28,6 +28,7 @@ function createRuntime(
 ) {
 	authStorage = createInMemoryAuthStorage();
 	const settings = Settings.isolated({
+		"title.enabled": true,
 		"compaction.enabled": false,
 		modelRoles: { tiny: `local/${DEFAULT_TINY_TITLE_LOCAL_MODEL_KEY}` },
 	});
@@ -212,6 +213,20 @@ it("preserves a newer TUI rename made while title generation finishes", async ()
 
 for (const mode of ["TUI", "headless"] as const) {
 	describe(`/rename (${mode})`, () => {
+		it("keeps inferred renaming off while allowing a literal title", async () => {
+			const { session, sessionManager, execute, ctx, runtime } = createRuntime(mode);
+			session.settings.override("title.enabled", false);
+			await sessionManager.setSessionName("Keep this title", "user");
+			const output = mode === "TUI" ? vi.spyOn(ctx, "showStatus") : vi.spyOn(runtime, "output");
+			const generate = vi.spyOn(tinyTitleClient, "generate");
+			await execute("/rename");
+			expect(session.sessionName).toBe("Keep this title");
+			expect(output).toHaveBeenCalledWith(expect.stringContaining("disabled"));
+			await execute("/rename Literal title");
+			expect(session.sessionName).toBe("Literal title");
+			expect(generate).not.toHaveBeenCalled();
+		});
+
 		it("replaces a manual title from conversation context and protects the result from automatic titles", async () => {
 			const { session, sessionManager, execute } = createRuntime(mode);
 			await sessionManager.setSessionName("Old manually chosen title", "user");

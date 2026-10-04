@@ -8,7 +8,7 @@ import type * as MnemopiDiagnoseNs from "@oh-my-pi/pi-mnemopi/diagnose";
 import type { DiagnosticSummary } from "@oh-my-pi/pi-mnemopi/diagnose";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
-import { roleCandidatePool } from "../config/model-roles";
+import { isModelRoleDisabled, roleCandidatePool } from "../config/model-roles";
 import { resolveRoleChain } from "../config/model-resolver";
 import type {
 	MemoryBackend,
@@ -535,7 +535,7 @@ async function resolveMnemopiProviderOptions(
 		llm: false,
 	};
 
-	if (config.llmMode === "none") return base;
+	if (config.llmMode === "none" || isModelRoleDisabled("memory", settings)) return base;
 
 	// An explicitly configured external Mnemopi endpoint remains authoritative;
 	// role selection only supplies the normal managed-model path.

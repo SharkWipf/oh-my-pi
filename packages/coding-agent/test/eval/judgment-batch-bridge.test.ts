@@ -53,6 +53,7 @@ function makeSession(opts: { agentId?: string; jobs?: boolean } = {}): BatchSess
 	const settings = Settings.isolated({
 		"async.enabled": false,
 		"task.isolation.enabled": false,
+		"eval.judgmentEnabled": true,
 		modelRoles: { judge: "p/smol" },
 	});
 	const authStorage = createInMemoryAuthStorage();
@@ -188,6 +189,25 @@ describe("judge_batch bridge", () => {
 		});
 		expect(events.at(-1)?.cost).toBeCloseTo(2 * REPLY_COST, 6);
 	});
+	it("rejects disabled batches before creating a job or dispatching", async () => {
+		const { session, manager } = makeSession();
+		session.settings.override("eval.judgmentEnabled", false);
+		mockJudge({ "private state": "tests: yes" });
+		const infer = ai.completeSimple;
+		await expect(create(session, ["private state"])).rejects.toThrow("disabled");
+		expect(manager?.getAllJobs()).toHaveLength(0);
+		expect(infer).not.toHaveBeenCalled();
+	});
+
+	it("does not create work when judgment is opted in but its role is disabled", async () => {
+		const { session, manager } = makeSession();
+		session.settings.setModelRole("judge", "none");
+		mockJudge({ "private state": "tests: yes" });
+		await expect(create(session, ["private state"])).rejects.toThrow("disabled");
+		expect(manager?.getAllJobs()).toHaveLength(0);
+		expect(ai.completeSimple).not.toHaveBeenCalled();
+	});
+
 	it("validates items and options before starting", async () => {
 		const { session } = makeSession();
 		const spy = vi.spyOn(ai, "completeSimple");
@@ -478,7 +498,7 @@ import { ModelRegistry } from ${JSON.stringify(registryPath)};
 import { createInMemoryAuthStorage } from ${JSON.stringify(setupPath)};
 
 const SMOL = ${JSON.stringify(SMOL)};
-const settings = Settings.isolated({ "async.enabled": false, "task.isolation.enabled": false, modelRoles: { judge: "p/smol" } });
+const settings = Settings.isolated({ "async.enabled": false, "task.isolation.enabled": false, "eval.judgmentEnabled": true, modelRoles: { judge: "p/smol" } });
 const authStorage = createInMemoryAuthStorage();
 authStorage.keys.setRuntime("p", "test-key");
 const modelRegistry = new ModelRegistry(authStorage, "/nonexistent/judgment-batch-py-models.yml");

@@ -35,7 +35,7 @@ function makeHost(active: Model<Api>, artifactsDir: string): SessionProviderBoun
 	return {
 		agent: { telemetry: undefined },
 		sessionManager: {},
-		settings: Settings.isolated(),
+		settings: Settings.isolated({ "images.describeForTextModels": true }),
 		modelRegistry: {
 			getAvailable: () => [],
 		},

@@ -29,16 +29,25 @@ env(key?=None, value?=None) → str | None | dict
 output(*ids, format?="raw", query?=None, offset?=None, limit?=None) → str | dict | list[dict]
 {{#if js}}await {{/if}}tool.<name>(args) → unknown
     Invoke any session tool; `args` = its parameter object.{{#if py}} Async: `await tool.read({...})`.{{/if}}
+{{#if completionEnabled}}
 completion(prompt, model?="default"|"smol"|"slow", system?=None, schema?=None) → CompletionHandle
     Oneshot, stateless (no history/tools); returns immediately. `.wait()` → str (parsed object with `schema`). `model`: "smol" fast | "default" session | "slow" most capable.
+    Separate auxiliary inference: sends prompt + system to the selected tier and may incur provider usage. Disabled roles never fall back to another model.
+{{else}}
+    Auxiliary completion inference is disabled (eval.completionEnabled=false); NEVER call completion().
+{{/if}}
+{{#if judgmentEnabled}}
 await judge(state, questions) → `{id: answer}`
-    Typed judgment over one `state` (str | JSON object | JSON array). Every question sees the same state and is answered independently: batch independent questions into one call. Cheap and fast (TypeSafe when credentialed, else the tiny/smol chat model); prefer over `completion()` for classification, yes/no, ranking. Two or more states → `{{#if py}}judge_batch{{else}}judgeBatch{{/if}}`, never a loop of `judge()`.
+    Typed judgment over one state (str | JSON object | JSON array). Every question sees the same state and is answered independently: batch independent questions into one call. Uses the configured judge role; may send state to an external provider. Two or more states → {{#if py}}judge_batch{{else}}judgeBatch{{/if}}, never a loop of judge().
     `questions`: `{id: q}` where q is one of
       `{type: "choice", instructions, criteria: {label: rubric | None, …}}` → `{choice, probabilities: {label: p}, confidence}` (≥2 labels)
       `{type: "bool", instructions, criteria?: {true?: str, false?: str}}` → `{bool: P(yes)}`
       `{type: "score", instructions, criteria: [lowest, …, highest]}` → `{score, probabilities: {"0": p, …}, confidence}` (≥2 levels; score is the probability-weighted level index)
 {{#if py}}judge_batch(states, questions, concurrency?=32, retries?=1, min_ok?=1, intent?=None) → JudgmentBatch{{else}}judgeBatch(states, questions, { intent?, concurrency?, retries?, minOk? }) → JudgmentBatch{{/if}}
     Same `questions` over every state (`{key: state}` or a list keyed by index), run and owned by the host — it outlives the cell. `intent` is an optional nonempty progress/job label (default `"Judging"`). Returns at once; pull settled items in bounded slices across cells: `await b.drain(timeout?)` → `[(key, item)]` settled since the last drain (`[]` on timeout; `item.answers` on success, else `item.error`, never raised); `{{#if py}}async for k, item in b.drain_iter(timeout){{else}}for await (const [k, item] of b.drainIter({ timeout })){{/if}}` until timeout or completion; `b.status()` → `{intent, done, total, failed, cost, running, model}`; `b.results()` → `{key: answers}` so far; `b.failed()` → `{key: error}`; `b.cancel()`; `b.close()` releases it. `drain()` raises only when the run died wholesale (no judge, or fewer than `min_ok` answered). `b.id` is an async job id: completion auto-delivers a summary, `hub wait ids:[b.id]` works, `{{#if py}}judge_batch{{else}}judgeBatch{{/if}}.attach(id)` re-creates the ref after a reset.
+{{else}}
+    Auxiliary judgment inference is disabled (eval.judgmentEnabled=false); NEVER call judge() or judge_batch()/judgeBatch().
+{{/if}}
 {{#if spawns}}agent(prompt, agent?="{{spawnDefaultAgent}}", label?=None, schema?=None, schema{{#if js}}Mode{{else}}_mode{{/if}}?="permissive", isolated?=None, apply?=None, merge?=None{{#if evalTools}}, tools?=None{{/if}}) → AgentHandle
     Spawns a background subagent and returns immediately. `agent` selects a discovered agent; omit it to use `{{spawnDefaultAgent}}`.{{#if spawnAllowedAgentsText}} Allowed agents: {{spawnAllowedAgentsText}}.{{/if}} Handle: `.id`, `.handle` ("agent://<id>"), `.status`, `.done()`, `.wait(timeout?)` → final text (parsed with `schema`), `.send(message)`, `.cancel()`, `.output()`. Unwaited results auto-deliver like async jobs. `schema` overrides agent/session schemas; `isolated` requests a worktree; `apply`/`merge` control its changes.{{#if evalTools}} `tools`: names of your @tool-defined tools the child may call.{{/if}}
 {{#if js}}    JS: ONE trailing object — agent(prompt, { agent, label, schema, schemaMode, isolated, apply, merge{{#if evalTools}}, tools{{/if}} }).{{/if}}

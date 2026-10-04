@@ -1,6 +1,6 @@
 import type { ModelHubSource } from "@oh-my-pi/pi-tui/overlays/model-hub";
 import { resolveModelRoleValue, rolePriorityDefaults } from "../config/model-resolver";
-import { getKnownRoleIds, getRoleInfo } from "../config/model-roles";
+import { getKnownRoleIds, getRoleInfo, isModelRoleDisabled } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 
 /** Supply live model-overlay preferences and runtime resolution from the host. */
@@ -33,6 +33,7 @@ export function createModelBrowserSource(settings: Settings): ModelHubSource {
 		get cycleOrder() {
 			return settings.get("cycleOrder");
 		},
+		isRoleDisabled: role => isModelRoleDisabled(role, settings),
 		getModelRole: role => settings.getModelRole(role),
 		getProjectModelRole: role => settings.getProjectModelRole(role),
 		getGlobalModelRole: role => settings.getGlobalModelRole(role),

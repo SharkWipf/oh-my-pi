@@ -28,6 +28,7 @@ import {
 	resolveModelFromString,
 	resolveModelOverride,
 } from "../config/model-resolver";
+import { isModelRoleDisabled } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import { Semaphore } from "../task/parallel";
@@ -221,6 +222,15 @@ function appendFallbackCandidates(
 	}
 }
 
+function assertCompletionEnabled(session: ToolSession, tier: CompletionTier): void {
+	if (!session.settings.get("eval.completionEnabled")) {
+		throw new ToolError("completion() is disabled. Enable eval.completionEnabled to permit auxiliary inference.");
+	}
+	if (isModelRoleDisabled(tier, session.settings)) {
+		throw new ToolError('completion() is disabled for the "' + tier + '" tier (modelRoles.' + tier + "=none).");
+	}
+}
+
 /**
  * Resolve a tier to its primary model and configured retry-fallback candidates.
  * `default` prefers the session's active model before the `@default` role.
@@ -320,6 +330,7 @@ async function executeCompletion(
 	let retriesUsed = 0;
 	let completed = false;
 	for (const [index, candidate] of candidates.entries()) {
+		assertCompletionEnabled(session, finalTier);
 		if (index > 0 && retriesUsed >= maxRetries) break;
 		model = candidate.model;
 		try {
@@ -408,6 +419,7 @@ export async function runEvalCompletion(
 	}
 	const { prompt, model: modelTier, system, schema } = parsed;
 	const finalTier: CompletionTier = modelTier ?? "default";
+	assertCompletionEnabled(options.session, finalTier);
 	const candidates = resolveTierCandidates(finalTier, options.session);
 	if (candidates.length === 0) {
 		throw new ToolError(

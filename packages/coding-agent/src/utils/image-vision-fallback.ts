@@ -24,6 +24,7 @@ import { logger, prompt, toError } from "@oh-my-pi/pi-utils";
 import { extractTextContent } from "../commit/utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { expandRoleAlias, getModelMatchPreferences, resolveModelFromString } from "../config/model-resolver";
+import { isModelRoleDisabled } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import { type LocalProtocolOptions, resolveLocalRoot } from "../internal-urls";
 import describeUserPrompt from "../prompts/tools/image-attachment-describe.md" with { type: "text" };
@@ -31,6 +32,9 @@ import describeSystemPrompt from "../prompts/tools/image-attachment-describe-sys
 
 /** Telemetry tag for the oneshot vision-description calls. */
 const ONESHOT_KIND = "image_attachment_describe";
+
+const DESCRIPTION_DISABLED_NOTE =
+	"[Automatic image description is disabled. The image was saved without sending it to another model.]";
 
 const NO_VISION_MODEL_NOTE =
 	"[No vision-capable model is configured, so this image could not be described automatically. " +
@@ -176,7 +180,8 @@ export async function describeAttachedImagesForTextModel(
 	signal?: AbortSignal,
 ): Promise<TextContent[]> {
 	const localRoot = resolveLocalRoot(deps.localProtocolOptions);
-	const visionModel = resolveVisionModel(deps);
+	const enabled = deps.settings.get("images.describeForTextModels") && !isModelRoleDisabled("vision", deps.settings);
+	const visionModel = enabled ? resolveVisionModel(deps) : undefined;
 	const apiKey = visionModel ? await deps.modelRegistry.getApiKey(visionModel, deps.sessionId) : undefined;
 	const canDescribe = Boolean(visionModel && apiKey);
 	const telemetry = resolveTelemetry(deps.telemetryConfig, deps.sessionId);
@@ -189,7 +194,7 @@ export async function describeAttachedImagesForTextModel(
 				description =
 					(await describeImage(image, visionModel, deps, telemetry, signal)) ?? DESCRIPTION_UNAVAILABLE_NOTE;
 			} else {
-				description = NO_VISION_MODEL_NOTE;
+				description = enabled ? NO_VISION_MODEL_NOTE : DESCRIPTION_DISABLED_NOTE;
 			}
 			return { type: "text", text: formatImageBlock(localUrl, description) };
 		}),

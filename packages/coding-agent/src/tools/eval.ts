@@ -11,6 +11,7 @@ import { formatBackgroundNotice } from "@oh-my-pi/pi-tui/tools/bash";
 import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import { DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS, raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
+import { isModelRoleDisabled } from "../config/model-roles";
 import { jsBackend, pythonBackend } from "../eval";
 import type { ExecutorBackend, ExecutorBackendResult } from "../eval/backend";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../eval/bridge-timeout";
@@ -192,6 +193,10 @@ export interface EvalToolDescriptionOptions {
 	 * `false`/`""` hides `agent()`, and a comma list drives the advertised default.
 	 */
 	spawns?: boolean | string | null;
+	/** Advertise auxiliary oneshot inference only with explicit session consent. */
+	completionEnabled?: boolean;
+	/** Advertise typed judgment helpers only with explicit session consent. */
+	judgmentEnabled?: boolean;
 	/** Advertise auto-backgrounding of long-running cells in the tool prompt. */
 	autoBackgroundEnabled?: boolean;
 	/** Advertise `@tool` / `tool(fn)` and the `tools` spawn option (`eval.tools.enabled`). */
@@ -211,6 +216,8 @@ export function getEvalToolDescription(options: EvalToolDescriptionOptions = {})
 	return prompt.render(evalDescription, {
 		py,
 		js,
+		completionEnabled: options.completionEnabled ?? false,
+		judgmentEnabled: options.judgmentEnabled ?? false,
 		evalTools: options.evalTools ?? true,
 		eagerDelegation: options.eagerDelegation ?? true,
 		autoBackgroundEnabled: options.autoBackgroundEnabled ?? false,
@@ -329,6 +336,10 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			base = getEvalToolDescription({
 				py: backends.python,
 				js: backends.js,
+				completionEnabled: this.session.settings.get("eval.completionEnabled"),
+				judgmentEnabled:
+					this.session.settings.get("eval.judgmentEnabled") &&
+					!isModelRoleDisabled("judge", this.session.settings),
 				spawns: depthAllowsSpawning ? sessionSpawns : false,
 				autoBackgroundEnabled: this.session.settings.get("eval.autoBackground.enabled"),
 				evalTools: this.session.settings.get("eval.tools.enabled"),

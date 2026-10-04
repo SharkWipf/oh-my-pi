@@ -7,12 +7,17 @@ import { Container } from "../../tui";
 import { truncateToWidth } from "../../utils";
 import { SEARCH_PROVIDER_OPTIONS, type SearchProviderId } from "../../tools/web-search";
 import { getSelectListTheme, theme } from "../../theme/theme";
-import type { SetupSceneHost, SetupTab } from "./types";
+import type { SetupSceneHost, SetupSearchProvider, SetupTab } from "./types";
 
 const MAX_VISIBLE = 8;
 
-/** Reuse the shared provider options as the single source of truth for labels/descriptions. */
-const WEB_SEARCH_ITEMS: readonly SelectItem[] = SEARCH_PROVIDER_OPTIONS.map(option => ({
+const WEB_SEARCH_OPTIONS: readonly (SelectItem & { value: SetupSearchProvider })[] = [
+	{ value: "none", label: "Disabled (None)", description: "No search requests or automatic provider fallback" },
+	...SEARCH_PROVIDER_OPTIONS,
+];
+
+/** Reuse shared provider labels while keeping shutdown distinct from a provider. */
+const WEB_SEARCH_ITEMS: readonly SelectItem[] = WEB_SEARCH_OPTIONS.map(option => ({
 	value: option.value,
 	label: option.label,
 	description: option.description,
@@ -116,7 +121,8 @@ export class WebSearchTab implements SetupTab {
 
 	#onHighlight(value: string): void {
 		this.#status = [];
-		if (value !== "auto") this.#checkAvailability(value as SearchProviderId);
+		const option = WEB_SEARCH_OPTIONS.find(option => option.value === value);
+		if (option && option.value !== "auto" && option.value !== "none") this.#checkAvailability(option.value);
 		this.#host.requestRender();
 	}
 
@@ -137,14 +143,13 @@ export class WebSearchTab implements SetupTab {
 	}
 
 	#apply(value: string): void {
-		const option = SEARCH_PROVIDER_OPTIONS.find(option => option.value === value);
+		const option = WEB_SEARCH_OPTIONS.find(option => option.value === value);
 		if (!option) return;
-		// The wizard picks one favorite; persist it as the head of the priority
-		// list with the remaining providers in their built-in order (auto = reset).
+		// Auto restores automatic selection; None disables the web role.
 		this.#host.ctx.saveSearchProvider(option.value);
 		const label = WEB_SEARCH_ITEMS.find(item => item.value === value)?.label ?? value;
 		this.#status = [theme.fg("success", `${theme.status.success} Web search set to ${label}`)];
-		if (value !== "auto" && this.#availability.get(value as SearchProviderId) === false) {
+		if (option.value !== "auto" && option.value !== "none" && this.#availability.get(option.value) === false) {
 			this.#status.push(theme.fg("dim", "Not configured yet — add its API key or sign in to enable it."));
 		}
 		this.#host.requestRender();
@@ -154,7 +159,12 @@ export class WebSearchTab implements SetupTab {
 		if (value === "auto") {
 			return [theme.fg("dim", "Automatically uses the first configured provider.")];
 		}
-		const state = this.#availability.get(value as SearchProviderId);
+		if (value === "none") {
+			return [theme.fg("dim", "Disabled — no search requests or automatic fallback.")];
+		}
+		const option = SEARCH_PROVIDER_OPTIONS.find(option => option.value === value);
+		if (!option || option.value === "auto") return [];
+		const state = this.#availability.get(option.value);
 		if (state === undefined || state === "checking") {
 			return [theme.fg("dim", "Checking availability…")];
 		}

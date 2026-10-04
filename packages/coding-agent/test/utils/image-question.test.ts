@@ -24,7 +24,7 @@ function makeProxyModel(id: string, compat?: ModelSpec["compat"]): Model<Api> {
 
 function makeSession(active: Model<Api>, available: Model<Api>[]): ToolSession {
 	return {
-		settings: Settings.isolated(),
+		settings: Settings.isolated({ "images.questionEnabled": true }),
 		modelRegistry: {
 			getAvailable: () => available,
 		} as unknown as NonNullable<ToolSession["modelRegistry"]>,

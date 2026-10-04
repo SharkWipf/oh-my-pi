@@ -12,8 +12,8 @@ import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { formatAge, prompt } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../../config/model-registry";
 import { resolveModelRoleValue, resolveRoleChain } from "../../config/model-resolver";
-import { roleCandidatePool } from "../../config/model-roles";
-import { settings } from "../../config/settings";
+import { isModelRoleDisabled, roleCandidatePool } from "../../config/model-roles";
+import { type Settings, settings } from "../../config/settings";
 import type { CustomTool, CustomToolContext } from "../../extensibility/custom-tools/types";
 import webSearchSystemPrompt from "../../prompts/system/web-search.md" with { type: "text" };
 import webSearchDescription from "../../prompts/tools/web-search.md" with { type: "text" };
@@ -128,6 +128,7 @@ function hasRenderableSearchContent(response: SearchResponse): boolean {
 interface ExecuteSearchOptions {
 	authStorage: AuthStorage;
 	modelRegistry?: ModelRegistry;
+	settings?: Settings;
 	sessionId?: string;
 	signal?: AbortSignal;
 }
@@ -139,28 +140,37 @@ async function executeSearch(
 	options: ExecuteSearchOptions,
 ): Promise<{ content: Array<{ type: "text"; text: string }>; details: SearchResultDetails }> {
 	const { authStorage, sessionId, signal } = options;
-	const modelRegistry = options.modelRegistry ?? new ModelRegistry(authStorage, undefined, { settings });
-	const pool = roleCandidatePool("web", settings, modelRegistry);
+	const effectiveSettings = options.settings ?? settings;
+	if (isModelRoleDisabled("web", effectiveSettings)) {
+		const message = "Web search is disabled by modelRoles.web=none.";
+		return {
+			content: [{ type: "text", text: "Error: " + message }],
+			details: { response: { provider: "none", sources: [] }, error: message },
+		};
+	}
+	const modelRegistry =
+		options.modelRegistry ?? new ModelRegistry(authStorage, undefined, { settings: effectiveSettings });
+	const pool = roleCandidatePool("web", effectiveSettings, modelRegistry);
 	const candidates = params.model
 		? (() => {
-				const resolved = resolveModelRoleValue(params.model, pool, { settings });
+				const resolved = resolveModelRoleValue(params.model, pool, { settings: effectiveSettings });
 				return resolved.model ? [{ model: resolved.model, explicit: true }] : [];
 			})()
-		: resolveRoleChain("web", settings, pool);
+		: resolveRoleChain("web", effectiveSettings, pool);
 
 	const parsedQuery = parseSearchQuery(params.query);
 
 	// Invariant across candidates; resolve once before walking the role chain.
 	let antigravityEndpointMode: "auto" | "production" | "sandbox" | undefined;
 	try {
-		antigravityEndpointMode = settings.get("providers.antigravityEndpoint");
+		antigravityEndpointMode = effectiveSettings.get("providers.antigravityEndpoint");
 	} catch {
 		antigravityEndpointMode = undefined;
 	}
 
 	let timeoutMs = DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS * 1_000;
 	try {
-		const configuredSeconds = settings.get("providers.webSearchTimeoutSeconds");
+		const configuredSeconds = effectiveSettings.get("providers.webSearchTimeoutSeconds");
 		if (Number.isFinite(configuredSeconds) && configuredSeconds > 0) {
 			timeoutMs = Math.ceil(Math.min(configuredSeconds, MAX_WEB_SEARCH_TIMEOUT_SECONDS) * 1_000);
 		}
@@ -293,6 +303,7 @@ export async function runSearchQuery(
 	options: {
 		authStorage?: AuthStorage;
 		modelRegistry?: ModelRegistry;
+		settings?: Settings;
 		sessionId?: string;
 		signal?: AbortSignal;
 	} = {},
@@ -306,6 +317,7 @@ export async function runSearchQuery(
 		return await executeSearch("cli-web-search", params, {
 			authStorage,
 			modelRegistry: options.modelRegistry,
+			settings: options.settings,
 			sessionId: options.sessionId,
 			signal: options.signal,
 		});
@@ -348,6 +360,7 @@ export class WebSearchTool implements AgentTool<typeof webSearchSchema, SearchRe
 		return executeSearch(_toolCallId, params, {
 			authStorage,
 			modelRegistry: this.#session.modelRegistry,
+			settings: this.#session.settings,
 			sessionId,
 			signal,
 		});
@@ -374,6 +387,7 @@ export const webSearchCustomTool: CustomTool<typeof webSearchSchema, SearchResul
 		return executeSearch(toolCallId, params, {
 			authStorage,
 			modelRegistry: ctx.modelRegistry,
+			settings: ctx.settings,
 			sessionId,
 			signal,
 		});

@@ -17,6 +17,7 @@ import { completeSimple, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { diffLineRuns, editDiffString, summarizeCode } from "@oh-my-pi/pi-natives";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import { resolveRoleSelection } from "../config/model-resolver";
+import { isModelRoleDisabled } from "../config/model-roles";
 import type { WritethroughCallback } from "../lsp";
 import type { ToolSession } from "../tools";
 import { invalidateFsScanAfterWrite } from "../tools/fs-cache-invalidation";
@@ -288,7 +289,8 @@ export async function attemptEditAutoRepair(options: {
 	signal?: AbortSignal;
 }): Promise<EditAutoRepairOutcome | undefined> {
 	const { session, snapshot, writethrough } = options;
-	if (!session.settings.get("edit.autoRepair.enabled")) return undefined;
+	if (!session.settings.get("edit.autoRepair.enabled") || isModelRoleDisabled("smol", session.settings))
+		return undefined;
 	const registry = session.modelRegistry;
 	if (!registry) return undefined;
 	const model = resolveRoleSelection(["smol"], session.settings, registry.getAvailable())?.model;

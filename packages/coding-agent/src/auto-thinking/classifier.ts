@@ -14,6 +14,7 @@
 import { type ChoiceQuestion, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import type { ModelRegistry } from "../config/model-registry";
+import { isModelRoleDisabled } from "../config/model-roles";
 import bucketQuestionInstructions from "../prompts/system/auto-thinking-bucket-question.md" with { type: "text" };
 import type { Settings } from "../config/settings";
 import { type JudgmentUsage, resolveJudge } from "../judgment";
@@ -98,14 +99,15 @@ function autoEffortCeiling(deps: ClassifyDifficultyDeps): Effort {
 
 /**
  * Classify `promptText` and return a concrete effort clamped to `deps.model`,
- * or `undefined` when the model has no controllable effort surface (auto has
- * nothing to pick — the caller leaves the prior reasoning level in place).
+ * or `undefined` when the judge role is disabled or the model has no
+ * controllable effort surface. The caller retains its concrete fallback level.
  * @throws when the backend cannot produce a usable classification.
  */
 export async function classifyDifficulty(
 	promptText: string,
 	deps: ClassifyDifficultyDeps,
 ): Promise<Effort | undefined> {
+	if (isModelRoleDisabled("judge", deps.settings)) return undefined;
 	const judge = resolveJudge({
 		settings: deps.settings,
 		registry: deps.registry,
