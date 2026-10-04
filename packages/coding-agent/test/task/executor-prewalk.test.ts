@@ -151,8 +151,8 @@ describe("runSubprocess per-agent prewalk", () => {
 
 		expect(result.exitCode).toBe(0);
 		const forwarded = spy.mock.calls[0]?.[0];
-		expect(forwarded?.prewalk?.target.id).toBe(target.id);
-		expect(forwarded?.prewalk?.target.provider).toBe(target.provider);
+		expect((forwarded?.prewalk || undefined)?.target.id).toBe(target.id);
+		expect((forwarded?.prewalk || undefined)?.target.provider).toBe(target.provider);
 	});
 
 	it("waits for background discovery before resolving a configured prewalk target", async () => {
@@ -180,7 +180,7 @@ describe("runSubprocess per-agent prewalk", () => {
 
 		refreshGate.resolve();
 		expect((await run).exitCode).toBe(0);
-		expect(spy.mock.calls[0]?.[0]?.prewalk?.target.id).toBe(target.id);
+		expect((spy.mock.calls[0]?.[0]?.prewalk || undefined)?.target.id).toBe(target.id);
 	});
 
 	it("reports the prewalk target as the active model after handoff", async () => {
@@ -219,15 +219,14 @@ describe("runSubprocess per-agent prewalk", () => {
 
 		expect(result.exitCode).toBe(0);
 		const forwarded = spy.mock.calls[0]?.[0];
-		expect(forwarded?.prewalk?.target.id).toBe(target.id);
+		expect((forwarded?.prewalk || undefined)?.target.id).toBe(target.id);
 	});
 
 	it("task.agentPrewalk 'off' disables a frontmatter-enabled prewalk", async () => {
 		const settings = Settings.isolated();
 		settings.set("task.agentPrewalk", { task: "off" });
-		const spy = vi
-			.spyOn(sdkModule, "createAgentSession")
-			.mockResolvedValue(createSessionResult(yieldEmittingSession()));
+		const child = yieldEmittingSession(["read", "todo", "yield"]);
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(child));
 
 		const result = await runSubprocess({
 			...baseOptions("subagent-prewalk-off", settings),
@@ -239,7 +238,7 @@ describe("runSubprocess per-agent prewalk", () => {
 		});
 
 		expect(result.exitCode).toBe(0);
-		expect(spy.mock.calls[0]?.[0]?.prewalk).toBeUndefined();
+		expect(child.getActiveToolNames()).not.toContain("todo");
 	});
 
 	it("task.agentPrewalk 'on' enables prewalk for an agent without frontmatter", async () => {
@@ -256,7 +255,7 @@ describe("runSubprocess per-agent prewalk", () => {
 		});
 
 		expect(result.exitCode).toBe(0);
-		expect(spy.mock.calls[0]?.[0]?.prewalk?.target.id).toBe(target.id);
+		expect((spy.mock.calls[0]?.[0]?.prewalk || undefined)?.target.id).toBe(target.id);
 	});
 
 	it("task.prewalk arms the bundled generic task agent without frontmatter", async () => {
@@ -273,22 +272,24 @@ describe("runSubprocess per-agent prewalk", () => {
 		});
 
 		expect(result.exitCode).toBe(0);
-		expect(spy.mock.calls[0]?.[0]?.prewalk?.target.id).toBe(target.id);
+		expect((spy.mock.calls[0]?.[0]?.prewalk || undefined)?.target.id).toBe(target.id);
 	});
 
 	it("task.prewalk defaults off and leaves other bundled agents alone when on", async () => {
 		const settings = Settings.isolated();
 		settings.setModelRole("smol", `${target.provider}/${target.id}`);
-		const spy = vi
-			.spyOn(sdkModule, "createAgentSession")
-			.mockResolvedValue(createSessionResult(yieldEmittingSession()));
+		const defaultChild = yieldEmittingSession(["read", "todo", "yield"]);
+		const otherChild = yieldEmittingSession(["read", "todo", "yield"]);
+		vi.spyOn(sdkModule, "createAgentSession")
+			.mockResolvedValueOnce(createSessionResult(defaultChild))
+			.mockResolvedValueOnce(createSessionResult(otherChild));
 
 		const offByDefault = await runSubprocess({
 			...baseOptions("subagent-prewalk-setting-default", settings),
 			agent: { ...baseAgent, model: [`${primary.provider}/${primary.id}`] },
 		});
 		expect(offByDefault.exitCode).toBe(0);
-		expect(spy.mock.calls[0]?.[0]?.prewalk).toBeUndefined();
+		expect(defaultChild.getActiveToolNames()).not.toContain("todo");
 
 		settings.set("task.prewalk", true);
 		const otherAgent = await runSubprocess({
@@ -296,13 +297,12 @@ describe("runSubprocess per-agent prewalk", () => {
 			agent: { ...baseAgent, name: "sonic", model: [`${primary.provider}/${primary.id}`] },
 		});
 		expect(otherAgent.exitCode).toBe(0);
-		expect(spy.mock.calls[1]?.[0]?.prewalk).toBeUndefined();
+		expect(otherChild.getActiveToolNames()).not.toContain("todo");
 	});
 
 	it("skips prewalk when the target resolves to the starting model", async () => {
-		const spy = vi
-			.spyOn(sdkModule, "createAgentSession")
-			.mockResolvedValue(createSessionResult(yieldEmittingSession()));
+		const child = yieldEmittingSession(["read", "todo", "yield"]);
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(child));
 
 		const result = await runSubprocess({
 			...baseOptions("subagent-prewalk-same-model", Settings.isolated()),
@@ -314,7 +314,7 @@ describe("runSubprocess per-agent prewalk", () => {
 		});
 
 		expect(result.exitCode).toBe(0);
-		expect(spy.mock.calls[0]?.[0]?.prewalk).toBeUndefined();
+		expect(child.getActiveToolNames()).not.toContain("todo");
 	});
 	it("keeps the todo tool active for a prewalk-armed subagent (the todo gate needs it)", async () => {
 		const session = yieldEmittingSession(["read", "todo", "yield"]);

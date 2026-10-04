@@ -153,6 +153,7 @@ import {
 	obfuscateProviderContext,
 	type SecretObfuscator,
 } from "./secrets";
+import type { PrewalkSnapshot } from "./session/prewalk";
 import { AgentSession, type InitialRetryFallbackState, type PlanYolo, type Prewalk } from "./session/agent-session";
 import {
 	discoverAuthStorage as discoverAuthStorageFromConfig,
@@ -445,7 +446,9 @@ export interface CreateAgentSessionOptions {
 	/** Models available for cycling (Ctrl+P in interactive mode) */
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 	/** Prewalk from the starting model to a fast/cheap target at the first edit/write once the todo list exists. */
-	prewalk?: Prewalk;
+	prewalk?: Prewalk | false;
+	/** In-memory PREWALK state restored during hot revival. */
+	prewalkSnapshot?: PrewalkSnapshot;
 	/** Force read-only plan mode at start, auto-approve on the model's first resolve call, then switch to execute. */
 	planYolo?: PlanYolo;
 
@@ -1911,7 +1914,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			outputSchema: options.outputSchema,
 			outputSchemaMode: options.outputSchemaMode,
 			requireYieldTool: options.requireYieldTool,
-			prewalkArmed: options.prewalk !== undefined,
+			prewalkArmed: !!(options.prewalkSnapshot ? options.prewalkSnapshot.armed : options.prewalk),
 			taskDepth: options.taskDepth ?? 0,
 			getSessionFile: () => sessionManager.getSessionFile() ?? null,
 			sessionManager,
@@ -3963,6 +3966,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			thinkingLevelCeiling: options.thinkingLevelCeiling,
 			initialRetryFallback,
 			prewalk: options.prewalk,
+			prewalkSnapshot: options.prewalkSnapshot,
 			planYolo: options.planYolo,
 			serviceTierByFamily: initialServiceTierByFamily,
 			sessionManager,

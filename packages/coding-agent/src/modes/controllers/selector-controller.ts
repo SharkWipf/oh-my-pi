@@ -1090,6 +1090,11 @@ export class SelectorController {
 			case "composer.shape":
 				this.ctx.syncComposerShape();
 				break;
+			case "prewalk.enabled":
+				this.ctx.session.setPrewalkEnabled(value as boolean);
+				this.ctx.statusLine.invalidate();
+				this.ctx.ui.requestRender();
+				break;
 			case "advisor.enabled":
 				this.ctx.session.setAdvisorEnabled(value as boolean);
 				this.ctx.statusLine.invalidate();

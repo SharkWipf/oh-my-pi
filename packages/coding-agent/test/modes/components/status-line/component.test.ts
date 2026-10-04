@@ -20,7 +20,6 @@ const statusLines = new StatusLineTestComponents();
 
 function makeSessionWithLastMessage(
 	lastMessage: unknown,
-	prewalkArmed: boolean = false,
 	{
 		cost = 0,
 		advisorCost = 0,
@@ -65,7 +64,6 @@ function makeSessionWithLastMessage(
 			}),
 			getSessionName: () => sessionName,
 		},
-		getPrewalkState: () => (prewalkArmed ? { target: { id: "cheap-model", provider: "openai" } } : undefined),
 		getAsyncJobSnapshot: () => undefined,
 		isAdvisorActive: () => false,
 		getAdvisorStatusOverview: () => ({
@@ -115,23 +113,10 @@ describe("StatusLineComponent", () => {
 		expect(statusLine.getCachedContextBreakdown()).toEqual({ usedTokens: 42, contextWindow: 128000 });
 	});
 
-	it("renders Prewalk annotation when prewalk is armed", () => {
-		const statusLine = statusLines.track(
-			new StatusLineComponent(makeSessionWithLastMessage(null, true) as unknown as AgentSession, statusLineHost),
-		);
-
-		// By default preset, 'mode' segment is included in left/right segments.
-		// Let's get the border and see if Prewalk is rendered.
-		const border = statusLine.getTopBorder(100);
-		// SGR codes might be included, so we check if the stripped content contains "Prewalk"
-		const stripped = border.content.replace(/\x1b\[[0-9;]*m/g, "");
-		expect(stripped).toContain("Prewalk");
-	});
-
 	it("renders startup placeholders without values from the prior session", () => {
 		const statusLine = statusLines.track(
 			new StatusLineComponent(
-				makeSessionWithLastMessage(null, false, {
+				makeSessionWithLastMessage(null, {
 					cost: 2.67,
 					modelName: "Stale Model",
 					sessionName: "stale-session",
@@ -183,7 +168,7 @@ describe("StatusLineComponent", () => {
 	it("renders primary and advisor costs separately with subscription indicator in Unicode preset", () => {
 		const statusLine = statusLines.track(
 			new StatusLineComponent(
-				makeSessionWithLastMessage(null, false, {
+				makeSessionWithLastMessage(null, {
 					cost: 2.67,
 					advisorCost: 0.41,
 					usingSubscription: true,
@@ -199,7 +184,7 @@ describe("StatusLineComponent", () => {
 	it("renders advisor cost with subscription prefix when advisor is on subscription in Unicode preset", () => {
 		const statusLine = statusLines.track(
 			new StatusLineComponent(
-				makeSessionWithLastMessage(null, false, {
+				makeSessionWithLastMessage(null, {
 					cost: 2.67,
 					advisorCost: 0.41,
 					usingSubscription: true,
@@ -221,7 +206,7 @@ describe("StatusLineComponent", () => {
 		try {
 			const statusLine = statusLines.track(
 				new StatusLineComponent(
-					makeSessionWithLastMessage(null, false, {
+					makeSessionWithLastMessage(null, {
 						cost: 2.67,
 						advisorCost: 0.41,
 						usingSubscription: true,
@@ -240,7 +225,7 @@ describe("StatusLineComponent", () => {
 	it("omits advisor cost when the advisor has never been active", () => {
 		const statusLine = statusLines.track(
 			new StatusLineComponent(
-				makeSessionWithLastMessage(null, false, {
+				makeSessionWithLastMessage(null, {
 					cost: 2.67,
 					usingSubscription: true,
 				}) as unknown as AgentSession,
@@ -261,7 +246,7 @@ describe("StatusLineComponent", () => {
 		try {
 			const statusLine = statusLines.track(
 				new StatusLineComponent(
-					makeSessionWithLastMessage(null, false, {
+					makeSessionWithLastMessage(null, {
 						cost: 2.67,
 						advisorCost: 0.41,
 						usingSubscription: true,

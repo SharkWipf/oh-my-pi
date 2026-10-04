@@ -365,6 +365,7 @@ import {
 	PrewalkCoordinator,
 	type PrewalkCoordinatorHost,
 	type PrewalkRestartResult,
+	type PrewalkSnapshot,
 } from "./prewalk";
 import {
 	isAdvisorCard,
@@ -645,6 +646,8 @@ export class AgentSession {
 	readonly #models: ModelControls;
 	readonly #tools: SessionTools;
 	readonly #prewalk: PrewalkCoordinator;
+	#primaryUserMessages = new WeakSet<AgentMessage>();
+	#detachPrewalkBeforeModelCall: (() => void) | undefined;
 
 	readonly #providerBoundary: SessionProviderBoundary;
 	#promptTemplates: PromptTemplate[];
@@ -1433,6 +1436,26 @@ export class AgentSession {
 			settings: this.settings,
 			model: () => this.model,
 			configuredThinkingLevel: () => this.configuredThinkingLevel(),
+			hasRunningEvalJobs: () =>
+				this.#asyncJobManager
+					?.getRunningJobs(this.#agentId ? { ownerId: this.#agentId } : undefined)
+					.some(job => job.type === "eval") ?? false,
+			resolveAutomaticPolicy: () => {
+				const source = this.resolveRoleModelWithThinking("default");
+				const target = this.resolveRoleModelWithThinking("smol");
+				if (
+					!source.model ||
+					!target.model ||
+					!this.#modelRegistry.hasConfiguredAuth(source.model) ||
+					!this.#modelRegistry.hasConfiguredAuth(target.model)
+				)
+					return undefined;
+				return {
+					source: source.model,
+					thinkingLevel: source.thinkingLevel ?? this.resolveTemporaryModelThinkingLevel(source.model),
+					target: { target: target.model, thinkingLevel: target.thinkingLevel },
+				};
+			},
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
 			setModelTemporary: (model, thinkingLevel, options) => this.setModelTemporary(model, thinkingLevel, options),
 			setActiveToolsByName: names => this.setActiveToolsByName(names),
@@ -1449,10 +1472,6 @@ export class AgentSession {
 			waitForSessionMessagePersistence: message => this.#waitForSessionMessagePersistence(message),
 			localProtocolOptions: () => this.#localProtocolOptions(),
 		};
-		this.#prewalk = new PrewalkCoordinator(prewalkHost, {
-			prewalk: config.prewalk,
-			planYolo: config.planYolo,
-		});
 		const todoHost: TodoTrackerHost = {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
@@ -1503,7 +1522,11 @@ export class AgentSession {
 			thinkingLevelCeiling: config.thinkingLevelCeiling,
 			serviceTierByFamily: config.serviceTierByFamily,
 		});
-
+		this.#prewalk = new PrewalkCoordinator(prewalkHost, {
+			prewalk: config.prewalk,
+			prewalkSnapshot: config.prewalkSnapshot,
+			planYolo: config.planYolo,
+		});
 		this.#promptTemplates = config.promptTemplates ?? [];
 		this.#slashCommands = config.slashCommands ?? [];
 		this.#extensionRunner = config.extensionRunner;
@@ -1562,6 +1585,13 @@ export class AgentSession {
 			}
 		});
 		this.agent.prepareQueuedMessages = this.#prepareQueuedUserMessages;
+		this.#detachPrewalkBeforeModelCall = this.agent.addBeforeModelCallHook(async (_signal, turnMessages) => {
+			let hasNewUserInput = false;
+			for (const message of turnMessages) {
+				if (this.#primaryUserMessages.delete(message)) hasNewUserInput = true;
+			}
+			await this.#prewalk.beforeModelCall(hasNewUserInput);
+		});
 		this.#detachUsageBeforeModelCall = this.agent.addBeforeModelCallHook(async signal => {
 			if (!this.settings.get("retry.usageAwareFallback")) return;
 			if (this.#usagePreflightReadyForNextModelCall) {
@@ -4894,6 +4924,8 @@ export class AgentSession {
 		this.#usagePreflightReadyForNextModelCall = false;
 		this.#detachUsageBeforeQueueDequeue?.();
 		this.#detachUsageBeforeQueueDequeue = undefined;
+		this.#detachPrewalkBeforeModelCall?.();
+		this.#detachPrewalkBeforeModelCall = undefined;
 		this.#detachUsageBeforeModelCall?.();
 		this.#detachUsageBeforeModelCall = undefined;
 		if (this.agent.prepareQueuedMessages === this.#prepareQueuedUserMessages) {
@@ -5369,6 +5401,8 @@ export class AgentSession {
 		resetCapabilities();
 		await this.refreshBaseSystemPrompt();
 
+		this.#prewalk.reset();
+		this.#primaryUserMessages = new WeakSet();
 		return { droppedCount };
 	}
 
@@ -6399,6 +6433,19 @@ export class AgentSession {
 		return this.#planModeState;
 	}
 
+	getPrewalkSnapshot(): PrewalkSnapshot {
+		return this.#prewalk.snapshot;
+	}
+
+	getPrewalkStatus(): "walking" | "standing" | undefined {
+		return this.#prewalk.status;
+	}
+
+	setPrewalkEnabled(enabled: boolean): void {
+		this.settings.set("prewalk.enabled", enabled);
+		this.#prewalk.setEnabled(enabled);
+	}
+
 	/** Prewalk state, if armed and active */
 	getPrewalkState(): Prewalk | undefined {
 		return this.#prewalk.state;
@@ -7156,6 +7203,7 @@ export class AgentSession {
 					compactionOverride: options?.compactionOverride,
 				};
 
+		if (!options?.synthetic && promptAttribution !== "agent") this.#primaryUserMessages.add(message);
 		const preludeMessages: AgentMessage[] = [];
 		if (eagerTodoPrelude) {
 			if (eagerTodoPrelude.toolChoice) {
@@ -7371,7 +7419,9 @@ export class AgentSession {
 			attribution: message.attribution ?? "agent",
 			timestamp: Date.now(),
 		};
-
+		if (customMessage.attribution === "user" && !isHiddenUserCompanion(customMessage)) {
+			this.#primaryUserMessages.add(customMessage);
+		}
 		outcome.sessionClaimed = await this.#promptWithMessage(customMessage, textContent, {
 			...options,
 			prependMessages: keywordNotices.length > 0 ? keywordNotices : undefined,
@@ -8099,20 +8149,23 @@ export class AgentSession {
 				? await this.#buildImageDescriptionNotice(normalizedImages)
 				: undefined;
 		if (await this.#sessionGenerationChanged(sessionGeneration)) return;
+		const primaryMessage: AgentMessage = {
+			role: "user",
+			content,
+			attribution,
+			timestamp: timestamp ?? Date.now(),
+			producer,
+			originalSubmission,
+			imageLinks: inputOptions?.imageLinks,
+			compactionOverride: inputOptions?.compactionOverride,
+			...(mode === "steer" ? { steering: true } : {}),
+		};
+		if (attribution !== "agent") this.#primaryUserMessages.add(primaryMessage);
 		if (mode === "aside") {
 			if (await this.#sessionGenerationChanged(sessionGeneration)) return;
 			const records: AgentMessage[] = [];
 			if (imageDescriptionNotice) records.push(imageDescriptionNotice);
-			records.push({
-				role: "user",
-				content,
-				attribution,
-				timestamp: timestamp ?? Date.now(),
-				producer,
-				originalSubmission,
-				imageLinks: inputOptions?.imageLinks,
-				compactionOverride: inputOptions?.compactionOverride,
-			});
+			records.push(primaryMessage);
 			this.#irc.queueAside(records);
 			// The awaits above (image normalization / vision description) can span the run's
 			// settle, so the run may already be idle by the time the record lands in the aside
@@ -8125,30 +8178,11 @@ export class AgentSession {
 		if (mode === "followUp") {
 			for (const notice of attachmentSourceNotices) this.agent.followUp(notice);
 			if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
-			this.agent.followUp({
-				role: "user",
-				producer,
-				originalSubmission,
-				imageLinks: inputOptions?.imageLinks,
-				compactionOverride: inputOptions?.compactionOverride,
-				content,
-				attribution,
-				timestamp: timestamp ?? Date.now(),
-			});
+			this.agent.followUp(primaryMessage);
 		} else {
 			for (const notice of attachmentSourceNotices) this.agent.steer(notice);
 			if (imageDescriptionNotice) this.agent.steer(imageDescriptionNotice);
-			this.agent.steer({
-				role: "user",
-				producer,
-				originalSubmission,
-				imageLinks: inputOptions?.imageLinks,
-				compactionOverride: inputOptions?.compactionOverride,
-				content,
-				steering: true,
-				attribution,
-				timestamp: timestamp ?? Date.now(),
-			});
+			this.agent.steer(primaryMessage);
 		}
 		this.#scheduleIdleQueueDrain();
 	}
@@ -8374,6 +8408,8 @@ export class AgentSession {
 			timestamp: Date.now(),
 		};
 		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
+		if (normalizedAppMessage.attribution === "user" && !isHiddenUserCompanion(normalizedAppMessage))
+			this.#primaryUserMessages.add(normalizedAppMessage);
 		if (deliverAs === "aside") {
 			if (await this.#sessionGenerationChanged(sessionGeneration)) return;
 			// Non-interrupting: rides the same step-boundary aside poll as
@@ -8482,6 +8518,8 @@ export class AgentSession {
 			timestamp: Date.now(),
 		};
 		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
+		if (normalizedAppMessage.attribution === "user" && !isHiddenUserCompanion(normalizedAppMessage))
+			this.#primaryUserMessages.add(normalizedAppMessage);
 		if (this.isStreaming) {
 			// Queued into a turn the agent owns: that turn holds the session. Busy only
 			// from another prompt's setup claims nothing (that prompt decides).
@@ -9278,6 +9316,8 @@ export class AgentSession {
 				});
 			}
 
+			this.#prewalk.reset();
+			this.#primaryUserMessages = new WeakSet();
 			return true;
 		} finally {
 			if (advisorRecordersDetached) {
@@ -10653,6 +10693,8 @@ export class AgentSession {
 			}
 			generationSettled.resolve();
 			this.#sessionGenerationSettled = previousSessionGenerationSettled;
+			this.#prewalk.reset();
+			this.#primaryUserMessages = new WeakSet();
 			return true;
 		} catch (error) {
 			this.sessionManager.restoreState(previousSessionState);

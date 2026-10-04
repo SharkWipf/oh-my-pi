@@ -42,6 +42,7 @@ import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../tools";
 import type { XdevState } from "../tools/xdev";
 import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
+import type { PrewalkSnapshot } from "./prewalk";
 import type { SessionManager } from "./session-manager";
 
 /** Maximum time the interactive shutdown path waits for Mnemopi consolidation. */
@@ -172,7 +173,9 @@ export interface AgentSessionConfig {
 	/** Retry chain ownership when startup selected one of its fallback entries. */
 	initialRetryFallback?: InitialRetryFallbackState;
 	/** Prewalk from the starting model to a fast/cheap target after implementation begins. */
-	prewalk?: Prewalk;
+	prewalk?: Prewalk | false;
+	/** In-memory PREWALK state restored during hot revival. */
+	prewalkSnapshot?: PrewalkSnapshot;
 	/** Force read-only plan mode at start, auto-approve, then switch to the target. */
 	planYolo?: PlanYolo;
 	/** Initial per-family service tiers for the live session. */

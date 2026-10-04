@@ -112,7 +112,8 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
 			return [
 				{ label: "active", context: { planMode: { enabled: true, paused: false } } },
 				{ label: "warning / paused", context: { planMode: { enabled: true, paused: true } } },
-				{ label: "prewalk active", context: { planMode: null, prewalk: { enabled: true } } },
+				{ label: "prewalk walking", context: { planMode: null, prewalk: "walking" } },
+				{ label: "prewalk standing", context: { planMode: null, prewalk: "standing" } },
 				{ label: "vibe active", context: { planMode: null, vibeMode: { enabled: true } } },
 				{
 					label: "loop active",

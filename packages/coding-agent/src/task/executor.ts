@@ -18,7 +18,6 @@ import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-select
 import {
 	formatModelStringWithRouting,
 	resolveAgentAdvisorSelection,
-	resolveAgentPrewalkPattern,
 	resolveConfiguredModelPatterns,
 	resolveExplicitModelRole,
 	resolveModelOverride,
@@ -52,19 +51,15 @@ import { AgentLifecycleManager, type AgentReviver } from "../registry/agent-life
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { ensurePersistedRoster, isCurrentSessionRosterRef } from "../registry/persisted-agents";
 import { type CreateAgentSessionOptions, createAgentSession, discoverAuthStorage } from "../sdk";
-import type { AgentSession, AgentSessionEvent, Prewalk } from "../session/agent-session";
+import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
 import { type ArtifactManager, writeArtifact } from "../session/artifacts";
 import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
 import type { AuthStorage } from "../session/auth-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../session/messages";
 import { hasConversationalHistory, SessionManager } from "../session/session-manager";
 import { truncateTail } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import {
-	type ConfiguredThinkingLevel,
-	prewalkWouldBeNoop,
-	resolveTaskEffortLevel,
-	type TaskEffort,
-} from "@oh-my-pi/pi-tui/thinking";
+import type { PrewalkSnapshot } from "../session/prewalk";
+import { type ConfiguredThinkingLevel, resolveTaskEffortLevel, type TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { ContextFileEntry, ToolSession } from "../tools";
 import { resolveEvalBackends } from "../tools/eval-backends";
 import { isIrcEnabled } from "../tools/hub";
@@ -80,7 +75,7 @@ import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { WorkspaceTree } from "../workspace-tree";
 import { attributeSubagentError } from "./error-attribution";
 import { generateTaskLabel } from "./label";
-import { resolveAgentPrewalkDefault } from "./prewalk";
+import { hasExplicitSubagentModelChoice, resolveSubagentPrewalk } from "./prewalk";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
@@ -433,6 +428,8 @@ export interface ExecutorOptions {
 	 */
 	detached?: boolean;
 	modelOverride?: string | string[];
+	/** Raw model/role provenance from shared policy, before inherited pattern expansion. */
+	hasExplicitModelChoice?: boolean;
 	/** Explicit pre-expansion model role alias selected for this run. */
 	modelRole?: string;
 	/** Extension routing note for the chosen model; surfaced as `resolvedModelRoute`. */
@@ -3665,39 +3662,23 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// Setup below can fail before this promise's consumption boundary.
 			// Observe rejection immediately while preserving it for the later await.
 			sessionManagerPromise.catch(() => {});
-			// Per-agent prewalk: the agent definition's `prewalk` frontmatter or the
-			// `task.agentPrewalk` settings override hands the subagent off to a
-			// fast/cheap target at its first edit/write — the same mechanism as the
-			// session-level --prewalk. The bundled generic `task` agent has no
-			// frontmatter default; the `task.prewalk` toggle (default off) arms it.
-			// Resolution failures skip prewalk instead of failing the spawn.
-			let prewalk: Prewalk | undefined;
-			const prewalkPattern = resolveAgentPrewalkPattern({
-				settingsOverride: settings.get("task.agentPrewalk")[agent.name],
-				agentPrewalk: resolveAgentPrewalkDefault(agent, settings.get("task.prewalk")),
-			});
-			if (prewalkPattern) {
-				await awaitAbortable(modelRegistry.awaitBackgroundRefresh());
-				const resolvedPrewalk = resolveModelOverride([prewalkPattern], modelRegistry, settings);
-				const target = resolvedPrewalk.model;
-				if (!target || !modelRegistry.hasConfiguredAuth(target)) {
-					logger.warn("Subagent prewalk target unavailable; skipping prewalk", {
-						agent: agent.name,
-						pattern: prewalkPattern,
-						warning: resolvedPrewalk.warning,
-					});
-				} else if (prewalkWouldBeNoop(model, effectiveThinkingLevel, target, resolvedPrewalk.thinkingLevel)) {
-					// Same model AND same effective thinking level: switching would only
-					// inject the plan/checklist nudges for no gain — skip. An effort-only
-					// delta on the same model still arms (it is a real cheapening hand-off).
-					logger.debug("Subagent prewalk target matches starting model and thinking level; skipping prewalk", {
-						agent: agent.name,
-						pattern: prewalkPattern,
-					});
-				} else {
-					prewalk = { target, thinkingLevel: resolvedPrewalk.thinkingLevel };
-				}
-			}
+			const prewalkSelection = await awaitAbortable(
+				resolveSubagentPrewalk({
+					agent,
+					settings,
+					modelRegistry,
+					model,
+					thinkingLevel: effectiveThinkingLevel,
+					hasExplicitModelChoice:
+						options.hasExplicitModelChoice ??
+						hasExplicitSubagentModelChoice(agent, {
+							requestModel: modelOverride,
+							agentModel: agent.model,
+							settings,
+						}),
+				}),
+			);
+			const { prewalk } = prewalkSelection;
 
 			const restrictToolNames = options.restrictToolNames === true;
 			const enableMCP = !restrictToolNames && (options.enableMCP ?? true);
@@ -3744,10 +3725,25 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// live peer rows scoped to it, so a session switch hides stale parked trees.
 			let ircRootSessionFile: string | undefined;
 
-			// Captured by the lifecycle reviver: rebuilding an equivalent session from
-			// the same JSONL file re-invokes createAgentSession with the exact options
-			// of the original run (same agent id, tools, model, system prompt,
-			// artifacts dir) — only the SessionManager differs.
+			// Retain current model/cycle state, never the disposed session graph.
+			let revivalState:
+				| {
+						model: Model | undefined;
+						thinkingLevel: ConfiguredThinkingLevel | undefined;
+						prewalkSnapshot: PrewalkSnapshot;
+				  }
+				| undefined;
+			const captureStateOnDispose = (live: AgentSession): void => {
+				const dispose = live.dispose.bind(live);
+				live.dispose = disposeOptions => {
+					revivalState = {
+						model: live.model,
+						thinkingLevel: live.configuredThinkingLevel(),
+						prewalkSnapshot: live.getPrewalkSnapshot(),
+					};
+					return dispose(disposeOptions);
+				};
+			};
 			const buildSubagentSessionOptions = (
 				sessionManagerForRun: SessionManager,
 				expectedAgentRef: CreateAgentSessionOptions["expectedAgentRef"],
@@ -3765,7 +3761,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				getApiKey: options.getApiKey,
 				credentialSourceSessionId: options.credentialSourceSessionId,
 				settings: subagentSettings,
-				model,
+				// Revival keeps the actual serving model, effort and cycle phase.
+				model: forRevive ? revivalState?.model : prewalkSelection.model,
 				modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,
 				modelPatternAuthFallback:
 					model || modelOverride === undefined ? undefined : options.parentActiveModelPattern,
@@ -3773,12 +3770,15 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					model || modelOverride === undefined ? undefined : `${SUBAGENT_RETRY_FALLBACK_ROLE_PREFIX}${id}`,
 				modelPatternDefaultFallbackChain:
 					model || modelOverride === undefined ? undefined : inheritedRetryFallbackChain,
-				thinkingLevel: effectiveThinkingLevel,
+				thinkingLevel: forRevive ? revivalState?.thinkingLevel : prewalkSelection.thinkingLevel,
 				thinkingLevelCeiling: spawnEffortCeiling,
 				// A revived session restores the tier history it persisted (including
 				// tiers a provider rejected or an extension changed since spawn); only
 				// the fresh spawn resolves the per-agent override.
-				resolveServiceTierByFamily: forRevive ? undefined : resolveServiceTierByFamily,
+				resolveServiceTierByFamily:
+					forRevive || !resolveServiceTierByFamily
+						? undefined
+						: resolvedModel => resolveServiceTierByFamily(prewalkSelection.automatic ? model : resolvedModel),
 				toolNames,
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,
@@ -3825,7 +3825,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				},
 				sessionManager: sessionManagerForRun,
 				hasUI: false,
-				prewalk,
+				prewalk: forRevive ? false : (prewalk ?? false),
+				prewalkSnapshot: forRevive ? revivalState?.prewalkSnapshot : undefined,
 				spawns: spawnsEnv,
 				taskDepth: childDepth,
 				// The whole spawn tree shares the root session's observability bus,
@@ -3895,6 +3896,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				sessionManager.appendModelChange(formatModelStringWithRouting(model), retryFallbackRole);
 			}
 			sessionCreatedAt = performance.now();
+			if (sessionFile !== null) captureStateOnDispose(session);
 
 			monitor.setActiveSession(session);
 			// Run-state notifications precede deferrable wire-level `agent_end`,
@@ -3948,6 +3950,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					const { session: revived } = await createAgentSession(
 						buildSubagentSessionOptions(reopened, expectedAgentRef, true),
 					);
+					captureStateOnDispose(revived);
 					// Re-run the executor's extension wiring on the rebuilt session.
 					// Skipping it leaves the runner pre-init, so a `tool_call` handler
 					// touching a runtime action trips the fail-closed gate and blocks

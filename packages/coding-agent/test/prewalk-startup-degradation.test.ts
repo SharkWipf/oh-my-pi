@@ -61,8 +61,8 @@ describe("prewalk startup degradation", () => {
 
 		const options = await buildSessionOptions(parseArgs([]), [], SessionManager.inMemory(), modelRegistry, settings);
 
-		expect(options.prewalk?.target.provider).toBe(model.provider);
-		expect(options.prewalk?.target.id).toBe(model.id);
+		expect((options.prewalk || undefined)?.target.provider).toBe(model.provider);
+		expect((options.prewalk || undefined)?.target.id).toBe(model.id);
 	});
 
 	test("does not implicitly re-arm configured prewalk while restoring a session", async () => {
@@ -94,7 +94,7 @@ describe("prewalk startup degradation", () => {
 			settings,
 		);
 
-		expect(options.prewalk?.target.provider).toBe(model.provider);
-		expect(options.prewalk?.target.id).toBe(model.id);
+		expect((options.prewalk || undefined)?.target.provider).toBe(model.provider);
+		expect((options.prewalk || undefined)?.target.id).toBe(model.id);
 	});
 });

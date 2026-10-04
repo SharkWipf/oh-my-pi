@@ -301,6 +301,7 @@ interface StatusLineExternalInputs {
 	isStreaming: boolean | undefined;
 	isAutoThinking: boolean | undefined;
 	isFastModeActive: boolean;
+	prewalk: SegmentContext["prewalk"];
 	compactionSpeculation: unknown;
 }
 
@@ -2183,10 +2184,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			hookStatuses: this.#sortedHookStatuses,
 			planMode: this.#planModeStatus,
 			loopMode: this.#loopModeStatus,
-			prewalk:
-				typeof this.session.getPrewalkState === "function" && this.session.getPrewalkState()
-					? { enabled: true }
-					: null,
+			prewalk: this.session.getPrewalkStatus?.(),
 			goalMode: this.#goalModeStatus,
 			goalStatusInFooter: this.#goalModeStatus ? this.host.goalStatusInFooter(this.session) : false,
 			vibeMode: this.#vibeModeStatus,
@@ -2370,6 +2368,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			isFastModeActive:
 				typeof this.session.isFastModeActive === "function" ? this.session.isFastModeActive() : false,
 			compactionSpeculation: this.session.compactionSpeculation,
+			prewalk: this.session.getPrewalkStatus?.(),
 		};
 	}
 
@@ -2423,6 +2422,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			left.isStreaming === right.isStreaming &&
 			left.isAutoThinking === right.isAutoThinking &&
 			left.isFastModeActive === right.isFastModeActive &&
+			left.prewalk === right.prewalk &&
 			left.compactionSpeculation === right.compactionSpeculation
 		);
 	}

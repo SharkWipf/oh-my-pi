@@ -87,6 +87,10 @@ export interface PrewalkCoordinatorHost {
 	settings: Pick<Settings, "get">;
 	model(): Model | undefined;
 	configuredThinkingLevel(): ConfiguredThinkingLevel | undefined;
+	hasRunningEvalJobs?(): boolean;
+	resolveAutomaticPolicy?():
+		| { source: Model; thinkingLevel: ConfiguredThinkingLevel | undefined; target: Prewalk }
+		| undefined;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 	setModelTemporary(
 		model: Model,
@@ -107,9 +111,23 @@ export interface PrewalkCoordinatorHost {
 	localProtocolOptions(): LocalProtocolOptions;
 }
 
+/** In-memory cycle state retained when a parked agent session is recreated. */
+export interface PrewalkSnapshot {
+	readonly policy: { source: Model; thinkingLevel: ConfiguredThinkingLevel | undefined; target: Prewalk } | undefined;
+	readonly armed: Prewalk | undefined;
+	readonly standingTarget: Pick<Model, "provider" | "id"> | undefined;
+	readonly planInjected: boolean;
+	readonly continuePending: boolean;
+	readonly todoSeen: boolean;
+	readonly rearmPending: boolean;
+	readonly automaticDisabled: boolean;
+	readonly disabledByToggle: boolean;
+}
+
 /** Initial state for prewalk and plan-yolo startup flows. */
 export interface PrewalkCoordinatorOptions {
-	prewalk?: Prewalk;
+	prewalk?: Prewalk | false;
+	prewalkSnapshot?: PrewalkSnapshot;
 	planYolo?: PlanYolo;
 }
 
@@ -119,6 +137,11 @@ export type PrewalkRestartResult = "armed" | "reset" | "rejected";
 export class PrewalkCoordinator {
 	readonly #host: PrewalkCoordinatorHost;
 	#prewalk: Prewalk | undefined;
+	readonly #automaticDisabled: boolean;
+	#policy: { source: Model; thinkingLevel: ConfiguredThinkingLevel | undefined; target: Prewalk } | undefined;
+	#rearmPending = false;
+	#disabledByToggle = false;
+	#standingTarget: Pick<Model, "provider" | "id"> | undefined;
 	#planInjected = false;
 	#continuePending = false;
 	#todoSeen = false;
@@ -128,15 +151,103 @@ export class PrewalkCoordinator {
 
 	constructor(host: PrewalkCoordinatorHost, options: PrewalkCoordinatorOptions = {}) {
 		this.#host = host;
-		this.#prewalk = options.prewalk;
+		const snapshot = options.prewalkSnapshot;
+		this.#automaticDisabled = snapshot?.automaticDisabled ?? options.prewalk === false;
+		if (snapshot) {
+			this.#policy = snapshot.policy;
+			this.#prewalk = snapshot.armed;
+			this.#standingTarget = snapshot.standingTarget;
+			this.#planInjected = snapshot.planInjected;
+			this.#continuePending = snapshot.continuePending;
+			this.#todoSeen = snapshot.todoSeen;
+			this.#rearmPending = snapshot.rearmPending;
+			this.#disabledByToggle = snapshot.disabledByToggle;
+		} else {
+			this.#prewalk = options.prewalk || undefined;
+			if (this.#prewalk) this.#capturePolicy(this.#prewalk);
+		}
 		this.#planYolo = options.planYolo;
+	}
+
+	get snapshot(): PrewalkSnapshot {
+		return {
+			policy: this.#policy,
+			armed: this.#prewalk,
+			standingTarget: this.#standingTarget,
+			planInjected: this.#planInjected,
+			continuePending: this.#continuePending,
+			todoSeen: this.#todoSeen,
+			rearmPending: this.#rearmPending,
+			automaticDisabled: this.#automaticDisabled,
+			disabledByToggle: this.#disabledByToggle,
+		};
 	}
 
 	/** Current prewalk target, if the one-way switch remains armed. */
 	get state(): Prewalk | undefined {
 		return this.#prewalk;
 	}
+	get status(): "walking" | "standing" | undefined {
+		if (this.willHandoff) return "walking";
+		const target = this.#standingTarget;
+		const active = this.#host.model();
+		return target && active?.provider === target.provider && active.id === target.id ? "standing" : undefined;
+	}
 
+	#capturePolicy(target: Prewalk): void {
+		const source = this.#host.model();
+		this.#policy = source ? { source, thinkingLevel: this.#host.configuredThinkingLevel(), target } : undefined;
+		this.#standingTarget = undefined;
+	}
+
+	setEnabled(enabled: boolean): void {
+		this.#disabledByToggle = !enabled;
+		if (!enabled) this.disable();
+	}
+
+	disable(): void {
+		this.#scrubPlanNudge();
+		this.#clearPrewalkState();
+		this.#standingTarget = undefined;
+		this.#rearmPending = false;
+	}
+
+	reset(): void {
+		this.disable();
+		this.#policy = undefined;
+	}
+
+	/** Restores planning only at a safe request boundary after newly delivered user input. */
+	async beforeModelCall(hasNewUserInput: boolean): Promise<void> {
+		if (
+			this.#automaticDisabled ||
+			this.#disabledByToggle ||
+			(!this.#policy && !this.#host.settings.get("prewalk.enabled")) ||
+			!this.#host.settings.get("prewalk.afterEveryUserMessage")
+		) {
+			this.#rearmPending = false;
+			return;
+		}
+		if (hasNewUserInput) this.#rearmPending = true;
+		if (!this.#rearmPending || this.#host.hasRunningEvalJobs?.()) return;
+		const policy = this.#policy ?? this.#host.resolveAutomaticPolicy?.();
+		if (!policy) {
+			this.#rearmPending = false;
+			this.#host.emitNotice(
+				"warning",
+				"Prewalk: skipped user input because the configured planning or target model is unavailable or has no configured auth.",
+				"prewalk",
+			);
+			return;
+		}
+		await this.#host.setModelTemporary(policy.source, policy.thinkingLevel, { ephemeral: true });
+		this.#scrubPlanNudge();
+		this.#clearPrewalkState();
+		this.#standingTarget = undefined;
+		this.#policy = policy;
+		this.#rearmPending = false;
+		if (!this.#isNoop(policy.target)) this.#prewalk = policy.target;
+	}
 	/** Whether the armed prewalk would perform a model or thinking-level handoff. */
 	get willHandoff(): boolean {
 		const prewalk = this.#prewalk;
@@ -160,6 +271,7 @@ export class PrewalkCoordinator {
 	}
 
 	#disarmNoop(prewalk: Prewalk): void {
+		this.#standingTarget = undefined;
 		this.#clearPrewalkState();
 		this.#host.emitNotice(
 			"info",
@@ -233,6 +345,7 @@ export class PrewalkCoordinator {
 		for (const toolResult of context.toolResults) {
 			await this.#host.waitForSessionMessagePersistence(toolResult);
 		}
+		if (this.#prewalk !== prewalk) return;
 		this.#scrubPlanNudge(liveMessages);
 		const target = prewalk.target;
 		if (this.#isNoop(prewalk)) {
@@ -240,7 +353,9 @@ export class PrewalkCoordinator {
 			return;
 		}
 		await this.#host.setModelTemporary(target, prewalk.thinkingLevel, { ephemeral: true });
+		if (this.#prewalk !== prewalk) return;
 		this.#clearPrewalkState();
+		this.#standingTarget = { provider: target.provider, id: target.id };
 		this.#host.emitNotice(
 			"info",
 			`Prewalk: switched to ${target.provider}/${target.id} after first ${action.toolName} call.`,
@@ -276,6 +391,8 @@ export class PrewalkCoordinator {
 			this.#disarmNoop(candidate);
 			return false;
 		}
+		this.#capturePolicy(candidate);
+		this.#rearmPending = false;
 		this.#prewalk = candidate;
 		this.#planInjected = true;
 		this.#continuePending = true;
@@ -318,13 +435,11 @@ export class PrewalkCoordinator {
 		}
 
 		await this.#host.setModelTemporary(source, sourceThinkingLevel, { ephemeral: true });
-		if (!active) return this.arm(target, targetThinkingLevel) ? "armed" : "reset";
-		if (this.#isNoop(active)) {
-			this.#scrubPlanNudge();
-			this.#disarmNoop(active);
-			return "reset";
-		}
-		return "armed";
+		this.#capturePolicy({ target, thinkingLevel: targetThinkingLevel });
+		this.#rearmPending = false;
+		this.#scrubPlanNudge();
+		this.#clearPrewalkState();
+		return this.arm(target, targetThinkingLevel) ? "armed" : "reset";
 	}
 
 	/** Lazily enables plan-yolo's plan phase before the first prompt is built. */

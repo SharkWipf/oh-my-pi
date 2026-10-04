@@ -92,7 +92,7 @@ describe("--model role override thinking suffix", () => {
 		);
 
 		expect(options.model?.id).toBe(startupModel.id);
-		expect(options.prewalk?.target.id).toBe(configuredDefault.id);
+		expect((options.prewalk || undefined)?.target.id).toBe(configuredDefault.id);
 	});
 
 	test("prewalk bare default resolves the configured default before --model overrides the session role", async () => {
@@ -114,7 +114,7 @@ describe("--model role override thinking suffix", () => {
 		);
 
 		expect(options.model?.id).toBe(startupModel.id);
-		expect(options.prewalk?.target.id).toBe(configuredDefault.id);
+		expect((options.prewalk || undefined)?.target.id).toBe(configuredDefault.id);
 	});
 
 	test("prewalk @default preserves configured fallback candidates before --model override", async () => {
@@ -135,6 +135,6 @@ describe("--model role override thinking suffix", () => {
 			settings,
 		);
 
-		expect(options.prewalk?.target.id).toBe(fallbackModel.id);
+		expect((options.prewalk || undefined)?.target.id).toBe(fallbackModel.id);
 	});
 });

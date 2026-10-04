@@ -462,7 +462,9 @@ export class Agent {
 	#beforeQueuedMessageDequeueHooks = new Set<
 		(signal?: AbortSignal, messages?: AgentMessage[]) => Promise<void> | void
 	>();
-	#beforeModelCallHooks = new Set<(signal?: AbortSignal) => Promise<void> | void>();
+	#beforeModelCallHooks = new Set<
+		(signal: AbortSignal | undefined, turnMessages: readonly AgentMessage[]) => Promise<void> | void
+	>();
 
 	/** Buffered Cursor tool results with text length at time of call (for correct ordering) */
 	#cursorToolResultBuffer: CursorToolResultEntry[] = [];
@@ -862,14 +864,20 @@ export class Agent {
 	}
 
 	/** Register an independently removable hook that runs immediately before each model call. */
-	addBeforeModelCallHook(hook: (signal?: AbortSignal) => Promise<void> | void): () => void {
-		const registration = (signal?: AbortSignal) => hook(signal);
+	addBeforeModelCallHook(
+		hook: (signal: AbortSignal | undefined, turnMessages: readonly AgentMessage[]) => Promise<void> | void,
+	): () => void {
+		const registration = (signal: AbortSignal | undefined, turnMessages: readonly AgentMessage[]) =>
+			hook(signal, turnMessages);
 		this.#beforeModelCallHooks.add(registration);
 		return () => this.#beforeModelCallHooks.delete(registration);
 	}
 
-	async #runBeforeModelCallHooks(signal?: AbortSignal): Promise<void> {
-		for (const hook of this.#beforeModelCallHooks) await hook(signal);
+	async #runBeforeModelCallHooks(
+		signal: AbortSignal | undefined,
+		turnMessages: readonly AgentMessage[],
+	): Promise<void> {
+		for (const hook of this.#beforeModelCallHooks) await hook(signal, turnMessages);
 	}
 
 	async #runBeforeQueuedMessageDequeueHooks(signal?: AbortSignal, messages = this.#state.messages): Promise<void> {
@@ -1596,8 +1604,8 @@ export class Agent {
 			onSseEvent: this.#onSseEvent,
 			getApiKey: this.getApiKey,
 			getToolContext: this.#getToolContext,
-			syncContextBeforeModelCall: async (context, signal) => {
-				await this.#runBeforeModelCallHooks(signal);
+			syncContextBeforeModelCall: async (context, signal, turnMessages) => {
+				await this.#runBeforeModelCallHooks(signal, turnMessages);
 				if (this.#listeners.size > 0) {
 					await Bun.sleep(0);
 				}
