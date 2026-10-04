@@ -305,6 +305,11 @@ export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 const DEFAULT_AGENT_MODEL_OVERRIDES: Record<string, string | string[]> = {};
 const EMPTY_AUTH_ACCOUNT_POLICIES: AuthAccountPolicies = [];
 
+const PREWALK_MESSAGE_OPTIONS = [1, 3, 5, 10, 15, 20, 25, 50, 75, 100, 150, 200, 250, 500, 1000].map(value => ({
+	value: String(value),
+	label: String(value),
+}));
+
 export const SETTINGS_SCHEMA = {
 	// ────────────────────────────────────────────────────────────────────────
 	// General settings (no UI)
@@ -409,6 +414,30 @@ export const SETTINGS_SCHEMA = {
 			description:
 				"Force primary compaction before accepted advisor guidance is delivered, even below the normal context threshold.",
 			condition: "advisorEnabled",
+		},
+	},
+	"prewalk.minMessages": {
+		type: "number",
+		default: 0,
+		ui: {
+			tab: "model",
+			group: "Prewalk",
+			label: "Minimum Prewalk Messages",
+			description:
+				"Minimum completed assistant responses per planning cycle. Ignore early handoff triggers, without saving them for later. User messages and tool results do not count. The minimum takes precedence over the maximum.",
+			options: [{ value: "0", label: "No minimum" }, ...PREWALK_MESSAGE_OPTIONS],
+		},
+	},
+	"prewalk.maxMessages": {
+		type: "number",
+		default: 0,
+		ui: {
+			tab: "model",
+			group: "Prewalk",
+			label: "Maximum Prewalk Messages",
+			description:
+				"Force handoff after this many completed assistant responses, even without a todo list or edit/write. Minimum takes precedence; a running background Eval cell delays forced handoff until a safe response boundary.",
+			options: [{ value: "0", label: "Unlimited" }, ...PREWALK_MESSAGE_OPTIONS],
 		},
 	},
 	"advisor.syncBacklog": {
@@ -5662,6 +5691,38 @@ export const SETTINGS_SCHEMA = {
 			label: "Prewalk Unpinned Subagents",
 			description:
 				"Start subagents without an explicit model choice on the configured slow planning role, then hand off to their normal execution model. Explicit agent models, configured task-role models, per-agent overrides and launch overrides are unchanged. Per-agent prewalk off remains off.",
+		},
+	},
+	"task.prewalkMinMessages": {
+		type: "number",
+		default: -1,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Minimum Prewalk Messages",
+			description:
+				"Minimum completed assistant responses in each subagent prewalk cycle. Inherit uses the parent’s effective minimum; 0 removes the child minimum. Early triggers are discarded, and minimum takes precedence over maximum. Does not enable prewalk.",
+			options: [
+				{ value: "-1", label: "Inherit", description: "Use the parent’s effective limit." },
+				{ value: "0", label: "No minimum" },
+				...PREWALK_MESSAGE_OPTIONS,
+			],
+		},
+	},
+	"task.prewalkMaxMessages": {
+		type: "number",
+		default: -1,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Maximum Prewalk Messages",
+			description:
+				"Maximum completed assistant responses in each subagent prewalk cycle. Inherit uses the parent’s effective maximum; 0 is unlimited. Minimum takes precedence; running background Eval cells delay forced handoff. Does not enable prewalk.",
+			options: [
+				{ value: "-1", label: "Inherit", description: "Use the parent’s effective limit." },
+				{ value: "0", label: "Unlimited" },
+				...PREWALK_MESSAGE_OPTIONS,
+			],
 		},
 	},
 	"tasks.todoClearDelay": {

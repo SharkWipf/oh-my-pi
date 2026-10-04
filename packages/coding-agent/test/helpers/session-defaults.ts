@@ -12,6 +12,8 @@ export function createSessionDefaults() {
 			planInjected: false,
 			continuePending: false,
 			todoSeen: false,
+			completedMessages: 0,
+			lastCountedMessage: undefined,
 			rearmPending: false,
 			automaticDisabled: false,
 			disabledByToggle: false,
