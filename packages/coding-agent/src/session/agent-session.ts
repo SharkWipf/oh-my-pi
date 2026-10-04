@@ -3078,6 +3078,7 @@ export class AgentSession {
 		if (message.role === "assistant") {
 			(message as PersistedAssistantMessage)[kPersistedSessionEntryId] = entryId;
 		}
+
 		if ((message.role === "user" || message.role === "custom") && this.settings.get("requirements.enabled"))
 			void this.requirements
 				.acceptDelivered(entryId)
