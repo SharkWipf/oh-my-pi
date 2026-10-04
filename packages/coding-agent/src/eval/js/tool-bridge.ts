@@ -109,11 +109,14 @@ const summarizeToolResult: StatusSummarizer = (name, args, result, text, hasErro
 	switch (name) {
 		case "read":
 			return withError({ op: "read", path: record.path, chars: text.length, preview: text.slice(0, 500) });
+		case "edit":
 		case "write":
 			return withError({
-				op: "write",
+				op: name,
 				path: record.path,
-				chars: typeof record.content === "string" ? record.content.length : 0,
+				chars: name === "edit" ? text.length : typeof record.content === "string" ? record.content.length : 0,
+				committed: !hasError,
+				xdev: details.xdev,
 			});
 		case "grep":
 			return withError({
@@ -137,7 +140,12 @@ const summarizeToolResult: StatusSummarizer = (name, args, result, text, hasErro
 				output: text.slice(0, 500),
 			});
 		case "todo":
-			return withError({ op: "todo", chars: text.length, committed: committedTodoPhases(result) !== undefined });
+			return withError({
+				op: "todo",
+				chars: text.length,
+				completed: !hasError,
+				committed: committedTodoPhases(result) !== undefined,
+			});
 		default:
 			return withError({ op: name, chars: text.length });
 	}

@@ -17,6 +17,13 @@ import type { TuiSlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-com
 import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
+import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { TodoTool } from "@oh-my-pi/pi-coding-agent/tools/todo";
+import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
+import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 
 /**
  * Prewalk: one-way switch from the starting model to a fast/cheap target
@@ -106,6 +113,205 @@ describe("AgentSession prewalk", () => {
 	function toolCall(id: string, name: string): MockResponse {
 		return { content: [{ type: "toolCall", id, name, arguments: {} }], stopReason: "toolUse" };
 	}
+
+	describe("completed Eval bridge operations", () => {
+		const initTodo = 'await tool.todo({ op: "init", items: ["Implement"] });';
+
+		function setup(codes: (string | MockResponse)[], options: { todoActive?: boolean } = {}) {
+			const primary = modelOrThrow("claude-sonnet-4-5");
+			const target = modelOrThrow("claude-sonnet-4-6");
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"eval.autoBackground.enabled": false,
+				"images.autoResize": false,
+			});
+			const manager = SessionManager.inMemory(tempDir.path());
+			let phases: TodoPhase[] = [];
+			const registry = new Map<string, AgentTool>();
+			const toolsContext: ToolSession = {
+				cwd: tempDir.path(),
+				hasUI: false,
+				enableLsp: false,
+				settings,
+				getSessionFile: () => null,
+				getEvalSessionId: () => manager.getSessionId(),
+				getSessionSpawns: () => "*",
+				getToolForEvalBridge: name => registry.get(name),
+				getEvalBridgeToolNames: () => [...registry.keys()],
+				getTodoPhases: () => phases,
+				setTodoPhases: updated => {
+					phases = updated;
+				},
+				xdev: {
+					tools: registry,
+					mountedNames: new Set(),
+					builtInNames: new Set(),
+					isActive: name => registry.has(name),
+				},
+			};
+			const withinCellModels: string[] = [];
+			for (const tool of [
+				new EvalTool(toolsContext),
+				new TodoTool(toolsContext),
+				new WriteTool(toolsContext),
+				new ReadTool(toolsContext),
+				new EditTool(toolsContext, "replace"),
+				{
+					...recordTool,
+					execute: async () => {
+						withinCellModels.push(session!.model!.id);
+						return { content: [{ type: "text" as const, text: "observed" }], details: undefined };
+					},
+				},
+			])
+				registry.set(tool.name, tool as AgentTool);
+			const mock = createMockModel({
+				responses: [
+					...codes.map((code, index): MockResponse =>
+						typeof code === "string"
+							? {
+									content: [
+										{
+											type: "toolCall",
+											id: "eval-" + index,
+											name: "eval",
+											arguments: { language: "js", code },
+										},
+									],
+									stopReason: "toolUse",
+								}
+							: code,
+					),
+					{ content: ["done"] },
+					{ content: ["done"] },
+				],
+			});
+			const calls: string[] = [];
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: {
+					model: primary,
+					systemPrompt: ["Test"],
+					tools: [...registry.values()].filter(tool => options.todoActive !== false || tool.name !== "todo"),
+					messages: [],
+					thinkingLevel: Effort.Medium,
+				},
+				convertToLlm,
+				streamFn: (model, context, streamOptions) => {
+					calls.push(model.id);
+					return mock.stream(model, context, streamOptions);
+				},
+			});
+			session = new AgentSession({
+				agent,
+				sessionManager: manager,
+				settings,
+				modelRegistry,
+				toolRegistry: registry,
+				prewalk: { target },
+			});
+			return { primary, target, calls, withinCellModels };
+		}
+
+		function writeFile(file: string, content: string): string {
+			return "await tool.write(" + JSON.stringify({ path: file, content }) + ");";
+		}
+
+		function editFile(file: string, before: string, after: string): string {
+			return "await tool.edit(" + JSON.stringify({ path: file, old_string: before, new_string: after }) + ");";
+		}
+
+		it("keeps the gate closed after a failed nested todo and remembers success despite a later cell error", async () => {
+			const file = path.join(tempDir.path(), "eval-gate.txt");
+			await Bun.write(file, "before");
+			const t = setup([
+				'display({ op: "todo", completed: true });',
+				'await tool.todo({ op: "done", task: "missing" });',
+				editFile(file, "before", "after"),
+				initTodo + ' throw new Error("later cell failure");',
+				editFile(file, "after", "finished"),
+			]);
+			await session!.prompt("Implement");
+			expect(t.calls).toEqual([t.primary.id, t.primary.id, t.primary.id, t.primary.id, t.primary.id, t.target.id]);
+			expect(await Bun.file(file).text()).toBe("finished");
+		});
+
+		it("hands off only after the entire cell despite a successful write followed by failures", async () => {
+			const file = path.join(tempDir.path(), "eval-completed.txt");
+			const t = setup([
+				initTodo +
+					writeFile(file, "committed") +
+					" await tool.record({});" +
+					' try { await tool.write({ path: "xd://missing-device", content: "{}" }); } catch {}' +
+					' throw new Error("unrelated cell failure");',
+			]);
+			await session!.prompt("Implement");
+			expect(t.calls).toEqual([t.primary.id, t.target.id]);
+			expect(t.withinCellModels).toEqual([t.primary.id]);
+			expect(await Bun.file(file).text()).toBe("committed");
+		});
+
+		it("does not hand off for failed nested mutation, raw code, or displayed status-shaped JSON", async () => {
+			const t = setup([
+				initTodo,
+				'display({ statusEvents: [{ op: "write", committed: true }] }); const code = "await tool.write({})";',
+				'await tool.edit({ path: "nonexistent-prewalk-file", old_string: "before", new_string: "after" });',
+				'await tool.write({ path: "xd://missing-device", content: "{}" });',
+			]);
+			await session!.prompt("Investigate");
+			expect(t.calls).toEqual([t.primary.id, t.primary.id, t.primary.id, t.primary.id, t.primary.id, t.primary.id]);
+		});
+
+		it("keeps bridged xdev help and read dispatches on the primary until a real device mutation", async () => {
+			const file = path.join(tempDir.path(), "eval-xdev.txt");
+			await Bun.write(file, "before");
+			const t = setup([
+				initTodo,
+				writeFile("xd://read", "?"),
+				writeFile("xd://read", JSON.stringify({ path: file })),
+				writeFile("xd://write", JSON.stringify({ path: file, content: "after" })),
+			]);
+			await session!.prompt("Implement");
+			expect(t.calls).toEqual([t.primary.id, t.primary.id, t.primary.id, t.primary.id, t.target.id]);
+			expect(await Bun.file(file).text()).toBe("after");
+		});
+
+		it("skips the gate for an Eval session whose active slate excludes todo", async () => {
+			const file = path.join(tempDir.path(), "eval-no-todo.txt");
+			const t = setup([writeFile(file, "implemented")], { todoActive: false });
+			await session!.prompt("Implement");
+			expect(t.calls).toEqual([t.primary.id, t.target.id]);
+			expect(await Bun.file(file).text()).toBe("implemented");
+		});
+		it("opens the same todo gate for successful nested view as for a direct view", async () => {
+			const file = path.join(tempDir.path(), "eval-view.txt");
+			const t = setup(['await tool.todo({ op: "view" });', writeFile(file, "after-view")]);
+			await session!.prompt("Implement");
+			expect(t.calls).toEqual([t.primary.id, t.primary.id, t.target.id]);
+			expect(await Bun.file(file).text()).toBe("after-view");
+		});
+
+		it("does not hand off after failed direct edit/write calls", async () => {
+			const file = path.join(tempDir.path(), "direct-failure.txt");
+			const directCall = (id: string, name: string, args: Record<string, unknown>): MockResponse => ({
+				content: [{ type: "toolCall", id, name, arguments: args }],
+				stopReason: "toolUse",
+			});
+			const t = setup([
+				directCall("todo-view", "todo", { op: "view" }),
+				directCall("edit-failure", "edit", {
+					path: "nonexistent-prewalk-file",
+					old_string: "before",
+					new_string: "after",
+				}),
+				directCall("write-failure", "write", { path: "xd://missing-device", content: "{}" }),
+				directCall("write-success", "write", { path: file, content: "implemented" }),
+			]);
+			await session!.prompt("Implement");
+			expect(t.calls).toEqual([t.primary.id, t.primary.id, t.primary.id, t.primary.id, t.target.id]);
+			expect(await Bun.file(file).text()).toBe("implemented");
+		});
+	});
 
 	it("prewalks at the first edit/write after the todo gate opens; bash and todo don't trigger", async () => {
 		const primary = modelOrThrow("claude-sonnet-4-5");
