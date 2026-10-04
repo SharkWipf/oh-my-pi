@@ -820,7 +820,10 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 }
 
 export interface SessionSelectorOptions<T extends SessionSelectorEntry = SessionSelectorEntry> {
-	onDelete?: (session: T) => Promise<boolean>;
+	onDelete?: (
+		session: T,
+		choose: (title: string, options: string[]) => Promise<string | undefined>,
+	) => Promise<boolean>;
 	historyMatcher?: SessionHistoryMatcher;
 	/** Loads sessions across all projects for the all-projects scope toggle (Tab). */
 	loadAllSessions?: () => Promise<T[]>;
@@ -864,7 +867,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 	// scrollback, stranding it above the viewport once the dialog closed).
 	#contentSlot: Container;
 	#messageContainer: Container;
-	#onDelete?: (session: T) => Promise<boolean>;
+	#onDelete?: SessionSelectorOptions<T>["onDelete"];
 	#onRequestRender?: () => void;
 	readonly #loadAllSessions?: () => Promise<T[]>;
 	#folderSessions: T[];
@@ -1041,7 +1044,16 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 				if (option === "Yes" && this.#onDelete) {
 					this.#clearError();
 					try {
-						const deleted = await this.#onDelete(session);
+						const deleted = await this.#onDelete(session, (title, options) => {
+							const { promise, resolve } = Promise.withResolvers<string | undefined>();
+							this.#confirmationDialog = new HookSelectorComponent(title, options, resolve, () =>
+								resolve(undefined),
+							);
+							this.#contentSlot.clear();
+							this.#contentSlot.addChild(this.#confirmationDialog);
+							this.#onRequestRender?.();
+							return promise;
+						});
 						if (deleted) {
 							this.#sessionList.removeSession(session.path);
 							this.#folderSessions = this.#folderSessions.filter(s => s.path !== session.path);

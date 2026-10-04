@@ -310,8 +310,9 @@ function proactiveLinkIfEnabled(
  */
 async function runFactExtraction(beam: BeamMemoryState, memoryId: string, content: string): Promise<void> {
 	try {
+		if (beam.backgroundSignal?.aborted) return;
 		const extracted = await extractFactCategoriesSafe(content);
-		if (countExtractedFactCategories(extracted) === 0) return;
+		if (beam.backgroundSignal?.aborted || countExtractedFactCategories(extracted) === 0) return;
 		storeExtractedFactCategories(beam, extracted, 0, memoryId);
 		invalidateCaches(beam);
 	} catch {
@@ -330,7 +331,7 @@ async function runFactExtraction(beam: BeamMemoryState, memoryId: string, conten
  */
 function scheduleFactExtraction(beam: BeamMemoryState, memoryId: string, content: string): void {
 	if (content.trim() === "") return;
-	const runtimeOptions = getMnemopiRuntimeOptions();
+	const runtimeOptions = { ...getMnemopiRuntimeOptions(), signal: beam.backgroundSignal };
 	const task = withMnemopiRuntimeOptions(runtimeOptions, () => runFactExtraction(beam, memoryId, content));
 	const pending = beam.pendingExtractions;
 	if (pending !== undefined) {

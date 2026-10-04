@@ -2,12 +2,15 @@ import type {
 	ImageContent,
 	Message,
 	MessageAttribution,
+	OriginalSubmission,
 	ProviderPayload,
 	TextContent,
 	ToolResultMessage,
+	UserMessageProducer,
 } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import type { AgentMessage } from "../types";
+import type { CompactionDiagnostics } from "./diagnostics";
 import branchSummaryContextPrompt from "./prompts/branch-summary-context.md" with { type: "text" };
 import compactionSummaryContextPrompt from "./prompts/compaction-summary-context.md" with { type: "text" };
 import handoffSummaryContextPrompt from "./prompts/handoff-summary-context.md" with { type: "text" };
@@ -17,6 +20,13 @@ const HANDOFF_SUMMARY_TEMPLATE = handoffSummaryContextPrompt;
 const BRANCH_SUMMARY_TEMPLATE = branchSummaryContextPrompt;
 
 export interface CustomMessage<T = unknown> {
+	/** Original host input, retained through custom skill delivery and queued replay. */
+	originalSubmission?: OriginalSubmission;
+	producer?: UserMessageProducer;
+	/** Host capture identity, retained through custom skill delivery and queued replay. */
+	sourceCaptureId?: string;
+	imageLinks?: (string | undefined)[];
+	compactionOverride?: "keep" | "exclude";
 	role: "custom";
 	customType: string;
 	content: string | (TextContent | ImageContent)[];
@@ -64,6 +74,8 @@ export interface CompactionSummaryMessage {
 	images?: ImageContent[];
 	/** Post-pass dead-end warning attached to this compaction (progress guard). */
 	warning?: string;
+	/** Frozen facts from the event that produced these bytes. */
+	diagnostics?: CompactionDiagnostics;
 	timestamp: number;
 }
 
@@ -135,6 +147,7 @@ export interface CompactionSummaryMessageOptions {
 	method?: string;
 	/** Estimated context tokens after the rewrite, for display alongside `tokensBefore`. */
 	tokensAfter?: number;
+	diagnostics?: CompactionDiagnostics;
 }
 
 export function createCompactionSummaryMessage(
@@ -143,7 +156,7 @@ export function createCompactionSummaryMessage(
 	timestamp: string,
 	options: CompactionSummaryMessageOptions = {},
 ): CompactionSummaryMessage {
-	const { shortSummary, providerPayload, images, blocks, warning, method, tokensAfter } = options;
+	const { shortSummary, providerPayload, images, blocks, warning, method, tokensAfter, diagnostics } = options;
 	const imageBlocks =
 		blocks?.filter((block): block is ImageContent => block.type === "image") ??
 		(images && images.length > 0 ? images : undefined);
@@ -158,6 +171,7 @@ export function createCompactionSummaryMessage(
 		blocks: blocks && blocks.length > 0 ? blocks : undefined,
 		images: imageBlocks && imageBlocks.length > 0 ? imageBlocks : undefined,
 		warning,
+		diagnostics,
 		timestamp: new Date(timestamp).getTime(),
 	};
 }

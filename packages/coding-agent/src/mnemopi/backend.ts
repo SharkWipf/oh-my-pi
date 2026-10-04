@@ -563,11 +563,16 @@ async function resolveMnemopiProviderOptions(
 		}
 
 		const complete = async (prompt: string, opts?: MnemopiLlmCompleteOptions): Promise<string | null> => {
+			opts?.signal?.throwIfAborted();
 			const request = resolveMemoryCompletionInput(prompt, opts);
-			const signal =
+			const timeoutSignal =
 				typeof opts?.timeout === "number" && Number.isFinite(opts.timeout) && opts.timeout > 0
 					? AbortSignal.timeout(opts.timeout)
 					: undefined;
+			const signal =
+				opts?.signal && timeoutSignal
+					? AbortSignal.any([opts.signal, timeoutSignal])
+					: (opts?.signal ?? timeoutSignal);
 
 			for (const { model } of candidates) {
 				if (signal?.aborted) return null;
@@ -595,6 +600,7 @@ async function resolveMnemopiProviderOptions(
 						});
 						continue;
 					}
+					opts?.signal?.throwIfAborted();
 					const message = await retryTransientCompletion(
 						() =>
 							completeSimple(

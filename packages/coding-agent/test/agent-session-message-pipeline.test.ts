@@ -142,7 +142,11 @@ describe("AgentSession message pipeline", () => {
 		// and pop the steer before we can inspect it; stub it out to observe the queue.
 		vi.spyOn(session.agent, "continue").mockResolvedValue(undefined);
 
-		await session.sendUserMessage("raw <steer> &", { deliverAs: "steer" });
+		await session.sendUserMessage("raw <steer> &", {
+			deliverAs: "steer",
+			attribution: "agent",
+			producer: { type: "tool", name: "eval", toolCallId: "call-1" },
+		});
 
 		expect(session.getQueuedMessages().steering).toEqual(["raw <steer> &"]);
 		const queued = session.agent.popLastSteer();
@@ -150,6 +154,8 @@ describe("AgentSession message pipeline", () => {
 			throw new Error("Expected queued user steer");
 		}
 		expect(queued.steering).toBe(true);
+		expect(queued.producer).toEqual({ type: "tool", name: "eval", toolCallId: "call-1" });
+		expect(queued.attribution).toBe("agent");
 		expect(queued.content).toEqual([{ type: "text", text: "raw <steer> &" }]);
 		session.clearQueue();
 	});

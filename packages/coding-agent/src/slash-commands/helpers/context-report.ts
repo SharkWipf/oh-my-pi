@@ -1,3 +1,4 @@
+import { requirementsContextText } from "../../requirements/commands";
 import { computeSessionContextBreakdown } from "../../session/context-usage-runtime";
 import type { SlashCommandRuntime } from "../types";
 import { renderAsciiBar } from "@oh-my-pi/pi-tui/chrome/format";
@@ -8,6 +9,12 @@ import { renderAsciiBar } from "@oh-my-pi/pi-tui/chrome/format";
  * minimal "window/used" lines when the breakdown helper throws.
  */
 export function buildContextReportText(runtime: SlashCommandRuntime): string {
+	return `${buildUsageReportText(runtime)}
+
+${requirementsContextText(runtime.session)}`;
+}
+
+function buildUsageReportText(runtime: SlashCommandRuntime): string {
 	try {
 		const breakdown = computeSessionContextBreakdown(runtime.session, { snapcompactSavings: true });
 		if (breakdown.contextWindow <= 0) {

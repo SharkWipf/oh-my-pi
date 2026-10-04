@@ -124,6 +124,10 @@ export class BeamMemory implements BeamMemoryState {
 	readonly config: BeamConfig;
 	readonly pendingExtractions: Set<Promise<void>> = new Set();
 	#closed = false;
+	readonly #backgroundAbort = new AbortController();
+	get backgroundSignal(): AbortSignal {
+		return this.#backgroundAbort.signal;
+	}
 
 	constructor(options?: BeamMemoryOptions);
 	constructor(
@@ -195,6 +199,8 @@ export class BeamMemory implements BeamMemoryState {
 		if (this.#closed) {
 			return;
 		}
+		this.#backgroundAbort.abort();
+		this.caches.extractionBuffer.length = 0;
 		this.#closed = true;
 		closeQuietly(this.db);
 	}

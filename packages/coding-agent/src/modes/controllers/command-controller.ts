@@ -1,3 +1,8 @@
+import {
+	executeRequirementsCommand,
+	requirementsContextText,
+	renderRequirementsData,
+} from "../../requirements/commands";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -680,11 +685,9 @@ export class CommandController {
 
 	handleContextCommand(): void {
 		const breakdown = computeSessionContextBreakdown(this.ctx.session, { snapcompactSavings: true });
-		if (breakdown.contextWindow <= 0) {
-			this.ctx.showWarning("Context usage is unavailable: no model is selected for this session.");
-			return;
-		}
-		const output = renderContextUsage(breakdown, theme);
+		const output = `${breakdown.contextWindow > 0 ? renderContextUsage(breakdown, theme) : "Context usage is unavailable: no model is selected."}
+
+${requirementsContextText(this.ctx.session)}`;
 		const block = new TranscriptBlock();
 		block.addChild(new DynamicBorder());
 		block.addChild(new Text(theme.bold(theme.fg("accent", "Context Usage")), 1, 0));
@@ -697,6 +700,23 @@ export class CommandController {
 	async handleMemoryCommand(text: string): Promise<void> {
 		const argumentText = text.slice(7).trim();
 		const action = argumentText.split(/\s+/, 1)[0]?.toLowerCase() || "view";
+		if (action === "requirements") {
+			try {
+				const payload = await executeRequirementsCommand(
+					this.ctx.session,
+					argumentText.slice("requirements".length).trim(),
+				);
+				const block = new TranscriptBlock();
+				block.addChild(new DynamicBorder());
+				block.addChild(new Text(theme.bold(theme.fg("accent", "Living Requirements")), 1, 0));
+				block.addChild(new Text(payload, 1, 1));
+				block.addChild(new DynamicBorder());
+				this.ctx.presentCommandOutput(block);
+			} catch (error) {
+				this.ctx.showError(renderRequirementsData(error instanceof Error ? error.message : String(error)));
+			}
+			return;
+		}
 		const agentDir = this.ctx.settings.getAgentDir();
 		const backend = await resolveMemoryBackend(this.ctx.settings);
 
@@ -784,7 +804,9 @@ export class CommandController {
 			return;
 		}
 
-		this.ctx.showError("Usage: /memory <view|stats|diagnose|clear|reset|enqueue|rebuild|queue|sync|mm ...>");
+		this.ctx.showError(
+			"Usage: /memory <requirements|view|stats|diagnose|clear|reset|enqueue|rebuild|queue|sync|mm ...>",
+		);
 	}
 
 	async #handleMentalModelsSubcommand(argumentText: string): Promise<void> {

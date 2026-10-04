@@ -111,7 +111,7 @@ export interface SlashCommandRuntime {
 export interface TuiSlashCommandRuntime {
 	ctx: InteractiveModeContext;
 	/** Post-extension-hook attachments belonging to the submitted slash draft. */
-	input?: Pick<SubmittedUserInput, "images" | "imageLinks">;
+	input?: Pick<SubmittedUserInput, "images" | "imageLinks" | "originalSubmission">;
 	/** The editor snapshot was cleared before asynchronous input hooks ran. */
 	draftDetached?: boolean;
 }

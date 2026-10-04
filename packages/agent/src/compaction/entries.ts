@@ -1,5 +1,6 @@
 import type { ImageContent, MessageAttribution, ServiceTierByFamily, TextContent } from "@oh-my-pi/pi-ai";
 import type { AgentMessage } from "../types";
+import type { CompactionDiagnostics } from "./diagnostics";
 
 export interface SessionEntryBase {
 	type: string;
@@ -39,6 +40,7 @@ export interface CompactionEntry<T = unknown> extends SessionEntryBase {
 	tokensBefore: number;
 	/** Last entry covered by native replay; later entries may precede the compaction record. */
 	providerReplayThroughEntryId?: string;
+	diagnostics?: CompactionDiagnostics;
 	/** Extension-specific data (e.g., ArtifactIndex, version markers for structured compaction) */
 	details?: T;
 	/** Hook-provided data to persist across compaction */

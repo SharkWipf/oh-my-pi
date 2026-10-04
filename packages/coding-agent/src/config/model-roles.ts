@@ -172,6 +172,21 @@ export const MODEL_ROLES: Record<ModelRole, ModelRoleInfo> = {
 		accepts: acceptsChat,
 		purpose: "Enabled second-opinion review; sends conversation and tool activity.",
 	},
+	requirements: { tag: "REQ", name: "Requirements Extractor", color: "accent", section: "chat", accepts: acceptsChat },
+	requirementsEvidence: {
+		tag: "EVIDENCE",
+		name: "Requirements Evidence",
+		color: "accent",
+		section: "chat",
+		accepts: acceptsChat,
+	},
+	requirementsSanity: {
+		tag: "SANITY",
+		name: "Requirements Sanity",
+		color: "accent",
+		section: "chat",
+		accepts: acceptsChat,
+	},
 	image: {
 		tag: "IMAGE",
 		name: "Image generation",

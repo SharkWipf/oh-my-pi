@@ -68,6 +68,13 @@ export {
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { titleTextFromSkillPrompt } from "@oh-my-pi/pi-tui/chat/skill-title-input";
 
+declare module "@oh-my-pi/pi-ai" {
+	interface UserMessage {
+		imageLinks?: (string | undefined)[];
+		compactionOverride?: "keep" | "exclude";
+	}
+}
+
 /**
  * Logs provider-error turns so their actual cause is available outside the
  * session transcript. No-op for non-error stop reasons.

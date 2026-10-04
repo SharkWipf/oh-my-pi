@@ -3,8 +3,9 @@ import type { AssistantMessage, ImageContent, TextContent, ToolResultMessage } f
 import { createOpenAIResponsesHistoryPayload } from "@oh-my-pi/pi-ai/utils";
 import { bindMessageSource, remapNativeItemOrigins } from "@oh-my-pi/pi-ai/utils/source-origin";
 import * as natives from "@oh-my-pi/pi-natives";
+import * as snapcompact from "@oh-my-pi/snapcompact";
 import { createCustomMessage } from "../src/compaction/messages";
-import { Tokenizer, tokenizerEncodingForModel } from "../src/tokenizer";
+import { IMAGE_TOKEN_ESTIMATE, Tokenizer, tokenizerEncodingForModel } from "../src/tokenizer";
 import type { AgentMessage } from "../src/types";
 
 afterEach(() => {
@@ -33,26 +34,30 @@ describe("tokenizerEncodingForModel", () => {
 });
 
 describe("Tokenizer", () => {
-	test("charges normalized custom source text and images an ordinary baseline", () => {
+	test("charges normalized custom text regardless of attribution and display", () => {
 		const tokenizer = new Tokenizer();
 		const text = "A durable custom source.";
 		const scalar = createCustomMessage("notice", text, false, undefined, "2026-09-07", "agent");
-		const illustrated = createCustomMessage(
-			"manual",
-			[
-				{ type: "text", text },
-				{ type: "image", data: "cG5n", mimeType: "image/png", detail: "high" },
-			],
-			true,
-			undefined,
-			"2026-09-07",
-			"user",
+		expect(tokenizer.countMessage(scalar)).toBe(tokenizer.countTokens(text));
+		expect(tokenizer.countMessage(scalar, { excludeEncryptedReasoning: true })).toBe(tokenizer.countTokens(text));
+	});
+
+	test("distinguishes authored images from raster frames in one compaction summary", () => {
+		const original: ImageContent = { type: "image", data: "cG5n", mimeType: "image/png" };
+		const frame: ImageContent = { ...original };
+		bindMessageSource({ role: "user", content: [original], timestamp: 0 }, "source-user", 0);
+		const mixed: AgentMessage = {
+			role: "compactionSummary",
+			summary: "",
+			blocks: [original, frame],
+			tokensBefore: 0,
+			timestamp: 0,
+		};
+		const tokenizer = new Tokenizer();
+		expect(tokenizer.countMessage(mixed)).toBe(IMAGE_TOKEN_ESTIMATE + snapcompact.FRAME_TOKEN_ESTIMATE);
+		expect(tokenizer.countMessage(mixed, { excludeEncryptedReasoning: true })).toBe(
+			IMAGE_TOKEN_ESTIMATE + snapcompact.FRAME_TOKEN_ESTIMATE,
 		);
-		const textTokens = tokenizer.countTokens(text);
-		expect(tokenizer.countMessage(scalar)).toBe(textTokens);
-		expect(tokenizer.countMessage(illustrated)).toBe(textTokens + 1200);
-		expect(tokenizer.countMessage(illustrated, { excludeEncryptedReasoning: true })).toBe(textTokens + 1200);
-		expect(tokenizer.countMessages([scalar, illustrated])).toBe(2 * textTokens + 1200);
 	});
 
 	test("counts each original image once across user, developer, tool, custom and hook content", () => {

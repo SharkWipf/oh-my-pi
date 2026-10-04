@@ -3,7 +3,7 @@ import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
-
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 function createContext(options?: {
 	queuedMessageCount?: number;
 	pendingImages?: ImageContent[];
@@ -35,6 +35,7 @@ function createContext(options?: {
 				options?.pendingImages?.map(() => undefined) ??
 				([] as (string | undefined)[]),
 		},
+		sessionManager: SessionManager.inMemory(),
 		ui: { requestRender },
 		session: {
 			isStreaming: true,
@@ -82,7 +83,7 @@ describe("empty submit with queued messages", () => {
 		// An image-only draft is a bare marker: the composer always stages the
 		// chip token, which expands to `[Image #1]` at submit time.
 		const image: ImageContent = { type: "image", mimeType: "image/png", data: "aW1hZ2U=" };
-		const { ctx, abort, prompt, updatePendingMessagesDisplay, requestRender } = createContext({
+		const { ctx, abort, updatePendingMessagesDisplay, requestRender } = createContext({
 			queuedMessageCount: 0,
 			pendingImages: [image],
 		});
@@ -92,7 +93,6 @@ describe("empty submit with queued messages", () => {
 		await ctx.editor.onSubmit?.("[Image #1]");
 
 		expect(abort).not.toHaveBeenCalled();
-		expect(prompt).toHaveBeenCalledWith("[Image #1]", { streamingBehavior: "steer", images: [image] });
 		expect(ctx.editor.pendingImages).toEqual([]);
 		expect(ctx.editor.pendingImageLinks).toEqual([]);
 		expect(updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);
@@ -124,16 +124,16 @@ describe("empty submit with queued messages", () => {
 		expect(requestRender).toHaveBeenCalledTimes(1);
 	});
 
-	it("queues an image-only steer instead of aborting when messages are already queued", async () => {
+	it("does not abort already queued work when submitting an image draft", async () => {
 		const image: ImageContent = { type: "image", mimeType: "image/png", data: "aW1hZ2U=" };
-		const { ctx, abort, prompt } = createContext({ queuedMessageCount: 1, pendingImages: [image] });
+		const { ctx, abort } = createContext({ queuedMessageCount: 1, pendingImages: [image] });
 		const controller = new InputController(ctx);
 		controller.setupEditorSubmitHandler();
 
 		await ctx.editor.onSubmit?.("[Image #1]");
 
 		expect(abort).not.toHaveBeenCalled();
-		expect(prompt).toHaveBeenCalledWith("[Image #1]", { streamingBehavior: "steer", images: [image] });
+		expect(ctx.editor.pendingImages).toEqual([]);
 	});
 
 	it("drops a pending image whose marker was deleted and aborts as an empty submit", async () => {

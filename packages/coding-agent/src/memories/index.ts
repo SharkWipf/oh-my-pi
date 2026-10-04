@@ -411,6 +411,7 @@ async function runPhase1(options: MemoryStartupOptions): Promise<void> {
 		await runWithConcurrency(claims, config.stage1Concurrency, async claim => {
 			if (!isMemoryStartupActive(options)) return;
 			const result = await runStage1Job({
+				signal: options.signal,
 				claim,
 				model: phase1Model,
 				apiKey: modelRegistry.resolver(phase1Model, session.sessionId),
@@ -507,10 +508,10 @@ async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 		const outputs = listStage1OutputsForGlobal(db, config.maxRawMemoriesForGlobal, cwd);
 		const newWatermark = computeCompletionWatermark(claim.inputWatermark, outputs);
 
-		await syncPhase2Artifacts(memoryRoot, outputs);
+		await syncPhase2Artifacts(memoryRoot, outputs, options.signal);
 		if (!isMemoryStartupActive(options)) return;
 		if (outputs.length === 0) {
-			await cleanupConsolidatedArtifacts(memoryRoot);
+			await cleanupConsolidatedArtifacts(memoryRoot, options.signal);
 			if (!isMemoryStartupActive(options)) return;
 			const marked = markGlobalPhase2Succeeded(db, {
 				ownershipToken: claim.ownershipToken,
@@ -574,6 +575,7 @@ async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 		try {
 			if (!isMemoryStartupActive(options)) return;
 			const consolidated = await runConsolidationModel({
+				signal: options.signal,
 				memoryRoot,
 				model: phase2Model,
 				apiKey: modelRegistry.resolver(phase2Model, session.sessionId),
@@ -581,7 +583,7 @@ async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 				metadata: session.agent?.metadataForProvider(phase2Model.provider),
 			});
 			if (!isMemoryStartupActive(options)) return;
-			await applyConsolidation(memoryRoot, consolidated);
+			await applyConsolidation(memoryRoot, consolidated, options.signal);
 			if (!isMemoryStartupActive(options)) return;
 			if (heartbeatLostOwnership) {
 				throw new Error("Phase2 lease ownership lost before completion");
@@ -750,6 +752,7 @@ function extractPersistableMessages(payload: string): AgentMessage[] {
 }
 
 async function runStage1Job(options: {
+	signal: AbortSignal;
 	claim: Stage1Claim;
 	model: Model;
 	apiKey: ApiKey;
@@ -791,6 +794,7 @@ async function runStage1Job(options: {
 					},
 					{
 						apiKey,
+						signal: options.signal,
 						sessionId: options.sessionId,
 						metadata: options.metadata,
 						maxTokens: Math.max(1024, Math.min(4096, Math.floor(modelMaxTokens * 0.2))),
@@ -837,7 +841,7 @@ async function runStage1Job(options: {
 	}
 }
 
-async function syncPhase2Artifacts(memoryRoot: string, outputs: Stage1OutputRow[]): Promise<void> {
+async function syncPhase2Artifacts(memoryRoot: string, outputs: Stage1OutputRow[], signal: AbortSignal): Promise<void> {
 	const summariesDir = path.join(memoryRoot, "rollout_summaries");
 	await fs.mkdir(summariesDir, { recursive: true });
 
@@ -849,6 +853,7 @@ async function syncPhase2Artifacts(memoryRoot: string, outputs: Stage1OutputRow[
 		const body = [`thread_id: ${row.threadId}`, `updated_at: ${row.sourceUpdatedAt}`, "", row.rolloutSummary].join(
 			"\n",
 		);
+		signal.throwIfAborted();
 		await Bun.write(path.join(summariesDir, filename), `${body.trim()}\n`);
 	}
 
@@ -856,17 +861,20 @@ async function syncPhase2Artifacts(memoryRoot: string, outputs: Stage1OutputRow[
 	for (const file of currentFiles) {
 		if (!file.endsWith(".md")) continue;
 		if (keepFiles.has(file)) continue;
+		signal.throwIfAborted();
 		await fs.rm(path.join(summariesDir, file), { force: true });
 	}
 
 	const rawBody = buildRawMemoriesMarkdown(outputs);
+	signal.throwIfAborted();
 	await Bun.write(path.join(memoryRoot, "raw_memories.md"), rawBody);
 }
 
-async function cleanupConsolidatedArtifacts(memoryRoot: string): Promise<void> {
-	await fs.rm(path.join(memoryRoot, "MEMORY.md"), { force: true });
-	await fs.rm(path.join(memoryRoot, "memory_summary.md"), { force: true });
-	await fs.rm(path.join(memoryRoot, "skills"), { recursive: true, force: true });
+async function cleanupConsolidatedArtifacts(memoryRoot: string, signal: AbortSignal): Promise<void> {
+	for (const name of ["MEMORY.md", "memory_summary.md", "skills"]) {
+		signal.throwIfAborted();
+		await fs.rm(path.join(memoryRoot, name), { recursive: true, force: true });
+	}
 }
 
 function buildRawMemoriesMarkdown(outputs: Stage1OutputRow[]): string {
@@ -900,6 +908,7 @@ async function readRolloutSummaries(memoryRoot: string): Promise<string> {
 }
 
 async function runConsolidationModel(options: {
+	signal: AbortSignal;
 	memoryRoot: string;
 	model: Model;
 	apiKey: ApiKey;
@@ -934,6 +943,7 @@ async function runConsolidationModel(options: {
 				},
 				{
 					apiKey,
+					signal: options.signal,
 					sessionId: options.sessionId,
 					metadata: options.metadata,
 					maxTokens: 8192,
@@ -999,15 +1009,20 @@ async function applyConsolidation(
 			examples: ConsolidationSkillFileSchema[];
 		}>;
 	},
+	signal: AbortSignal,
 ): Promise<void> {
+	signal.throwIfAborted();
 	await Bun.write(path.join(memoryRoot, "MEMORY.md"), `${consolidated.memoryMd.trim()}\n`);
+	signal.throwIfAborted();
 	await Bun.write(path.join(memoryRoot, "memory_summary.md"), `${consolidated.memorySummary.trim()}\n`);
 	const skillsDir = path.join(memoryRoot, "skills");
+	signal.throwIfAborted();
 	await fs.mkdir(skillsDir, { recursive: true });
 	const keep = new Set<string>();
 	for (const skill of consolidated.skills) {
 		const dir = path.join(skillsDir, skill.name);
 		keep.add(skill.name);
+		signal.throwIfAborted();
 		await fs.mkdir(dir, { recursive: true });
 		const files = new Map<string, string>();
 		files.set("SKILL.md", `${skill.content.trim()}\n`);
@@ -1022,6 +1037,7 @@ async function applyConsolidation(
 		}
 
 		for (const [relativePath, content] of [...files.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+			signal.throwIfAborted();
 			await Bun.write(path.join(dir, ...relativePath.split("/")), content);
 		}
 
@@ -1029,14 +1045,16 @@ async function applyConsolidation(
 		const existingFiles = await listRelativeFiles(dir);
 		for (const relativePath of existingFiles) {
 			if (keepFiles.has(relativePath)) continue;
+			signal.throwIfAborted();
 			await fs.rm(path.join(dir, ...relativePath.split("/")), { force: true });
 		}
-		await pruneEmptyDirectories(dir);
+		await pruneEmptyDirectories(dir, signal);
 	}
 	const dirs = await fs.readdir(skillsDir, { withFileTypes: true }).catch(() => []);
 	for (const dirent of dirs) {
 		if (!dirent.isDirectory()) continue;
 		if (keep.has(dirent.name)) continue;
+		signal.throwIfAborted();
 		await fs.rm(path.join(skillsDir, dirent.name), { recursive: true, force: true });
 	}
 }
@@ -1055,14 +1073,15 @@ async function listRelativeFiles(rootDir: string, prefix = ""): Promise<string[]
 	return files;
 }
 
-async function pruneEmptyDirectories(rootDir: string): Promise<void> {
+async function pruneEmptyDirectories(rootDir: string, signal: AbortSignal): Promise<void> {
 	const entries = await fs.readdir(rootDir, { withFileTypes: true }).catch(() => []);
 	for (const entry of entries) {
 		if (!entry.isDirectory()) continue;
 		const child = path.join(rootDir, entry.name);
-		await pruneEmptyDirectories(child);
+		await pruneEmptyDirectories(child, signal);
 		const childEntries = await fs.readdir(child).catch(() => []);
 		if (childEntries.length === 0) {
+			signal.throwIfAborted();
 			await fs.rm(child, { recursive: true, force: true });
 		}
 	}
