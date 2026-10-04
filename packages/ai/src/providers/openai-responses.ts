@@ -772,6 +772,7 @@ const streamOpenAIResponsesOnce = (
 			stream.push({ type: "start", partial: output });
 
 			const nativeOutputItems: Array<Record<string, unknown>> = [];
+			const contentBlocks: Array<{ itemIndex: number; contentIndex: number }> = [];
 			let transientStreamRetryAttempt = 0;
 			while (true) {
 				let sawReplayUnsafeOutput = false;
@@ -783,6 +784,7 @@ const streamOpenAIResponsesOnce = (
 					attemptStream.queue.length = 0;
 				};
 				nativeOutputItems.length = 0;
+				contentBlocks.length = 0;
 				const timedOpenaiStream = iterateWithIdleTimeout(openaiStream, {
 					idleTimeoutMs,
 					firstItemTimeoutMs: firstEventTimeoutMs,
@@ -812,9 +814,11 @@ const streamOpenAIResponsesOnce = (
 						onFirstToken: () => {
 							if (!firstTokenTime) firstTokenTime = performance.now();
 						},
-						onOutputItemDone: item => {
+						onOutputItemDone: (item, contentIndex) => {
 							// `processResponsesStream` hands over a private clone already; no
 							// second deep copy needed (reasoning items carry multi-KB blobs).
+							if (contentIndex !== undefined)
+								contentBlocks.push({ itemIndex: nativeOutputItems.length, contentIndex });
 							nativeOutputItems.push(item as unknown as Record<string, unknown>);
 						},
 						onCompleted: () => {
@@ -891,7 +895,12 @@ const streamOpenAIResponsesOnce = (
 				}
 			}
 
-			output.providerPayload = createOpenAIResponsesHistoryPayload(model.provider, nativeOutputItems);
+			output.providerPayload = createOpenAIResponsesHistoryPayload(
+				model.provider,
+				nativeOutputItems,
+				true,
+				contentBlocks,
+			);
 			const replayableResponseItems = sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(
 				structuredCloneJSON(nativeOutputItems),
 			);

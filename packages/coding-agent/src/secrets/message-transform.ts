@@ -2,12 +2,23 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type {
 	AnthropicCompactionPayload,
 	AssistantMessage,
+	ComputerToolCallMetadata,
+	ComputerToolResultMetadata,
 	Context,
 	ImageContent,
 	Message,
 	ProviderPayload,
 	TextContent,
 } from "@oh-my-pi/pi-ai";
+import {
+	combineContentSourceOrigins,
+	exportItemOrigins,
+	getSourceOrigin,
+	importItemOrigins,
+	setSourceOrigin,
+	transferTransformedSourceOrigin,
+	validateNativeItemOrigins,
+} from "@oh-my-pi/pi-ai/utils/source-origin";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { SessionContext } from "../session/session-context";
 import type { JsonValue, SecretObfuscator } from "./obfuscator";
@@ -42,13 +53,13 @@ export function deobfuscateAgentMessages(obfuscator: SecretObfuscator, messages:
 				const content = deobfuscateAssistantContent(obfuscator, message.content);
 				if (content === message.content) return message;
 				changed = true;
-				return { ...message, content };
+				return setSourceOrigin({ ...message, content }, combineContentSourceOrigins(content));
 			}
 			case "branchSummary": {
 				const summary = deob(message.summary);
 				if (summary === message.summary) return message;
 				changed = true;
-				return { ...message, summary };
+				return transferTransformedSourceOrigin(message, { ...message, summary });
 			}
 			case "compactionSummary": {
 				const summary = deob(message.summary);
@@ -58,7 +69,7 @@ export function deobfuscateAgentMessages(obfuscator: SecretObfuscator, messages:
 					return message;
 				}
 				changed = true;
-				return { ...message, summary, shortSummary, blocks };
+				return transferTransformedSourceOrigin(message, { ...message, summary, shortSummary, blocks });
 			}
 			default:
 				return message;
@@ -84,7 +95,7 @@ export function deobfuscateAssistantContent(
 			const text = deob(block.text);
 			if (text === block.text) return block;
 			changed = true;
-			return { ...block, text };
+			return transferTransformedSourceOrigin(block, { ...block, text });
 		}
 
 		if (block.type === "toolCall") {
@@ -93,7 +104,7 @@ export function deobfuscateAssistantContent(
 			const rawBlock = block.rawBlock === undefined ? undefined : deob(block.rawBlock);
 			if (args === block.arguments && intent === block.intent && rawBlock === block.rawBlock) return block;
 			changed = true;
-			return { ...block, arguments: args, intent, rawBlock };
+			return transferTransformedSourceOrigin(block, { ...block, arguments: args, intent, rawBlock });
 		}
 		return block;
 	});
@@ -143,7 +154,7 @@ function mapNativeField(
 	transform: (value: unknown) => unknown,
 ): Record<string, unknown> {
 	const next = transform(item[key]);
-	return next === item[key] ? item : { ...item, [key]: next };
+	return next === item[key] ? item : transferTransformedSourceOrigin(item, { ...item, [key]: next });
 }
 
 /** Schema maps name properties/definitions; their keys are identifiers, not annotations. */
@@ -460,11 +471,23 @@ export function obfuscateNativeReplay<
 	const remote = message.preserveData?.openaiRemoteCompaction;
 	if (payload?.type !== "openaiResponsesHistory" && !isRecord(remote)) return message;
 	const transform = (text: string): string => obfuscator.obfuscate(text, sharedRegexSecretValues);
-	const mapItem = (item: unknown): unknown => mapNativeReplayItem(item, transform);
+	const mapItem = (item: unknown): unknown => {
+		const mapped = mapNativeReplayItem(item, transform);
+		return mapped !== item && isRecord(item) && isRecord(mapped)
+			? transferTransformedSourceOrigin(item, mapped)
+			: mapped;
+	};
+	if (payload?.type === "openaiResponsesHistory") {
+		importItemOrigins(payload.items, validateNativeItemOrigins(payload.origins));
+	}
 	const items = payload?.type === "openaiResponsesHistory" ? mapNativeArray(payload.items, mapItem) : undefined;
 	const providerPayload =
 		payload?.type === "openaiResponsesHistory" && items !== payload.items
-			? { ...payload, items: items as Array<Record<string, unknown>> }
+			? {
+					...payload,
+					items: items as Array<Record<string, unknown>>,
+					origins: exportItemOrigins(items as Array<Record<string, unknown>>),
+				}
 			: payload;
 	let preserveData = message.preserveData;
 	if (isRecord(remote)) {
@@ -486,11 +509,11 @@ export function obfuscateNativeReplay<
 	}
 	return providerPayload === payload && preserveData === message.preserveData
 		? message
-		: {
+		: transferTransformedSourceOrigin(message, {
 				...message,
 				...(providerPayload !== payload ? { providerPayload } : {}),
 				...(preserveData !== message.preserveData ? { preserveData } : {}),
-			};
+			});
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -511,7 +534,7 @@ function obfuscateTextBlocks(
 		const text = obfuscator.obfuscate(block.text, sharedRegexSecretValues);
 		if (text === block.text) return block;
 		changed = true;
-		return { ...block, text };
+		return transferTransformedSourceOrigin(block, { ...block, text });
 	});
 	return changed ? result : content;
 }
@@ -527,7 +550,7 @@ function deobfuscateTextBlocks(
 		const text = obfuscator.deobfuscate(block.text);
 		if (text === block.text) return block;
 		changed = true;
-		return { ...block, text };
+		return transferTransformedSourceOrigin(block, { ...block, text });
 	});
 	return changed ? result : content;
 }
@@ -553,13 +576,13 @@ function obfuscateAssistantContentForReplay(
 			const text = obfuscate(block.text);
 			if (text === block.text) return block;
 			changed = true;
-			return { ...block, text };
+			return transferTransformedSourceOrigin(block, { ...block, text });
 		}
 		if (block.type === "thinking") {
 			const thinking = obfuscate(block.thinking);
 			if (thinking === block.thinking) return block;
 			changed = true;
-			return { ...block, thinking, thinkingSignature: undefined };
+			return transferTransformedSourceOrigin(block, { ...block, thinking, thinkingSignature: undefined });
 		}
 		if (block.type === "toolCall") {
 			const args = mapJsonStrings(block.arguments as JsonValue, obfuscate) as Record<string, unknown>;
@@ -567,11 +590,119 @@ function obfuscateAssistantContentForReplay(
 			const rawBlock = block.rawBlock === undefined ? undefined : obfuscate(block.rawBlock);
 			if (args === block.arguments && intent === block.intent && rawBlock === block.rawBlock) return block;
 			changed = true;
-			return { ...block, arguments: args, intent, rawBlock };
+			return transferTransformedSourceOrigin(block, { ...block, arguments: args, intent, rawBlock });
 		}
 		return block;
 	});
 	return changed ? result : content;
+}
+
+/** Copy only arrays whose explicitly selected visible text changes. */
+function mapChanged<T>(items: T[], map: (item: T) => T): T[] {
+	let result: T[] | undefined;
+	for (let index = 0; index < items.length; index++) {
+		const item = items[index]!;
+		const next = map(item);
+		if (next !== item && !result) result = items.slice(0, index);
+		result?.push(next);
+	}
+	return result ?? items;
+}
+
+function mapComputerMetadata<T extends ComputerToolCallMetadata | ComputerToolResultMetadata>(
+	metadata: T,
+	map: (text: string) => string,
+): T {
+	if ("actions" in metadata) {
+		const actions = mapChanged(metadata.actions, action => {
+			if (action.type !== "type") return action;
+			const text = map(action.text);
+			return text === action.text ? action : transferTransformedSourceOrigin(action, { ...action, text });
+		});
+		const pendingSafetyChecks = mapChanged(metadata.pendingSafetyChecks, check => {
+			if (typeof check.message !== "string") return check;
+			const message = map(check.message);
+			return message === check.message ? check : transferTransformedSourceOrigin(check, { ...check, message });
+		});
+		return actions === metadata.actions && pendingSafetyChecks === metadata.pendingSafetyChecks
+			? metadata
+			: { ...metadata, actions, pendingSafetyChecks };
+	}
+	const acknowledgedSafetyChecks = mapChanged(metadata.acknowledgedSafetyChecks, check => {
+		if (typeof check.message !== "string") return check;
+		const message = map(check.message);
+		return message === check.message ? check : transferTransformedSourceOrigin(check, { ...check, message });
+	});
+	return acknowledgedSafetyChecks === metadata.acknowledgedSafetyChecks
+		? metadata
+		: { ...metadata, acknowledgedSafetyChecks };
+}
+
+function mapAssistantMetadata(
+	block: AssistantMessage["content"][number],
+	map: (text: string) => string,
+): AssistantMessage["content"][number] {
+	if (block.type === "toolCall" && block.providerMetadata?.type === "computer") {
+		const providerMetadata = mapComputerMetadata(block.providerMetadata, map);
+		return providerMetadata === block.providerMetadata
+			? block
+			: transferTransformedSourceOrigin(block, { ...block, providerMetadata });
+	}
+	if (block.type !== "anthropicServerTool") return block;
+	const server = block.block;
+	if (server.type === "server_tool_use") {
+		// Server-tool input is model-authored arguments, not arbitrary result metadata.
+		const input = mapJsonStrings(server.input as JsonValue, map) as typeof server.input;
+		return input === server.input
+			? block
+			: transferTransformedSourceOrigin(block, { ...block, block: { ...server, input } });
+	}
+	if (server.type !== "web_search_tool_result" || !Array.isArray(server.content)) return block;
+	const content = mapChanged(server.content, result => {
+		if (!isRecord(result) || result.type !== "web_search_result") return result;
+		const title = typeof result.title === "string" ? map(result.title) : result.title;
+		const url = typeof result.url === "string" ? map(result.url) : result.url;
+		return title === result.title && url === result.url ? result : { ...result, title, url };
+	});
+	return content === server.content
+		? block
+		: transferTransformedSourceOrigin(block, { ...block, block: { ...server, content } });
+}
+
+/** Only provider-visible typed fields; identifiers, opaque replay state and image bytes stay untouched. */
+function mapVisibleMetadata(message: Message, map: (text: string) => string): Message {
+	if (message.role === "assistant") {
+		const content = mapChanged(message.content, block => mapAssistantMetadata(block, map));
+		return content === message.content ? message : transferTransformedSourceOrigin(message, { ...message, content });
+	}
+	if (message.role !== "toolResult") return message;
+	const providerMetadata =
+		message.providerMetadata?.type === "computer"
+			? mapComputerMetadata(message.providerMetadata, map)
+			: message.providerMetadata;
+	let details = message.details;
+	// The historical tool-result projection emits this visible explanation; other unknown details are not traversed.
+	if (isRecord(details) && typeof details.explanation === "string") {
+		const explanation = map(details.explanation);
+		if (explanation !== details.explanation) details = { ...details, explanation };
+	}
+	if (providerMetadata === message.providerMetadata && details === message.details) return message;
+	const result = transferTransformedSourceOrigin(message, { ...message, providerMetadata, details });
+	const original = getSourceOrigin(message);
+	const transformed = getSourceOrigin(result);
+	if (
+		original?.kind === "source" &&
+		transformed?.kind === "source" &&
+		original.parts.some(part => part.representation === "original-image")
+	) {
+		setSourceOrigin(result, {
+			kind: "source",
+			parts: transformed.parts.map((part, index) =>
+				original.parts[index]!.representation === "original-image" ? original.parts[index]! : part,
+			),
+		});
+	}
+	return result;
 }
 
 /**
@@ -601,6 +732,10 @@ function collectMessageRegexSecretValues(obfuscator: SecretObfuscator, messages:
 		}
 	};
 	for (const message of messages) {
+		mapVisibleMetadata(message, text => {
+			addText(text);
+			return text;
+		});
 		// File metadata replayed beside a native compaction block carries the
 		// same harness paths as the summary text, so its regex-secret values
 		// join the shared set.
@@ -652,15 +787,24 @@ function collectMessageRegexSecretValues(obfuscator: SecretObfuscator, messages:
 export function obfuscateMessages(obfuscator: SecretObfuscator, messages: Message[]): Message[] {
 	if (!obfuscator.hasSecrets()) return messages;
 	const sharedRegexSecretValues = collectMessageRegexSecretValues(obfuscator, messages);
+	const obfuscateMetadata = (text: string): string =>
+		obfuscator.stripUnsafeFriendlyPlaceholderPrefixes(
+			obfuscator.obfuscate(text, sharedRegexSecretValues),
+			sharedRegexSecretValues,
+		);
 	let changed = false;
 	const result = messages.map((message): Message => {
-		let current = message;
+		let current = mapVisibleMetadata(message, obfuscateMetadata);
+		if (current !== message) changed = true;
 		const compactionPayload = anthropicCompactionPayload(current);
 		const compactionFiles = anthropicCompactionFilesText(current);
 		if (compactionPayload !== undefined && compactionFiles !== undefined) {
 			const filesText = obfuscator.obfuscate(compactionFiles, sharedRegexSecretValues);
 			if (filesText !== compactionFiles) {
-				current = { ...current, providerPayload: { ...compactionPayload, filesText } } as Message;
+				current = transferTransformedSourceOrigin(current, {
+					...current,
+					providerPayload: { ...compactionPayload, filesText },
+				} as Message);
 				changed = true;
 			}
 		}
@@ -680,19 +824,19 @@ export function obfuscateMessages(obfuscator: SecretObfuscator, messages: Messag
 			const content = obfuscateAssistantContentForReplay(obfuscator, current.content, sharedRegexSecretValues);
 			if (content === current.content) return current;
 			changed = true;
-			return { ...current, content };
+			return setSourceOrigin({ ...current, content }, combineContentSourceOrigins(content));
 		}
 		const target = current as UserFacingMessage;
 		if (typeof target.content === "string") {
 			const content = obfuscator.obfuscate(target.content, sharedRegexSecretValues);
 			if (content === target.content) return current;
 			changed = true;
-			return { ...target, content } as Message;
+			return transferTransformedSourceOrigin(current, { ...target, content } as Message);
 		}
 		const content = obfuscateTextBlocks(obfuscator, target.content, sharedRegexSecretValues);
 		if (content === target.content) return current;
 		changed = true;
-		return { ...target, content } as Message;
+		return setSourceOrigin({ ...target, content } as Message, combineContentSourceOrigins(content));
 	});
 	return changed ? result : messages;
 }

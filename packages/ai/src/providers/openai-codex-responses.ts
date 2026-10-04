@@ -795,6 +795,7 @@ class CodexStreamRuntime {
 	currentItem: CodexEventItem | null = null;
 	currentBlock: CodexOutputBlock | null = null;
 	nativeOutputItems: Array<Record<string, unknown>> = [];
+	nativeOutputContentIndices = new Map<Record<string, unknown>, number>();
 	nativeOutputEntries: CodexOpenItem[] = [];
 	/** Sequential-cutoff summary sections/emitted text, global to the response (indices span reasoning items). */
 	cutoffSummaries: SequentialCutoffSummaryState = createSequentialCutoffSummaryState();
@@ -832,9 +833,20 @@ class CodexStreamRuntime {
 		this.currentItem = null;
 		this.currentBlock = null;
 		this.nativeOutputItems.length = 0;
+		this.nativeOutputContentIndices.clear();
 		this.nativeOutputEntries.length = 0;
 		this.pendingSummaryDeltas.clear();
 		this.cutoffSummaries = createSequentialCutoffSummaryState();
+	}
+
+	/** Resolve correspondence only after native entries have their final added-order positions. */
+	finalizeNativeContentBlocks(): Array<{ itemIndex: number; contentIndex: number }> {
+		const contentBlocks: Array<{ itemIndex: number; contentIndex: number }> = [];
+		for (let itemIndex = 0; itemIndex < this.nativeOutputItems.length; itemIndex++) {
+			const contentIndex = this.nativeOutputContentIndices.get(this.nativeOutputItems[itemIndex]!);
+			if (contentIndex !== undefined) contentBlocks.push({ itemIndex, contentIndex });
+		}
+		return contentBlocks;
 	}
 
 	finalizeNativeOutputItems(): Array<Record<string, unknown>> {
@@ -2386,7 +2398,10 @@ class CodexStreamProcessor {
 		const contentIndex = entry?.contentIndex ?? output.content.length - 1;
 
 		if (item.type === "image_generation_call" && item.result) {
-			appendResponsesImageResult(output, stream, item.result);
+			runtime.nativeOutputContentIndices.set(
+				nativeOutputItem,
+				appendResponsesImageResult(output, stream, item.result),
+			);
 			runtime.closeOpenItem(entry);
 			return;
 		}
@@ -2405,6 +2420,7 @@ class CodexStreamProcessor {
 				content: block.thinking,
 				partial: output,
 			});
+			runtime.nativeOutputContentIndices.set(nativeOutputItem, contentIndex);
 			runtime.closeOpenItem(entry);
 			return;
 		}
@@ -2419,6 +2435,7 @@ class CodexStreamProcessor {
 				content: block.text,
 				partial: output,
 			});
+			runtime.nativeOutputContentIndices.set(nativeOutputItem, contentIndex);
 			runtime.closeOpenItem(entry);
 			return;
 		}
@@ -2438,6 +2455,7 @@ class CodexStreamProcessor {
 			}
 			// Detach so a late/duplicate arguments.delta cannot append to the
 			// finished block or trip the whitespace-loop guard against it.
+			if (block?.type === "toolCall") runtime.nativeOutputContentIndices.set(nativeOutputItem, contentIndex);
 			runtime.closeOpenItem(entry);
 			runtime.canSafelyReplayWebsocketOverSse = false;
 			stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
@@ -2461,6 +2479,7 @@ class CodexStreamProcessor {
 				output.content.push(toolCall);
 				resolvedContentIndex = output.content.length - 1;
 			}
+			runtime.nativeOutputContentIndices.set(nativeOutputItem, resolvedContentIndex);
 			runtime.closeOpenItem(entry);
 			runtime.canSafelyReplayWebsocketOverSse = false;
 			stream.push({ type: "toolcall_end", contentIndex: resolvedContentIndex, toolCall, partial: output });
@@ -2481,6 +2500,7 @@ class CodexStreamProcessor {
 				block.arguments = { input: rawInput };
 				clearStreamingPartialJson(block);
 			}
+			if (block?.type === "toolCall") runtime.nativeOutputContentIndices.set(nativeOutputItem, contentIndex);
 			runtime.closeOpenItem(entry);
 			runtime.canSafelyReplayWebsocketOverSse = false;
 			stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
@@ -2945,6 +2965,8 @@ class CodexStreamProcessor {
 		output.providerPayload = createOpenAIResponsesHistoryPayload(
 			this.model.provider,
 			this.runtime.finalizeNativeOutputItems(),
+			true,
+			this.runtime.finalizeNativeContentBlocks(),
 		);
 		output.duration = performance.now() - this.startTime;
 		if (completion.firstTokenTime) {

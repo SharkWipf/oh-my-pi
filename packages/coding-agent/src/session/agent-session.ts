@@ -389,6 +389,8 @@ import {
 import { cleanupEmptyMoveSession, copySessionArtifacts, type SessionManager } from "./session-manager";
 import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { buildSessionMetadata } from "./session-metadata";
+import { SessionMessageClassifier, type MessageClassificationListener } from "./session-message-classifier";
+import { readPreservedUserMessageClassificationMasks } from "./preserved-messages";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
 import { SessionTools, type SessionToolsHost } from "./session-tools";
@@ -669,6 +671,7 @@ export class AgentSession {
 	#branchSummaryAbortController: AbortController | undefined = undefined;
 
 	readonly #handoff: SessionHandoff;
+	readonly #messageClassifier: SessionMessageClassifier;
 
 	// Retry state
 	readonly #recovery: TurnRecovery;
@@ -862,6 +865,7 @@ export class AgentSession {
 			this.#sessionTransitionSettled = undefined;
 			this.#resolveSessionTransition = undefined;
 			resolve?.();
+			if (this.#unsubscribeAgent) this.#messageClassifier.resume();
 		},
 	};
 	#promptSequence = 0;
@@ -931,6 +935,7 @@ export class AgentSession {
 		if (onSettled) this.#inFlightSettledCallbacks.push(onSettled);
 		this.#promptInFlightCount = Math.max(0, this.#promptInFlightCount - 1);
 		if (this.#promptInFlightCount !== 0) return;
+		this.#messageClassifier.drainLive();
 		this.yieldQueue.requestIdleFlush();
 		this.#releasePowerAssertion();
 		this.#flushPendingAgentEnd();
@@ -1215,6 +1220,7 @@ export class AgentSession {
 
 	#resetInFlight(): void {
 		this.#promptInFlightCount = 0;
+		this.#messageClassifier.drainLive();
 		this.yieldQueue.requestIdleFlush();
 		this.#releasePowerAssertion();
 		this.#flushPendingAgentEnd();
@@ -2028,6 +2034,26 @@ export class AgentSession {
 			effectiveServiceTier: model => this.#models.effectiveServiceTier(model),
 		};
 		this.#handoff = new SessionHandoff(handoffHost);
+		this.#messageClassifier = new SessionMessageClassifier({
+			sessionManager: this.sessionManager,
+			settings: this.settings,
+			modelRegistry: this.#modelRegistry,
+			generation: () => this.#sessionGeneration,
+			isDisposed: () => this.#isDisposed,
+			isStreaming: () => this.isStreaming,
+			sideStreamFn: this.#sideStreamFn,
+			prepareOptions: (options, model) =>
+				this.prepareSimpleStreamOptions(
+					{
+						...options,
+						serviceTier: this.#models.effectiveServiceTier(model),
+						metadata: buildSessionMetadata(options.sessionId!, model.provider, this.#modelRegistry.authStorage),
+					},
+					model.provider,
+				),
+			obfuscate: context => obfuscateProviderContext(this.#obfuscator, context),
+			readMasks: (entries, isCurrent) => readPreservedUserMessageClassificationMasks(entries, { isCurrent }),
+		});
 
 		this.#rehydrateCheckpointRewindState();
 
@@ -2893,6 +2919,9 @@ export class AgentSession {
 		if (wasFresh && cache && key) {
 			cache.keys.add(key);
 			cache.anchor = this.#persistedMessageKeysAnchor();
+		}
+		if (message.role === "user" && message.synthetic !== true && message.attribution !== "agent") {
+			this.#messageClassifier.enqueueLive(entryId);
 		}
 		return entryId;
 	}
@@ -4527,6 +4556,7 @@ export class AgentSession {
 
 	#beginSessionTransition(): Disposable {
 		if (this.#sessionTransitionDepth++ === 0) {
+			this.#messageClassifier.pause();
 			const settled = Promise.withResolvers<void>();
 			this.#sessionTransitionSettled = settled.promise;
 			this.#resolveSessionTransition = settled.resolve;
@@ -4567,6 +4597,7 @@ export class AgentSession {
 	 * Used internally during operations that need to pause event processing.
 	 */
 	#disconnectFromAgent(): void {
+		this.#messageClassifier.pause();
 		if (this.#unsubscribeAgent) {
 			this.#unsubscribeAgent();
 			this.#unsubscribeAgent = undefined;
@@ -4580,6 +4611,7 @@ export class AgentSession {
 	#reconnectToAgent(): void {
 		if (this.#unsubscribeAgent) return; // Already connected
 		this.#unsubscribeAgent = this.agent.subscribe(this.#handleAgentEvent);
+		if (!this.isSessionTransitioning) this.#messageClassifier.resume();
 	}
 
 	#activeProviderSessionId(sessionId?: string): string {
@@ -4712,6 +4744,7 @@ export class AgentSession {
 	 */
 	beginDispose(): void {
 		this.#isDisposed = true;
+		this.#messageClassifier.dispose();
 		this.#modelDiscoveryAbortController.abort();
 		this.#queuedMessageDrainBlocked = false;
 		this.#usagePreflightReadyForNextModelCall = false;
@@ -5119,6 +5152,7 @@ export class AgentSession {
 		// sibling boundary op (branchFromBtw) guards on the same predicates.
 		if (this.isStreaming || this.isBashRunning || this.isEvalRunning) return undefined;
 		const droppedCount = this.agent.state.messages.length;
+		this.#messageClassifier.interrupt("Context cleared; resume missing classifications explicitly.");
 
 		// Tear down the same per-turn runtime state that newSession() resets across
 		// a conversation boundary, so work scheduled from the pre-reset turn cannot
@@ -5189,6 +5223,32 @@ export class AgentSession {
 		await this.refreshBaseSystemPrompt();
 
 		return { droppedCount };
+	}
+
+	/** Optional side work: never awaited by ordinary submission or compaction. */
+	startMessageClassification(entryId: string): Promise<string> {
+		return this.#messageClassifier.start(entryId);
+	}
+	startMessageClassificationBackfill(workers: number): Promise<string> {
+		return this.#messageClassifier.startBackfill(workers);
+	}
+	getMessageClassificationStatus(options?: { includeRows?: boolean }) {
+		return this.#messageClassifier.getStatus(options);
+	}
+	getMessageClassificationRowStatus(entryId: string) {
+		return this.#messageClassifier.getRowStatus(entryId);
+	}
+	getMessageClassificationAvailability() {
+		return this.#messageClassifier.getAvailability();
+	}
+	subscribeMessageClassification(listener: MessageClassificationListener): () => void {
+		return this.#messageClassifier.subscribe(listener);
+	}
+	cancelMessageClassification(jobId: string): void {
+		this.#messageClassifier.cancel(jobId);
+	}
+	interruptMessageClassificationInputs(ids: readonly string[]): void {
+		this.#messageClassifier.interruptInputs(ids);
 	}
 
 	// =========================================================================

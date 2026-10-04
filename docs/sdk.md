@@ -267,6 +267,25 @@ Related APIs:
 
 `deliverAs: "aside"` (both APIs) delivers at the next agent step boundary without interrupting the current tool batch, instead of steering (which skips remaining tools) or waiting for the run to finish. When the session is idle both start a turn instead (in plan mode the custom message is folded into context without a turn).
 
+## User-message classification jobs
+
+Classification records eleven independent category facts; preservation settings interpret them separately. It never selects retention or delays `prompt()`, compaction, or disposal. Live scheduling requires both `compaction.keepUserMessages` and `compaction.keepUserMessagesLlm`; stored-category filtering and explicit actions remain independent. The configured classifier model defaults to `@tiny` through the established role resolver, including its configured, inherited, and built-in fast-model selection.
+Configured local-inference TINY models use the normal streaming API. Actual unavailable selections, unsupported model kinds, and failed requests remain visible; runtime failure does not trigger a classifier-specific model fallback.
+Known context windows bound auxiliary input without truncating the current message. A catalog `null` context window is unreported, not zero: the complete request is sent and the provider enforces its actual limit; image capability and count checks still apply.
+
+The model returns one JSON object containing all eleven canonical category names (`longTermRule`, `longTermGoal`, `lastingSolution`, `shortTermTask`, `shortTermContext`, `venting`, `restorationGuidance`, `preventionGuidance`, `contextFreeInstruction`, `banter`, `question`), each with a boolean value. Categories are independent and may overlap. The host validates the complete response and packs successful facts into the unchanged v1 bitmask; the model never supplies retention decisions.
+
+- `await session.getMessageClassificationAvailability()` returns `{ available, model?, reason? }` after model/credential resolution. Unavailable models launch no job.
+- `await session.startMessageClassification(sourceId)` returns a job ID and forces selected-message classification, including a rerun of valid facts. Concurrent starts for the same current source share a job; a completed, canceled, or input-invalidated attempt may be explicitly retried immediately. Existing valid facts remain active until a new valid success.
+- `await session.startMessageClassificationBackfill(workers)` returns a job ID for every missing/current-unusable real user in the captured active post-clear branch. Workers must be a positive integer; there is no fixed worker ceiling. Overlapping selected/live requests are not duplicated, do not consume owned backfill worker slots, and their outcomes are included before backfill completes. Warn users about substantial model requests, tokens, and time before launching. Presentation filters do not narrow this scope.
+- `session.getMessageClassificationStatus({ includeRows: false })` reads job counts without enumerating retained row failures; `getMessageClassificationRowStatus(sourceId)` reads one runtime row. Omitting the option includes the runtime row snapshot. Persisted category facts remain the authority after successful rows settle.
+- `session.subscribeMessageClassification((status, affectedIds) => ...)` returns an unsubscribe function. Subscription `status.rows` contains only affected row deltas, not the full row snapshot. Unsubscribing or closing a UI leaves jobs running.
+- `session.cancelMessageClassification(jobId)` cancels only that job and its in-flight/scanner work; independent live/selected work continues. Saved facts remain intact.
+
+Classification reads the current durable source message and its entry ID, not immutable V2 capture evidence. Source identities and inputs are revalidated before successful v1 facts are appended. Branch/reset/session changes interrupt stale work without appending to another branch; vetoed transitions resume the original scope. Failure is not an all-false classification. Restart never resumes requests automatically: explicitly launch missing-only backfill.
+
+Cold source capture cooperates with the event loop; backfill projects its prior-user/two-assistant neighborhood in one forward pass. Before and after each request, validation reads only the captured current and auxiliary source IDs. Ordinary later appends cannot change those preceding neighbors. The existing source-rewrite callback invalidates dependent targets when content or eligibility changes, including affected rows not yet admitted by an active backfill; those rows require explicit retry while unaffected rows continue.
+
 ## `AgentSession` lifecycle and disposal
 
 Call `await session.dispose()` when the embedder is completely done with a session. `dispose()` starts disposal itself and is idempotent: repeated or concurrent calls receive the same teardown promise, so shutdown events and owned resources are not drained twice.
