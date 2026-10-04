@@ -333,6 +333,8 @@ export interface ToolSession {
 	getToolForEvalBridge?: (name: string) => AgentTool | undefined;
 	/** Current session context for eval-bridged tool execution. */
 	getToolContext?: () => AgentToolContext | undefined;
+	/** Captures the primary prewalk cycle for one bridged tool invocation. */
+	beginPrewalkToolCall?: () => (() => void) | undefined;
 	/** Names currently authorized for invocation through the eval bridge. */
 	getEvalBridgeToolNames?: () => readonly string[];
 	/** Direct partition of the active Code Mode surface; undefined when Code Mode is inactive. */

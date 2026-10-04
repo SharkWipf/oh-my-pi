@@ -39,20 +39,23 @@ At startup, OMP resolves the target with the normal model-role and model-matchin
 
 ## Handoff trigger
 
-An armed prewalk injects a planning nudge. When the `todo` tool is active, any successful `todo` call—including the read-only `view` operation—opens the handoff gate. OMP then switches models after the first completed `edit` or `write` call.
+An armed prewalk injects a planning nudge. When the `todo` tool is active, any successful `todo` call—including the read-only `view` operation—opens the handoff gate. OMP then switches models after the first successful completed `edit` or `write` call.
 
-Calls to other tools do not trigger the handoff. A read-only `xd://` device request routed through `write`, such as LSP navigation, also does not count; only device operations classified as workspace writes or execution count.
+Calls to other tools do not trigger this first-mutation handoff, but their executions count toward the action limits below. A read-only `xd://` device request routed through `write`, such as LSP navigation, does not qualify as a mutation; only device operations classified as workspace writes or execution qualify.
 
 After each handoff, the current prewalk disarms itself. Without automatic restarts, it stays disarmed until explicitly armed again. A target already matching the model and configured thinking level needs no handoff.
 
-## Minimum and maximum messages
+## Minimum and maximum actions
 
-Under **Model → Prewalk**, **Minimum Prewalk Messages** and **Maximum Prewalk Messages** bound each planning cycle. One message means one completed assistant response, including a response with tool calls. User messages, tool results and streaming chunks do not count; failed or aborted responses do not count either.
+Under **Model → Prewalk**, **Minimum Prewalk Actions** and **Maximum Prewalk Actions** bound each planning cycle. Every successful completed assistant response counts once; every actual primary-thread tool execution counts once, including failed executions and host tools called inside JavaScript or Python Eval. An assistant response with three executed tools therefore contributes four actions. Failed or aborted assistant responses, user input, advisor activity, injections, summaries, compaction, streaming chunks and synthetic results for tools that never executed do not count. Reading retained history contributes nothing; actually reexecuting a tool whose result is missing contributes a new action without recounting its original assistant response.
 
 - The minimum defaults to **No minimum** (`0`). Before the minimum is reached, edit/write handoff triggers are ignored, not saved for later. Afterward, a new qualifying action can trigger the normal handoff.
-- The maximum defaults to **Unlimited** (`0`). A finite maximum switches to the execution model after that many responses, even without a todo list or edit/write.
-- The minimum takes precedence: with minimum `25` and maximum `10`, the earliest forced handoff is response `25`.
-- A running background Eval cell delays a maximum-forced handoff until a later completed-response boundary; this limit never switches models mid-cell.
+- The maximum defaults to **Unlimited** (`0`). A finite maximum switches to the execution model even without a todo list or edit/write.
+- Limits are evaluated at safe completed-response boundaries, after the response’s tool batch settles. A batch can exceed the maximum; the minimum sees the completed batch count.
+- The minimum takes precedence: with minimum `25` and maximum `10`, forced handoff waits for a safe boundary with at least `25` actions.
+- A running background Eval cell delays a maximum-forced handoff until a later safe boundary; this limit never switches models mid-cell.
+
+The existing persisted setting keys retain their names (`minMessages`, `maxMessages`, `prewalkMinMessages`, `prewalkMaxMessages`), but their values count actions.
 
 For example:
 
@@ -101,7 +104,7 @@ Task subagents have separate controls: agent frontmatter, `task.prewalk`, per-ag
 
 The unpinned-subagent setting defaults off. When enabled, eligible launches start on `@slow` with its configured thinking level, then hand off to the existing prewalk target or otherwise the model and thinking level the child would normally use. Explicit agent models, configured role choices, per-agent model overrides, launch overrides and extension-selected models are exempt. An unconfigured bundled `@task` default and ordinary parent-model inheritance are not overrides. Explicit per-agent prewalk off stays off; plan-mode launches do not receive this automatic fallback. An unavailable planning model is reported and skipped rather than failing the child launch.
 
-**Tasks → Subagents → Minimum/Maximum Prewalk Messages** set separate child limits. Both default to **Inherit** (`-1`), using the parent’s effective limits. An explicit minimum `0` removes the child minimum; an explicit maximum `0` makes the child maximum unlimited. These limits do not enable prewalk by themselves.
+**Tasks → Subagents → Minimum/Maximum Prewalk Actions** set separate child limits. Both default to **Inherit** (`-1`), using the parent’s effective limits. An explicit minimum `0` removes the child minimum; an explicit maximum `0` makes the child maximum unlimited. These limits do not enable prewalk by themselves.
 
 ```yaml
 task:

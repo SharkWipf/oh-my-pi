@@ -403,9 +403,9 @@ export const SETTINGS_SCHEMA = {
 		ui: {
 			tab: "model",
 			group: "Prewalk",
-			label: "Minimum Prewalk Messages",
+			label: "Minimum Prewalk Actions",
 			description:
-				"Minimum completed assistant responses per planning cycle. Ignore early handoff triggers, without saving them for later. User messages and tool results do not count. The minimum takes precedence over the maximum.",
+				"Minimum completed primary-thread actions per planning cycle: assistant responses and actual tool executions, including failed tools and tools inside Eval. User input, advisor activity, injections, summaries, compaction and synthetic tool results do not count. Early handoff triggers are discarded; minimum takes precedence over maximum.",
 			options: [{ value: "0", label: "No minimum" }, ...PREWALK_MESSAGE_OPTIONS],
 		},
 	},
@@ -415,9 +415,9 @@ export const SETTINGS_SCHEMA = {
 		ui: {
 			tab: "model",
 			group: "Prewalk",
-			label: "Maximum Prewalk Messages",
+			label: "Maximum Prewalk Actions",
 			description:
-				"Force handoff after this many completed assistant responses, even without a todo list or edit/write. Minimum takes precedence; a running background Eval cell delays forced handoff until a safe response boundary.",
+				"Force handoff after this many completed primary-thread assistant responses and tool executions, even without a todo list or edit/write. Checked at a safe response boundary, so a tool batch can exceed the limit. Minimum takes precedence; running background Eval delays handoff.",
 			options: [{ value: "0", label: "Unlimited" }, ...PREWALK_MESSAGE_OPTIONS],
 		},
 	},
@@ -5359,9 +5359,9 @@ export const SETTINGS_SCHEMA = {
 		ui: {
 			tab: "tasks",
 			group: "Subagents",
-			label: "Minimum Prewalk Messages",
+			label: "Minimum Prewalk Actions",
 			description:
-				"Minimum completed assistant responses in each subagent prewalk cycle. Inherit uses the parent’s effective minimum; 0 removes the child minimum. Early triggers are discarded, and minimum takes precedence over maximum. Does not enable prewalk.",
+				"Minimum completed primary-thread actions in each subagent prewalk cycle, including assistant responses and actual tool executions. Inherit uses the parent’s effective minimum; 0 removes the child minimum. Early triggers are discarded; minimum takes precedence over maximum. Does not enable prewalk.",
 			options: [
 				{ value: "-1", label: "Inherit", description: "Use the parent’s effective limit." },
 				{ value: "0", label: "No minimum" },
@@ -5375,9 +5375,9 @@ export const SETTINGS_SCHEMA = {
 		ui: {
 			tab: "tasks",
 			group: "Subagents",
-			label: "Maximum Prewalk Messages",
+			label: "Maximum Prewalk Actions",
 			description:
-				"Maximum completed assistant responses in each subagent prewalk cycle. Inherit uses the parent’s effective maximum; 0 is unlimited. Minimum takes precedence; running background Eval cells delay forced handoff. Does not enable prewalk.",
+				"Maximum completed primary-thread actions in each subagent prewalk cycle, including assistant responses and actual tool executions. Inherit uses the parent’s effective maximum; 0 is unlimited. Checked at a safe response boundary; tool batches can exceed the limit and running background Eval delays handoff. Minimum takes precedence. Does not enable prewalk.",
 			options: [
 				{ value: "-1", label: "Inherit", description: "Use the parent’s effective limit." },
 				{ value: "0", label: "Unlimited" },

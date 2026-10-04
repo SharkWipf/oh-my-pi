@@ -1,4 +1,10 @@
-import type { Agent, AgentMessage, AgentToolResult, AgentTurnEndContext } from "@oh-my-pi/pi-agent-core";
+import {
+	type Agent,
+	type AgentMessage,
+	type AgentToolResult,
+	type AgentTurnEndContext,
+	isSyntheticToolResultMessage,
+} from "@oh-my-pi/pi-agent-core";
 import { invalidateMessageCache } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, Model, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
@@ -101,7 +107,7 @@ export interface PrewalkSnapshot {
 	readonly planInjected: boolean;
 	readonly continuePending: boolean;
 	readonly todoSeen: boolean;
-	readonly completedMessages: number;
+	readonly completedActions: number;
 	readonly lastCountedMessage: AssistantMessage | undefined;
 	readonly rearmPending: boolean;
 	readonly automaticDisabled: boolean;
@@ -129,7 +135,8 @@ export class PrewalkCoordinator {
 	#planInjected = false;
 	#continuePending = false;
 	#todoSeen = false;
-	#completedMessages = 0;
+	#completedActions = 0;
+	#cycleGeneration = 0;
 	#lastCountedMessage: AssistantMessage | undefined;
 	#planYolo: PlanYolo | undefined;
 	#planYoloPreviousNonMCPPresentation: { enabled: string[]; mounted: string[] } | undefined;
@@ -146,7 +153,7 @@ export class PrewalkCoordinator {
 			this.#planInjected = snapshot.planInjected;
 			this.#continuePending = snapshot.continuePending;
 			this.#todoSeen = snapshot.todoSeen;
-			this.#completedMessages = snapshot.completedMessages;
+			this.#completedActions = snapshot.completedActions;
 			this.#lastCountedMessage = snapshot.lastCountedMessage;
 			this.#rearmPending = snapshot.rearmPending;
 			this.#disabledByToggle = snapshot.disabledByToggle;
@@ -165,11 +172,23 @@ export class PrewalkCoordinator {
 			planInjected: this.#planInjected,
 			continuePending: this.#continuePending,
 			todoSeen: this.#todoSeen,
-			completedMessages: this.#completedMessages,
+			completedActions: this.#completedActions,
 			lastCountedMessage: this.#lastCountedMessage,
 			rearmPending: this.#rearmPending,
 			automaticDisabled: this.#automaticDisabled,
 			disabledByToggle: this.#disabledByToggle,
+		};
+	}
+
+	/** Count a nested execution on settlement, never in a later planning cycle. */
+	beginToolCall(): (() => void) | undefined {
+		if (!this.#prewalk) return undefined;
+		const generation = this.#cycleGeneration;
+		let completed = false;
+		return () => {
+			if (completed) return;
+			completed = true;
+			if (this.#prewalk && this.#cycleGeneration === generation) this.#completedActions++;
 		};
 	}
 
@@ -254,11 +273,12 @@ export class PrewalkCoordinator {
 	}
 
 	#clearPrewalkState(): void {
+		this.#cycleGeneration++;
 		this.#prewalk = undefined;
 		this.#planInjected = false;
 		this.#continuePending = false;
 		this.#todoSeen = false;
-		this.#completedMessages = 0;
+		this.#completedActions = 0;
 		this.#lastCountedMessage = undefined;
 	}
 
@@ -289,8 +309,14 @@ export class PrewalkCoordinator {
 					!liveMessages.includes(previous) &&
 					sessionMessagePersistenceKey(previous) === sessionMessagePersistenceKey(message) &&
 					sameMessageContent(previous, message));
-			if (!alreadyCounted) this.#completedMessages++;
+			if (!alreadyCounted) this.#completedActions++;
 			this.#lastCountedMessage = message;
+		}
+		// Results here are new executions, including a replayed missing result.
+		// Synthetic pairing placeholders never executed a tool. Nested Eval calls
+		// settle through beginToolCall, not through their UI status summaries.
+		for (const result of context.toolResults) {
+			if (!isSyntheticToolResultMessage(result)) this.#completedActions++;
 		}
 		if (this.#isNoop(prewalk)) {
 			this.#scrubPlanNudge(liveMessages);
@@ -316,8 +342,8 @@ export class PrewalkCoordinator {
 
 		const minimum = Math.max(0, Math.trunc(Number(this.#host.settings.get("prewalk.minMessages")) || 0));
 		const maximum = Math.max(0, Math.trunc(Number(this.#host.settings.get("prewalk.maxMessages")) || 0));
-		const minimumReached = this.#completedMessages >= minimum;
-		const maximumReached = completed && maximum > 0 && this.#completedMessages >= maximum;
+		const minimumReached = this.#completedActions >= minimum;
+		const maximumReached = completed && maximum > 0 && this.#completedActions >= maximum;
 		const todoGateOpen = this.#todoSeen || !this.#host.getActiveToolNames().includes("todo");
 		const action =
 			minimumReached && todoGateOpen
@@ -351,9 +377,7 @@ export class PrewalkCoordinator {
 			this.#disarmNoop(prewalk);
 			return;
 		}
-		const reason = maximumReached
-			? `${this.#completedMessages} completed assistant responses`
-			: `first ${action!.toolName} call`;
+		const reason = maximumReached ? `${this.#completedActions} thread actions` : `first ${action!.toolName} call`;
 		await this.#host.setModelTemporary(target, prewalk.thinkingLevel, { ephemeral: true });
 		if (this.#prewalk !== prewalk) return;
 		this.#clearPrewalkState();
@@ -395,7 +419,8 @@ export class PrewalkCoordinator {
 		this.#planInjected = true;
 		this.#continuePending = true;
 		this.#todoSeen = false;
-		this.#completedMessages = 0;
+		this.#completedActions = 0;
+		this.#cycleGeneration++;
 		this.#lastCountedMessage = undefined;
 		this.#host.agent.steer({
 			role: "custom",

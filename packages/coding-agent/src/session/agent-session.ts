@@ -5879,6 +5879,11 @@ export class AgentSession {
 		return this.#planModeState;
 	}
 
+	/** Capture the active prewalk cycle for an Eval-bridged tool execution. */
+	beginPrewalkToolCall(): (() => void) | undefined {
+		return this.isDisposed ? undefined : this.#prewalk.beginToolCall();
+	}
+
 	getPrewalkSnapshot(): PrewalkSnapshot {
 		return this.#prewalk.snapshot;
 	}

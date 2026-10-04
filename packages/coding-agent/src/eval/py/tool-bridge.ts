@@ -112,6 +112,7 @@ async function callSessionToolPromptOnAbort(
 	}
 	const claimSignal = entry.signal ?? entry.shieldedSignal;
 	if (entry.shadowCell && identity && name === "read") {
+		const completePrewalkToolCall = entry.toolSession.beginPrewalkToolCall?.();
 		const claimed = await waitForSpeculativeClaim(
 			entry.shadowCell.claim(name, args, identity, Number.MAX_SAFE_INTEGER, claimSignal),
 			name,
@@ -120,7 +121,13 @@ async function callSessionToolPromptOnAbort(
 		if (claimSignal?.aborted || entry.abortRequested?.()) {
 			throw new Error(`bridge call ${JSON.stringify(name)} aborted: eval cell was interrupted`);
 		}
-		if (claimed) return bridgeValueFromToolResult(name, args, claimed, entry.emitStatus);
+		if (claimed) {
+			try {
+				return bridgeValueFromToolResult(name, args, claimed, entry.emitStatus);
+			} finally {
+				completePrewalkToolCall?.();
+			}
+		}
 	}
 	const call = callSessionTool(name, args, {
 		session: entry.toolSession,
