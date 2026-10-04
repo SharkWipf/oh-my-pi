@@ -1,7 +1,7 @@
 import type { Agent, AgentMessage, AgentToolResult, AgentTurnEndContext } from "@oh-my-pi/pi-agent-core";
 import { invalidateMessageCache } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model, ToolResultMessage } from "@oh-my-pi/pi-ai";
-import { logger, prompt } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { resolveApprovedPlan } from "../plan-mode/approved-plan";
@@ -39,18 +39,37 @@ const PREWALK_ACTION_TOOLS: Record<string, true> = {
 };
 const PLAN_YOLO_HANDOFF_MESSAGE_TYPE = "plan-yolo-handoff";
 
+function evalStatusEvents(result: ToolResultMessage): unknown[] | undefined {
+	if (result.toolName !== "eval" || !isRecord(result.details)) return undefined;
+	// Live progress from an auto-backgrounded cell is not a completed action.
+	if (isRecord(result.details.async) && result.details.async.state === "running") return undefined;
+	return Array.isArray(result.details.statusEvents) ? result.details.statusEvents : undefined;
+}
+
 /**
- * Whether a completed tool result is the first workspace-mutating action that
- * arms the prewalk hand-off. A direct `edit`/`write` call always counts; a
- * `write` that dispatched an `xd://` device (e.g. `lsp`, `ast_edit`, `debug`)
- * counts only when the wrapped tool resolved to a `write`/`exec` approval tier.
- * Read-only device calls — LSP navigation, `debug` inspection, `ast_edit` on
- * internal URLs, help lookups — leave the tier `read` (or absent) and must not
- * switch the model mid-investigation (issue #7312).
+ * Whether a completed tool result starts implementation. Successful nested
+ * edit/write calls count even if their Eval cell later fails. Device dispatch
+ * counts only at the write/exec tier; read-only navigation and help do not.
  */
 function isPrewalkImplementationAction(result: ToolResultMessage): boolean {
-	if (!PREWALK_ACTION_TOOLS[result.toolName]) return false;
-	const details = result.details;
+	if (result.toolName === "eval") {
+		return (
+			evalStatusEvents(result)?.some(
+				event =>
+					isRecord(event) &&
+					typeof event.op === "string" &&
+					PREWALK_ACTION_TOOLS[event.op] &&
+					event.committed === true &&
+					event.hasError !== true &&
+					event.error === undefined &&
+					isPrewalkMutationDetails(event),
+			) ?? false
+		);
+	}
+	return !result.isError && !!PREWALK_ACTION_TOOLS[result.toolName] && isPrewalkMutationDetails(result.details);
+}
+
+function isPrewalkMutationDetails(details: unknown): boolean {
 	// A direct filesystem edit/write carries no `xd://` dispatch metadata.
 	if (!details || typeof details !== "object" || !("xdev" in details) || !details.xdev) return true;
 	const xdev = details.xdev;
@@ -158,7 +177,21 @@ export class PrewalkCoordinator {
 			this.#disarmNoop(prewalk);
 			return;
 		}
-		if (context.toolResults.some(result => result.toolName === "todo" && !result.isError)) this.#todoSeen = true;
+		if (
+			context.toolResults.some(
+				result =>
+					(result.toolName === "todo" && !result.isError) ||
+					evalStatusEvents(result)?.some(
+						event =>
+							isRecord(event) &&
+							event.op === "todo" &&
+							event.completed === true &&
+							event.hasError !== true &&
+							event.error === undefined,
+					),
+			)
+		)
+			this.#todoSeen = true;
 
 		const hasToolResults = context.toolResults.length > 0;
 		if (this.#planInjected && hasToolResults) {
