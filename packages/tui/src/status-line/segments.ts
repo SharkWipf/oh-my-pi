@@ -404,7 +404,7 @@ const modeSegment: StatusLineSegment = {
 		if (!ctx.prewalk) return mode;
 
 		const icon = ctx.prewalk === "walking" ? theme.icon.prewalk : theme.icon.prewalkStanding;
-		const prewalk = accentFg(ctx, "accent", withIcon(icon, "Prewalk"));
+		const prewalk = accentFg(ctx, "accent", icon);
 		return {
 			content: mode.visible ? `${prewalk} ${mode.content}` : prewalk,
 			visible: true,
