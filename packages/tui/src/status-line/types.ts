@@ -97,9 +97,7 @@ export interface SegmentContext {
 		enabled: boolean;
 		paused: boolean;
 	} | null;
-	prewalk: {
-		enabled: boolean;
-	} | null;
+	prewalk: "walking" | "standing" | null | undefined;
 	loopMode: {
 		state: "waiting" | "running" | "paused";
 		limit?: LoopLimitRuntime;

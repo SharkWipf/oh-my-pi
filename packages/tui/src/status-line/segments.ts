@@ -357,52 +357,58 @@ function formatLoopLimit(
 	return `${seconds}s left`;
 }
 
+function renderPrimaryMode(ctx: SegmentContext): RenderedSegment {
+	const pauseSuffix = theme.icon.pause ? ` ${theme.icon.pause}` : " (paused)";
+
+	const plan = ctx.planMode;
+	if (plan && (plan.enabled || plan.paused)) {
+		const label = plan.paused ? `Plan${pauseSuffix}` : "Plan";
+		const content = withIcon(theme.icon.plan, label);
+		return {
+			content: plan.paused ? theme.fg("warning", content) : accentFg(ctx, "accent", content),
+			visible: true,
+		};
+	}
+
+	const goal = ctx.goalMode;
+	if (goal && (goal.enabled || goal.paused)) {
+		return renderGoalMode(ctx, goal);
+	}
+
+	const vibe = ctx.vibeMode;
+	if (vibe?.enabled) {
+		const content = withIcon(theme.icon.agents, "Vibe");
+		return { content: accentFg(ctx, "accent", content), visible: true };
+	}
+
+	const loop = ctx.loopMode;
+	if (loop) {
+		const icon = loop.state === "paused" ? theme.icon.pause || theme.icon.loop : theme.icon.loop;
+		const color: ThemeColor = loop.state === "paused" ? "warning" : "customMessageLabel";
+		const parts = [withIcon(icon, `Loop ${statusValue(ctx, loop.state)}`)];
+		const limit = formatLoopLimit(loop.limit, ctx.now?.getTime());
+		if (limit) parts.push(statusValue(ctx, limit));
+		if (loop.condition) {
+			parts.push(statusValue(ctx, summarizeLoopCondition(loop.condition, TRUNCATE_LENGTHS.SHORT)));
+		}
+		return { content: theme.fg(color, parts.join(" ")), visible: true };
+	}
+
+	return { content: "", visible: false };
+}
+
 const modeSegment: StatusLineSegment = {
 	id: "mode",
 	render(ctx) {
-		const pauseSuffix = theme.icon.pause ? ` ${theme.icon.pause}` : " (paused)";
+		const mode = renderPrimaryMode(ctx);
+		if (!ctx.prewalk) return mode;
 
-		const plan = ctx.planMode;
-		if (plan && (plan.enabled || plan.paused)) {
-			const label = plan.paused ? `Plan${pauseSuffix}` : "Plan";
-			const content = withIcon(theme.icon.plan, label);
-			return {
-				content: plan.paused ? theme.fg("warning", content) : accentFg(ctx, "accent", content),
-				visible: true,
-			};
-		}
-
-		const prewalk = ctx.prewalk;
-		if (prewalk?.enabled) {
-			const content = withIcon(theme.icon.prewalk, "Prewalk");
-			return { content: accentFg(ctx, "accent", content), visible: true };
-		}
-
-		const goal = ctx.goalMode;
-		if (goal && (goal.enabled || goal.paused)) {
-			return renderGoalMode(ctx, goal);
-		}
-
-		const vibe = ctx.vibeMode;
-		if (vibe?.enabled) {
-			const content = withIcon(theme.icon.agents, "Vibe");
-			return { content: accentFg(ctx, "accent", content), visible: true };
-		}
-
-		const loop = ctx.loopMode;
-		if (loop) {
-			const icon = loop.state === "paused" ? theme.icon.pause || theme.icon.loop : theme.icon.loop;
-			const color: ThemeColor = loop.state === "paused" ? "warning" : "customMessageLabel";
-			const parts = [withIcon(icon, `Loop ${statusValue(ctx, loop.state)}`)];
-			const limit = formatLoopLimit(loop.limit, ctx.now?.getTime());
-			if (limit) parts.push(statusValue(ctx, limit));
-			if (loop.condition) {
-				parts.push(statusValue(ctx, summarizeLoopCondition(loop.condition, TRUNCATE_LENGTHS.SHORT)));
-			}
-			return { content: theme.fg(color, parts.join(" ")), visible: true };
-		}
-
-		return { content: "", visible: false };
+		const icon = ctx.prewalk === "walking" ? theme.icon.prewalk : theme.icon.prewalkStanding;
+		const prewalk = accentFg(ctx, "accent", withIcon(icon, "Prewalk"));
+		return {
+			content: mode.visible ? `${prewalk} ${mode.content}` : prewalk,
+			visible: true,
+		};
 	},
 };
 

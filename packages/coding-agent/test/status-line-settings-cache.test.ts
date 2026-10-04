@@ -81,6 +81,50 @@ function makeComponent(statusLineSettings: StatusLineSettings): StatusLineCompon
 }
 
 describe("StatusLineComponent effective settings cache", () => {
+	it("refreshes phase-only PREWALK changes without hiding Plan or inferring an armed phase", () => {
+		const session = makeSession();
+		let phase: "walking" | "standing" | undefined = "walking";
+		session.getPrewalkStatus = () => phase;
+		session.getPrewalkState = () => ({ enabled: true });
+		const component = statusLines.track(new StatusLineComponent(session, statusLineHost));
+		component.updateSettings({ preset: "custom", leftSegments: ["mode"], rightSegments: [] });
+		component.setPlanModeStatus({ enabled: true, paused: false });
+		const render = () => stripVTControlCharacters(component.getTopBorder(120).content);
+
+		const walking = render();
+		expect(walking).toContain(theme.icon.prewalk);
+		expect(walking).toContain("Plan");
+
+		phase = "standing";
+		const standing = render();
+		expect(standing).toContain(theme.icon.prewalkStanding);
+		expect(standing).not.toContain(theme.icon.prewalk);
+		expect(standing).toContain("Plan");
+
+		phase = undefined;
+		const inactive = render();
+		expect(inactive).not.toContain(theme.icon.prewalkStanding);
+		expect(inactive).not.toContain("Prewalk");
+		expect(inactive).toContain("Plan");
+	});
+
+	it("reads PREWALK from the focused session rather than retaining another session's phase", () => {
+		const main = makeSession();
+		main.getPrewalkStatus = () => "standing";
+		const focused = makeSession("Focused Session");
+		focused.getPrewalkStatus = () => "walking";
+		const component = statusLines.track(new StatusLineComponent(main, statusLineHost));
+		component.updateSettings({ preset: "custom", leftSegments: ["mode"], rightSegments: [] });
+		const render = () => stripVTControlCharacters(component.getTopBorder(120).content);
+
+		expect(render()).toContain(theme.icon.prewalkStanding);
+		component.setSession(focused, "focused-agent");
+		expect(render()).toContain(theme.icon.prewalk);
+		expect(render()).not.toContain(theme.icon.prewalkStanding);
+		component.setSession(main);
+		expect(render()).toContain(theme.icon.prewalkStanding);
+	});
+
 	it("keeps repeated cached renders byte-identical across presets and widths", () => {
 		const cases: StatusLineSettings[] = [
 			{ preset: "default", sessionAccent: false },

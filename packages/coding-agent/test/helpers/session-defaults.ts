@@ -1,8 +1,21 @@
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { PrewalkSnapshot } from "../../src/session/prewalk";
 
 /** Spread first in a session fake; keep state and behavior overrides on the fake itself. */
 export function createSessionDefaults() {
 	return {
+		configuredThinkingLevel: () => undefined,
+		getPrewalkSnapshot: (): PrewalkSnapshot => ({
+			policy: undefined,
+			armed: undefined,
+			standingTarget: undefined,
+			planInjected: false,
+			continuePending: false,
+			todoSeen: false,
+			rearmPending: false,
+			automaticDisabled: false,
+			disabledByToggle: false,
+		}),
 		setActiveToolsByName: async (_toolNames: string[]) => {},
 		waitForIdle: async () => {},
 		prepareForHeadlessAdvisorDrain: () => {},

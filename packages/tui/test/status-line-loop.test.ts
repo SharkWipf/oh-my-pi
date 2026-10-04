@@ -119,4 +119,24 @@ describe("status line loop mode segment", () => {
 		expect(content.startsWith(withIcon(theme.icon.loop, "Loop running while: bun test x"))).toBe(true);
 		expect(content.length).toBeLessThan(60);
 	});
+
+	it("preserves the loop limit and condition while PREWALK is active", () => {
+		const context = createContext({
+			state: "running",
+			limit: { kind: "iterations", initial: 3, remaining: 2 },
+			condition: { command: "bun test", until: true },
+		});
+		context.prewalk = "walking";
+		const content = Bun.stripANSI(renderSegment("mode", context).content);
+		expect(content).toContain(theme.icon.prewalk);
+		expect(content).toContain("Loop running 2/3 until: bun test");
+
+		context.loopMode = null;
+		context.prewalk = "standing";
+		context.goalMode = { enabled: true, paused: false };
+		context.session.getGoalModeState = () => ({ goal: { status: "active", tokensUsed: 100 } });
+		const withGoal = Bun.stripANSI(renderSegment("mode", context).content);
+		expect(withGoal).toContain(theme.icon.prewalkStanding);
+		expect(withGoal).toContain("Goal");
+	});
 });

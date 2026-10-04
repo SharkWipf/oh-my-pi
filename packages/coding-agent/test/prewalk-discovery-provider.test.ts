@@ -104,8 +104,8 @@ describe("issue #11820 prewalk into a models.yml discovery provider target", () 
 
 		const options = await buildSessionOptions(parseArgs([]), [], SessionManager.inMemory(), modelRegistry, settings);
 
-		expect(options.prewalk?.target.provider).toBe("my-provider");
-		expect(options.prewalk?.target.id).toBe("some-model");
+		expect((options.prewalk || undefined)?.target.provider).toBe("my-provider");
+		expect((options.prewalk || undefined)?.target.id).toBe("some-model");
 		expect(requestedUrls).not.toContain(`${unrelatedBaseUrl}/models`);
 	});
 
@@ -121,8 +121,8 @@ describe("issue #11820 prewalk into a models.yml discovery provider target", () 
 			settings,
 		);
 
-		expect(options.prewalk?.target.provider).toBe("my-provider");
-		expect(options.prewalk?.target.id).toBe("some-model");
+		expect((options.prewalk || undefined)?.target.provider).toBe("my-provider");
+		expect((options.prewalk || undefined)?.target.id).toBe("some-model");
 		expect(requestedUrls).not.toContain(`${unrelatedBaseUrl}/models`);
 	});
 
@@ -142,8 +142,8 @@ describe("issue #11820 prewalk into a models.yml discovery provider target", () 
 			settings,
 		);
 
-		expect(options.prewalk?.target.provider).toBe("my-provider");
-		expect(options.prewalk?.target.id).toBe("some-model");
+		expect((options.prewalk || undefined)?.target.provider).toBe("my-provider");
+		expect((options.prewalk || undefined)?.target.id).toBe("some-model");
 		expect(requestedUrls).toContain(`${baseUrl}/models`);
 		expect(requestedUrls).not.toContain(`${unrelatedBaseUrl}/models`);
 	});
@@ -161,8 +161,8 @@ describe("issue #11820 prewalk into a models.yml discovery provider target", () 
 			settings,
 		);
 
-		expect(options.prewalk?.target.provider).toBe("unrelated-provider");
-		expect(options.prewalk?.target.id).toBe("unrelated-model");
+		expect((options.prewalk || undefined)?.target.provider).toBe("unrelated-provider");
+		expect((options.prewalk || undefined)?.target.id).toBe("unrelated-model");
 		expect(requestedUrls).toContain(`${baseUrl}/models`);
 		expect(requestedUrls).toContain(`${unrelatedBaseUrl}/models`);
 	});

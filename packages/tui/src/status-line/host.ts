@@ -54,6 +54,7 @@ export interface StatusLineSession {
 	autoResolvedThinkingLevel(): string | undefined;
 	isFastModeActive(): boolean;
 	getPrewalkState?(): unknown;
+	getPrewalkStatus?(): "walking" | "standing" | undefined;
 	getAsyncJobSnapshot(): { running: readonly { type: string; agentId?: string }[] } | null | undefined;
 	getGoalModeState(): { goal?: { status: string; tokensUsed: number; tokenBudget?: number } } | undefined;
 	getAdvisorStatusOverview?(): { configured: boolean; advisors: readonly { status: string; yielded: boolean }[] };

@@ -348,7 +348,11 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Mutate the agent context here; use `beforeModelCall` to inspect the
 	 * provider-bound context.
 	 */
-	syncContextBeforeModelCall?: (context: AgentContext, signal?: AbortSignal) => void | Promise<void>;
+	syncContextBeforeModelCall?: (
+		context: AgentContext,
+		signal: AbortSignal | undefined,
+		turnMessages: readonly AgentMessage[],
+	) => void | Promise<void>;
 
 	/**
 	 * Asked after the complete provider context has been built, including

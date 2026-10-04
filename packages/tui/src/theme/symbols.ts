@@ -79,6 +79,7 @@ export type SymbolKey =
 	| "icon.model"
 	| "icon.plan"
 	| "icon.prewalk"
+	| "icon.prewalkStanding"
 	| "icon.goal"
 	| "icon.pause"
 	| "icon.loop"
@@ -343,6 +344,7 @@ export type SlashCommandIconName =
 	| "model"
 	| "plan"
 	| "prewalk"
+	| "prewalkStanding"
 	| "goal"
 	| "pause"
 	| "loop"
@@ -438,7 +440,8 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	// Icons
 	"icon.model": "⬢",
 	"icon.plan": "🗺",
-	"icon.prewalk": "🏃",
+	"icon.prewalk": "🚶",
+	"icon.prewalkStanding": "🧍",
 	"icon.goal": "🎯",
 	"icon.pause": "⏸",
 	"icon.loop": "↻",
@@ -777,7 +780,8 @@ const NERD_SYMBOLS: SymbolMap = {
 	"icon.model": "\uec19",
 	// pick:  | alt:  
 	"icon.plan": "\uf2d2",
-	"icon.prewalk": "\uf29d",
+	"icon.prewalk": "\u{f0583}",
+	"icon.prewalkStanding": "\uf183",
 	// pick:  (nf-fa-bullseye) | alt:  (nf-md-target) ◎ ⌖
 	"icon.goal": "\uf140",
 	// pick:  (nf-fa-pause) | alt: ⏸ ||
@@ -1172,6 +1176,7 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"icon.model": "[M]",
 	"icon.plan": "plan",
 	"icon.prewalk": "prewalk",
+	"icon.prewalkStanding": "standing",
 	"icon.goal": "goal",
 	"icon.pause": "||",
 	"icon.loop": "loop",

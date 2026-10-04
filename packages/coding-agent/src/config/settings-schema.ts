@@ -381,6 +381,17 @@ export const SETTINGS_SCHEMA = {
 				"Start on the active model, then switch to a fast/cheap model (default the 'smol' role) at the first edit/write after the plan nudge's todo list exists — the strong model plans, commits the todos, and starts the implementation before handing off. Overridable per session with --prewalk / --no-prewalk.",
 		},
 	},
+	"prewalk.afterEveryUserMessage": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Prewalk",
+			label: "Prewalk Every User Message",
+			description:
+				"Restart the planning phase for each new user message, including steering, follow-ups and injections. Restore the planning model before the next safe model request, then use the usual todo + first edit/write handoff. Requires Prewalk; --no-prewalk disables automatic restarts.",
+		},
+	},
 	"advisor.syncBacklog": {
 		type: "enum",
 		values: ["off", "1", "3", "5"] as const,
@@ -5302,6 +5313,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"task.prewalkWithoutModelOverride": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Prewalk Unpinned Subagents",
+			description:
+				"Start subagents without an explicit model choice on the configured slow planning role, then hand off to their normal execution model. Explicit agent models, configured task-role models, per-agent overrides and launch overrides are unchanged. Per-agent prewalk off remains off.",
+		},
+	},
 	"tasks.todoClearDelay": {
 		type: "number",
 		default: 60,

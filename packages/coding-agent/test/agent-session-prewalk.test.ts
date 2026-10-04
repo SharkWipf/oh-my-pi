@@ -6,6 +6,7 @@ import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -752,9 +753,7 @@ describe("AgentSession prewalk", () => {
 		settings.setModelRole("smol", `${target.provider}/${target.id}:medium`);
 		expect(await executeBuiltinSlashCommand("/prewalk", runtime)).toBe(true);
 		expect(showStatus).toHaveBeenCalledTimes(1);
-		expect(showStatus).toHaveBeenCalledWith(
-			`Prewalk on: switching to ${target.provider}/${target.id} at the next edit/write (todo-gated).`,
-		);
+		expect(session.getPrewalkState()?.target.id).toBe(target.id);
 
 		// A different request cannot report success while the prior target remains armed.
 		settings.setModelRole("smol", `${primary.provider}/${primary.id}:medium`);
@@ -1095,5 +1094,367 @@ describe("AgentSession prewalk", () => {
 		// The hand-off clears automatic thinking.
 		expect(session.isAutoThinking).toBe(false);
 		expect(notices.some(message => message.includes("nothing to switch"))).toBe(false);
+	});
+	function cycleHarness(
+		responses: MockResponse[],
+		options: { explicit?: boolean; disabled?: boolean; manager?: AsyncJobManager; persistent?: boolean } = {},
+	) {
+		const source = modelOrThrow("claude-sonnet-4-5");
+		const target = modelOrThrow("claude-sonnet-4-6");
+		const settings = Settings.isolated({ "compaction.enabled": false, "prewalk.afterEveryUserMessage": true });
+		settings.setModelRole("default", source.provider + "/" + source.id + ":high");
+		settings.setModelRole("smol", target.provider + "/" + target.id + ":low");
+		const mock = createMockModel({ responses });
+		const requests: { model: string; effort: unknown }[] = [];
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: {
+				model: options.explicit === false ? target : source,
+				systemPrompt: ["Test"],
+				tools: [writeTool as AgentTool],
+				messages: [],
+				thinkingLevel: Effort.High,
+			},
+			convertToLlm,
+			streamFn: (model, context, streamOptions) => {
+				requests.push({ model: model.id, effort: streamOptions?.reasoning });
+				return mock.stream(model, context, streamOptions);
+			},
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: options.persistent
+				? SessionManager.create(process.cwd(), tempDir.path())
+				: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			toolRegistry,
+			thinkingLevel: Effort.High,
+			prewalk: options.disabled
+				? false
+				: options.explicit === false
+					? undefined
+					: { target, thinkingLevel: Effort.Low },
+			asyncJobManager: options.manager,
+		});
+		return { source, target, requests, agent, settings, session };
+	}
+
+	it("repeats explicit cycles with exact source effort, ignoring synthetic delivery and retained history", async () => {
+		const t = cycleHarness([
+			toolCall("a", "write"),
+			{ content: ["done"] },
+			{ content: ["notice"] },
+			toolCall("b", "write"),
+			{ content: ["done"] },
+		]);
+		await t.session.prompt("first task");
+		expect(t.session.getPrewalkStatus()).toBe("standing");
+		await t.session.prompt("internal continuation", { synthetic: true });
+		await t.session.prompt("second task");
+		expect(t.requests).toEqual([
+			{ model: t.source.id, effort: Effort.High },
+			{ model: t.target.id, effort: Effort.Low },
+			{ model: t.target.id, effort: Effort.Low },
+			{ model: t.source.id, effort: Effort.High },
+			{ model: t.target.id, effort: Effort.Low },
+		]);
+		expect(t.session.getPrewalkState()).toBeUndefined();
+	});
+
+	it("honors hard automatic disable while allowing explicit one-shot arm", async () => {
+		const t = cycleHarness([toolCall("a", "write"), { content: ["done"] }, { content: ["next"] }], {
+			disabled: true,
+		});
+		t.settings.set("prewalk.enabled", true);
+		expect(t.session.armPrewalk(t.target, Effort.Low)).toBe(true);
+		await t.session.prompt("manual task");
+		await t.session.prompt("next task");
+		expect(t.requests.map(request => request.model)).toEqual([t.source.id, t.target.id, t.target.id]);
+	});
+
+	it("live disable clears active status without switching, and reenable restores retained source on future input", async () => {
+		const t = cycleHarness([
+			toolCall("a", "write"),
+			{ content: ["done"] },
+			{ content: ["disabled"] },
+			toolCall("b", "write"),
+			{ content: ["done"] },
+		]);
+		await t.session.prompt("first");
+		t.session.setPrewalkEnabled(false);
+		expect(t.session.getPrewalkStatus()).toBeUndefined();
+		expect(t.session.model?.id).toBe(t.target.id);
+		await t.session.prompt("disabled turn");
+		t.session.setPrewalkEnabled(true);
+		expect(t.session.model?.id).toBe(t.target.id);
+		await t.session.prompt("reenabled turn");
+		expect(t.requests.map(request => request.model)).toEqual([
+			t.source.id,
+			t.target.id,
+			t.target.id,
+			t.source.id,
+			t.target.id,
+		]);
+	});
+
+	it("hides standing status on a different model and clears arm status on disable", async () => {
+		const t = cycleHarness([toolCall("a", "write"), { content: ["done"] }]);
+		await t.session.prompt("first");
+		await t.session.setModelTemporary(t.source, Effort.High, { ephemeral: true });
+		expect(t.session.getPrewalkStatus()).toBeUndefined();
+		expect(t.session.armPrewalk(t.target, Effort.Low)).toBe(true);
+		expect(t.session.getPrewalkStatus()).toBe("walking");
+		t.session.setPrewalkEnabled(false);
+		expect(t.session.getPrewalkState()).toBeUndefined();
+		expect(t.session.getPrewalkStatus()).toBeUndefined();
+	});
+
+	it("resume starts configured default planning only for new input, never replayed messages", async () => {
+		const t = cycleHarness([toolCall("a", "write"), { content: ["done"] }], { explicit: false });
+		t.settings.set("prewalk.enabled", true);
+		t.agent.replaceMessages([{ role: "user", content: [{ type: "text", text: "historical task" }], timestamp: 1 }]);
+		expect(t.session.model?.id).toBe(t.target.id);
+		expect(t.session.getPrewalkState()).toBeUndefined();
+		await t.session.prompt("new task");
+		expect(t.requests).toEqual([
+			{ model: t.source.id, effort: Effort.High },
+			{ model: t.target.id, effort: Effort.Low },
+		]);
+	});
+
+	it("rearms queued follow-up and user custom input but not hidden user companions", async () => {
+		const t = cycleHarness([
+			toolCall("a", "write"),
+			{ content: ["done"] },
+			toolCall("b", "write"),
+			{ content: ["done"] },
+			{ content: ["companion"] },
+			toolCall("c", "write"),
+			{ content: ["done"] },
+		]);
+		await t.session.prompt("first");
+		await t.session.followUp("queued task");
+		await t.session.waitForIdle();
+		await t.session.sendCustomMessage(
+			{ customType: "image-attachment-description", content: "hidden context", display: false, attribution: "user" },
+			{ triggerTurn: true },
+		);
+		await t.session.sendCustomMessage(
+			{ customType: "user-submission", content: "new task", display: true, attribution: "user" },
+			{ triggerTurn: true },
+		);
+		expect(t.requests.map(request => request.model)).toEqual([
+			t.source.id,
+			t.target.id,
+			t.source.id,
+			t.target.id,
+			t.target.id,
+			t.source.id,
+			t.target.id,
+		]);
+	});
+
+	it("defers repeat during own background Eval and retries without another user message", async () => {
+		const gate = Promise.withResolvers<string>();
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const t = cycleHarness(
+			[
+				toolCall("a", "write"),
+				{ content: ["done"] },
+				toolCall("b", "record"),
+				toolCall("c", "write"),
+				{ content: ["done"] },
+			],
+			{ manager },
+		);
+		await t.session.prompt("first");
+		const jobId = manager.register("eval", "live cell", () => gate.promise);
+		const record: AgentTool<typeof recordToolSchema, undefined> = {
+			...recordTool,
+			async execute() {
+				gate.resolve("settled");
+				await manager.getJob(jobId)?.promise;
+				return { content: [{ type: "text", text: "settled" }], details: undefined };
+			},
+		};
+		t.agent.setTools([record as AgentTool, writeTool as AgentTool]);
+		await t.session.prompt("input during Eval");
+		expect(t.requests.map(request => request.model)).toEqual([
+			t.source.id,
+			t.target.id,
+			t.target.id,
+			t.source.id,
+			t.target.id,
+		]);
+		await manager.dispose();
+	});
+
+	it("successful context reset drops retained cycle and uses freshly configured defaults", async () => {
+		const t = cycleHarness([
+			toolCall("a", "write"),
+			{ content: ["done"] },
+			toolCall("b", "write"),
+			{ content: ["done"] },
+		]);
+		await t.session.prompt("first");
+		t.settings.set("prewalk.enabled", true);
+		t.settings.setModelRole("default", t.source.provider + "/" + t.source.id + ":medium");
+		const droppedCount = t.session.messages.length;
+		expect(await t.session.resetSessionContext()).toEqual({ droppedCount });
+		expect(t.session.getPrewalkStatus()).toBeUndefined();
+		await t.session.prompt("new task");
+		expect(t.requests.slice(-2)).toEqual([
+			{ model: t.source.id, effort: Effort.Medium },
+			{ model: t.target.id, effort: Effort.Low },
+		]);
+	});
+	it("publishes standing only after the asynchronous handoff succeeds", async () => {
+		const t = cycleHarness([toolCall("a", "write"), { content: ["done"] }]);
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const setModel = t.session.setModelTemporary.bind(t.session);
+		vi.spyOn(t.session, "setModelTemporary").mockImplementation(async (model, effort, options) => {
+			if (model.id === t.target.id) {
+				started.resolve();
+				await release.promise;
+			}
+			await setModel(model, effort, options);
+		});
+		const run = t.session.prompt("first");
+		await started.promise;
+		expect(t.session.getPrewalkStatus()).toBe("walking");
+		expect(t.session.model?.id).toBe(t.source.id);
+		release.resolve();
+		await run;
+		expect(t.session.getPrewalkStatus()).toBe("standing");
+	});
+
+	it("canceled session switch retains the cycle; committed switch and new session clear it", async () => {
+		const t = cycleHarness(
+			[toolCall("a", "write"), { content: ["done"] }, toolCall("b", "write"), { content: ["done"] }],
+			{ persistent: true },
+		);
+		await t.session.prompt("first");
+		const targetManager = SessionManager.create(tempDir.path(), tempDir.path());
+		targetManager.appendMessage({ role: "user", content: "historical", timestamp: 1 });
+		await targetManager.ensureOnDisk();
+		await targetManager.flush();
+		const targetFile = targetManager.getSessionFile();
+		if (!targetFile) throw new Error("Expected persisted session");
+		await targetManager.close();
+		expect(await t.session.switchSession(targetFile, { onCwdChange: async () => false })).toBe(false);
+		expect(t.session.getPrewalkStatus()).toBe("standing");
+		await t.session.prompt("after canceled switch");
+		expect(t.requests.map(request => request.model)).toEqual([t.source.id, t.target.id, t.source.id, t.target.id]);
+		expect(await t.session.switchSession(targetFile, { preserveLocalCwd: true })).toBe(true);
+		expect(t.session.getPrewalkStatus()).toBeUndefined();
+		await t.session.setModelTemporary(t.source, Effort.High, { ephemeral: true });
+		expect(t.session.armPrewalk(t.target, Effort.Low)).toBe(true);
+		expect(await t.session.newSession()).toBe(true);
+		expect(t.session.getPrewalkState()).toBeUndefined();
+		expect(t.session.getPrewalkStatus()).toBeUndefined();
+	});
+
+	it("hot revival stays on execution model and retains the dormant source for the next user input", async () => {
+		const t = cycleHarness([toolCall("a", "write"), { content: ["done"] }]);
+		await t.session.prompt("first");
+		const snapshot = t.session.getPrewalkSnapshot();
+		const currentModel = t.session.model;
+		const thinkingLevel = t.session.configuredThinkingLevel();
+		await t.session.dispose();
+		const mock = createMockModel({ responses: [toolCall("b", "write"), { content: ["done"] }] });
+		const requests: { model: string; effort: unknown }[] = [];
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: currentModel, systemPrompt: ["Test"], tools: [writeTool as AgentTool], messages: [] },
+			convertToLlm,
+			streamFn: (model, context, options) => {
+				requests.push({ model: model.id, effort: options?.reasoning });
+				return mock.stream(model, context, options);
+			},
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: t.settings,
+			modelRegistry,
+			toolRegistry,
+			thinkingLevel,
+			prewalkSnapshot: snapshot,
+		});
+		expect(session.model?.id).toBe(t.target.id);
+		expect(session.getPrewalkStatus()).toBe("standing");
+		expect(session.getPrewalkState()).toBeUndefined();
+		await session.prompt("new task");
+		expect(requests).toEqual([
+			{ model: t.source.id, effort: Effort.High },
+			{ model: t.target.id, effort: Effort.Low },
+		]);
+	});
+	for (const deliverAs of ["steer", "aside"] as const) {
+		it("rearms " + deliverAs + " user input at the next model request boundary", async () => {
+			const t = cycleHarness([
+				toolCall("a", "write"),
+				toolCall("b", "record"),
+				toolCall("c", "write"),
+				{ content: ["done"] },
+			]);
+			t.session.setInterruptMode("wait");
+			const record: AgentTool<typeof recordToolSchema, undefined> = {
+				...recordTool,
+				async execute() {
+					await t.session.sendUserMessage("new task during tools", { deliverAs });
+					return { content: [{ type: "text", text: "read" }], details: undefined };
+				},
+			};
+			t.agent.setTools([record as AgentTool, writeTool as AgentTool]);
+			await t.session.prompt("first");
+			expect(t.requests.map(request => request.model)).toEqual([t.source.id, t.target.id, t.source.id, t.target.id]);
+		});
+	}
+	it("retains primary admission after skill expansion, magic companions and image normalization", async () => {
+		const t = cycleHarness([
+			toolCall("a", "write"),
+			{ content: ["done"] },
+			toolCall("b", "write"),
+			{ content: ["done"] },
+			toolCall("c", "write"),
+			{ content: ["done"] },
+		]);
+		t.settings.set("magicKeywords.ultrathink", true);
+		t.settings.set("images.autoResize", false);
+		await t.session.prompt("first ultrathink task");
+		await t.session.promptCustomMessage({
+			customType: "skill",
+			content: "expanded user task",
+			display: true,
+			attribution: "user",
+			details: { name: "workflow", args: "ultrathink task" },
+		});
+		await t.session.sendCustomMessage(
+			{
+				customType: "user-image",
+				content: [
+					{ type: "text", text: "task with image" },
+					{
+						type: "image",
+						data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aWZkAAAAASUVORK5CYII=",
+						mimeType: "image/png",
+					},
+				],
+				display: true,
+				attribution: "user",
+			},
+			{ triggerTurn: true },
+		);
+		expect(t.requests.map(request => request.model)).toEqual([
+			t.source.id,
+			t.target.id,
+			t.source.id,
+			t.target.id,
+			t.source.id,
+			t.target.id,
+		]);
 	});
 });
