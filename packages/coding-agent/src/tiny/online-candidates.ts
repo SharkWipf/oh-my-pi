@@ -1,5 +1,6 @@
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { formatModelStringWithRouting, resolveModelOverride, resolveRoleSelection } from "../config/model-resolver";
+import { isLocalModelRoleSelection, isModelRoleDisabled } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import {
 	expandDefaultRetryFallbackChains,
@@ -117,6 +118,8 @@ export function collectOnlineTinyCandidates(
 	availableModels: Model<Api>[],
 	options?: { tryAllRoles?: boolean },
 ): OnlineTinyCandidate[] {
+	if (roles[0] && isModelRoleDisabled(roles[0], settings)) return [];
+	const selectedRoles = roles[0] && isLocalModelRoleSelection(roles[0], settings) ? [roles[0]] : roles;
 	const seen = new Set<string>();
 	const out: OnlineTinyCandidate[] = [];
 	const addPrimary = (role: string, model: Model<Api>): boolean => {
@@ -130,7 +133,8 @@ export function collectOnlineTinyCandidates(
 	// Retain every role even if primaries coincide: their fallback chains can differ.
 	const fallbackEnabled = settings.get("retry.modelFallback") !== false;
 	const primaries: OnlineTinyCandidate[] = [];
-	for (const role of roles) {
+	for (const role of selectedRoles) {
+		if (isModelRoleDisabled(role, settings)) continue;
 		const resolved = resolveRoleSelection([role], settings, availableModels);
 		if (!resolved?.model) continue;
 		addPrimary(resolved.role, resolved.model);
@@ -143,7 +147,7 @@ export function collectOnlineTinyCandidates(
 	if (!configuredChains || typeof configuredChains !== "object") return out;
 
 	const context = createFallbackContext(
-		expandDefaultRetryFallbackChains(configuredChains, roles),
+		expandDefaultRetryFallbackChains(configuredChains, selectedRoles),
 		settings,
 		availableModels,
 	);

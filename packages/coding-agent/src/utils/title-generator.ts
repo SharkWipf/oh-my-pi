@@ -18,7 +18,7 @@ import { SPINNER_FRAMES } from "@oh-my-pi/pi-tui/theme/symbols";
 import { $env, isTerminalHeadless, isWsl, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 
-import { roleCandidatePool } from "../config/model-roles";
+import { isLocalModelRoleSelection, isModelRoleDisabled, roleCandidatePool } from "../config/model-roles";
 import { formatModelStringWithRouting } from "../config/model-resolver";
 import { collectOnlineTinyCandidates, expandOnlineTinyModelFallbacks } from "../tiny/online-candidates";
 import type { Settings } from "../config/settings";
@@ -120,12 +120,14 @@ const LEADING_PROSE_THINKING_PREAMBLE_RE =
 	/^[ \t]*(?:(?:here(?:['’]s| is)[ \t]+(?:a|the|my)[ \t]+)|my[ \t]+)?(?:thinking|thought|reasoning)[ \t]+process[ \t]*:?[ \t]*(?:\r?\n|$)/i;
 
 function getTitleModels(registry: ModelRegistry, settings: Settings, currentModel?: Model<Api>): Model<Api>[] {
+	if (isModelRoleDisabled("tiny", settings)) return [];
 	const availableModels = roleCandidatePool("tiny", settings, registry);
 	if (availableModels.length === 0) return [];
 
 	const models = collectOnlineTinyCandidates(["tiny", "commit", "smol"], settings, availableModels).map(
 		candidate => candidate.model,
 	);
+	if (isLocalModelRoleSelection("tiny", settings)) return models;
 	if (
 		currentModel &&
 		(models.length === 0 || settings.get("retry.modelFallback") !== false) &&
@@ -149,7 +151,7 @@ function getTitleModels(registry: ModelRegistry, settings: Settings, currentMode
  *
  * @param firstMessage The first user message
  * @param registry Model registry
- * @param settings Settings used to resolve the smol role
+ * @param settings Title opt-in and tiny/commit/smol role selection settings
  * @param sessionId Optional session id for sticky API key selection
  * @param currentModel Current model (used to derive title model)
  * @param metadataResolver Optional resolver evaluated after credential selection
@@ -172,6 +174,7 @@ export async function generateSessionTitle(
 	signal?: AbortSignal,
 	credentialSourceSessionId?: string,
 ): Promise<string | null> {
+	if (!settings.get("title.enabled")) return null;
 	// Defer titling for greetings / acknowledgements / empty input. The default
 	// tiny title model can't reliably decline trivial input, so this happens
 	// deterministically before any model is invoked; the caller retries on the
@@ -250,6 +253,7 @@ export async function generateTitleOnline(
 	customSystemPrompt?: string,
 	credentialSourceSessionId?: string,
 ): Promise<string | null> {
+	if (!settings.get("title.enabled") || isLocalModelRoleSelection("tiny", settings)) return null;
 	const models = getTitleModels(registry, settings, currentModel);
 	if (models.length === 0) {
 		logger.warn("title-generator: no title model found", { sessionId, reason: "no-title-model" });

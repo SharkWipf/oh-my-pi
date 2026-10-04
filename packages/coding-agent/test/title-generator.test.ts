@@ -9,6 +9,7 @@ import { tinyTitleClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 import {
 	disposeTerminalTitleState,
 	generateSessionTitle,
+	generateTitleOnline,
 	initTerminalTitleState,
 	setExtensionTerminalTitle,
 	setSessionTerminalTitle,
@@ -32,7 +33,7 @@ function getModelFor(provider: GeneratedProvider, id: string): Model<Api> {
 }
 
 function createSettings(model: Model<Api>): Settings {
-	return Settings.isolated({ modelRoles: { tiny: `${model.provider}/${model.id}` } });
+	return Settings.isolated({ "title.enabled": true, modelRoles: { tiny: `${model.provider}/${model.id}` } });
 }
 
 function createRegistry(model: Model<Api>, availableModels: Model<Api>[] = [model]) {
@@ -50,6 +51,76 @@ afterEach(() => {
 });
 
 describe("title generator", () => {
+	it("does not inspect credentials or dispatch titles without feature opt-in", async () => {
+		const model = getModelOrThrow("claude-haiku-4-5");
+		const getAvailable = vi.fn(() => [model]);
+		const getApiKey = vi.fn(async () => "test-key");
+		const registry = { getAvailable, getApiKey } as never;
+		const settings = Settings.isolated({ modelRoles: { tiny: `${model.provider}/${model.id}` } });
+		const online = vi.spyOn(ai, "completeSimple");
+		const local = vi.spyOn(tinyTitleClient, "generate");
+
+		expect(await generateSessionTitle("Investigate the resolver", registry, settings)).toBeNull();
+		expect(await generateTitleOnline("Investigate the resolver", registry, settings)).toBeNull();
+		expect(getAvailable).not.toHaveBeenCalled();
+		expect(getApiKey).not.toHaveBeenCalled();
+		expect(online).not.toHaveBeenCalled();
+		expect(local).not.toHaveBeenCalled();
+	});
+
+	it("does not replace a disabled tiny role with smol or the current model", async () => {
+		const model = getModelOrThrow("claude-haiku-4-5");
+		const settings = Settings.isolated({
+			"title.enabled": true,
+			modelRoles: { tiny: "none", smol: `${model.provider}/${model.id}` },
+		});
+		const online = vi.spyOn(ai, "completeSimple");
+		const local = vi.spyOn(tinyTitleClient, "generate");
+		expect(
+			await generateSessionTitle("Investigate the resolver", createRegistry(model), settings, "s", model),
+		).toBeNull();
+		expect(
+			await generateTitleOnline("Investigate the resolver", createRegistry(model), settings, "s", model),
+		).toBeNull();
+		expect(online).not.toHaveBeenCalled();
+		expect(local).not.toHaveBeenCalled();
+	});
+
+	it("does not replace an unavailable local tiny selection with paid roles", async () => {
+		const model = getModelOrThrow("claude-haiku-4-5");
+		const settings = Settings.isolated({
+			"title.enabled": true,
+			modelRoles: { tiny: "local/missing-title-model", commit: `${model.provider}/${model.id}` },
+		});
+		const online = vi.spyOn(ai, "completeSimple");
+		const local = vi.spyOn(tinyTitleClient, "generate");
+		expect(
+			await generateSessionTitle("Investigate the resolver", createRegistry(model), settings, "s", model),
+		).toBeNull();
+		expect(
+			await generateTitleOnline("Investigate the resolver", createRegistry(model), settings, "s", model),
+		).toBeNull();
+		expect(online).not.toHaveBeenCalled();
+		expect(local).not.toHaveBeenCalled();
+	});
+
+	it("does not let the online entry point bypass a selected local worker", async () => {
+		const localModel = getBundledModel("local", "lfm2.5-230m")!;
+		const paidModel = getModelOrThrow("claude-haiku-4-5");
+		const online = vi.spyOn(ai, "completeSimple");
+		const settings = createSettings(localModel);
+		expect(
+			await generateTitleOnline(
+				"Investigate the resolver",
+				createRegistry(paidModel, [localModel, paidModel]),
+				settings,
+				"s",
+				paidModel,
+			),
+		).toBeNull();
+		expect(online).not.toHaveBeenCalled();
+	});
+
 	it("returns the marker-wrapped title without forcing a tool call", async () => {
 		const model = getModelOrThrow("claude-sonnet-4-5");
 		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
@@ -446,6 +517,7 @@ describe("title generator", () => {
 				resolver: () => async () => "test-key",
 			} as never,
 			Settings.isolated({
+				"title.enabled": true,
 				modelRoles: {
 					tiny: `${primary.provider}/${primary.id}`,
 					smol: `${fallback.provider}/${fallback.id}`,
@@ -624,6 +696,7 @@ describe("title generator", () => {
 
 		// Case 1: All three roles configured. 'tiny' should be used.
 		let currentSettings = Settings.isolated({
+			"title.enabled": true,
 			modelRoles: {
 				tiny: `${tinyModel.provider}/${tinyModel.id}`,
 				commit: `${commitModel.provider}/${commitModel.id}`,
@@ -647,6 +720,7 @@ describe("title generator", () => {
 
 		// Case 2: 'tiny' role not configured, 'commit' and 'smol' configured. 'commit' should be used.
 		currentSettings = Settings.isolated({
+			"title.enabled": true,
 			modelRoles: {
 				commit: `${commitModel.provider}/${commitModel.id}`,
 				smol: `${smolModel.provider}/${smolModel.id}`,
@@ -661,6 +735,7 @@ describe("title generator", () => {
 
 		// Case 3: Only 'smol' role configured. 'smol' should be used.
 		currentSettings = Settings.isolated({
+			"title.enabled": true,
 			modelRoles: { smol: `${smolModel.provider}/${smolModel.id}` },
 		});
 
@@ -715,6 +790,7 @@ describe("title generator", () => {
 			} as never;
 		});
 		const settings = Settings.isolated({
+			"title.enabled": true,
 			modelRoles: { tiny: "openrouter/google/gemini-2.5-flash@cerebras" },
 			"retry.modelFallback": true,
 		});
@@ -754,6 +830,7 @@ describe("title generator", () => {
 			} as never;
 		});
 		const settings = Settings.isolated({
+			"title.enabled": true,
 			"retry.modelFallback": true,
 			"retry.fallbackChains": {
 				[`${current.provider}/${current.id}`]: [`${currentFallback.provider}/${currentFallback.id}`],
@@ -795,6 +872,7 @@ describe("title generator", () => {
 			} as never;
 		});
 		const settings = Settings.isolated({
+			"title.enabled": true,
 			modelRoles: { smol: `${smolModel.provider}/${smolModel.id}` },
 			"retry.fallbackChains": {
 				[`${smolModel.provider}/${smolModel.id}`]: [`${fallbackModel.provider}/${fallbackModel.id}`],

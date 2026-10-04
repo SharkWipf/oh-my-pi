@@ -104,6 +104,8 @@ export interface ModelBrowserRoleInfo {
 	color?: ThemeColor;
 	hidden?: boolean;
 	section: "chat" | "kind";
+	/** Purpose and input sent when this role is used; assignment is not feature consent. */
+	purpose?: string;
 	accepts(model: Model): boolean;
 }
 
@@ -127,6 +129,7 @@ export interface ModelBrowserSource extends ModelRoleLookup {
 	readonly knownRoleIds: readonly string[];
 	readonly mruOrder: readonly string[];
 	readonly modelPerf: ReadonlyMap<string, ModelBrowserPerf>;
+	isRoleDisabled(role: string): boolean;
 	getRoleInfo(role: string): ModelBrowserRoleInfo;
 	defaultRoleChain(role: string): string[];
 	resolveRoleValue(value: string | undefined, models: Model[], roleLookup?: ModelRoleLookup): ResolvedModelRoleValue;
@@ -206,7 +209,7 @@ export function resolveRoleAssignments(
 	if (autoCandidates.length > 0) {
 		const candidates = [...autoCandidates];
 		for (const role of knownRoles) {
-			if (configuredRoles.has(role)) continue;
+			if (configuredRoles.has(role) || settings.isRoleDisabled(role)) continue;
 			const resolved = settings.resolveRoleValue(
 				`pi/${role}`,
 				candidates.filter(settings.getRoleInfo(role).accepts),

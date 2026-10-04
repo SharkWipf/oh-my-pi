@@ -66,6 +66,15 @@ describe("vibe worker spawn model role", () => {
 		AgentRegistry.resetGlobalForTests();
 	});
 
+	it("rejects a disabled selected worker role instead of inheriting the primary", async () => {
+		const dispatch = vi.spyOn(executorModule, "runSubprocess").mockRejectedValue(new Error("unexpected dispatch"));
+		const settings = Settings.isolated({ modelRoles: { default: "anthropic/primary", task: "none" } });
+		await expect(
+			VibeSessionRegistry.global().spawn(makeParentSession(settings), { cli: "good", prompt: "work" }),
+		).rejects.toThrow();
+		expect(dispatch).not.toHaveBeenCalled();
+	});
+
 	it("forwards the `task` role behind the `good` worker's expanded patterns", async () => {
 		const options = await spawnAndCaptureOptions(
 			"good",

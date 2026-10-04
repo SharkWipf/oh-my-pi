@@ -56,7 +56,7 @@ function createSession(
 	cwd: string,
 	model: Model<"openai-responses">,
 	apiKey: string | undefined = "test-key",
-	settings = Settings.isolated(),
+	settings = Settings.isolated({ "images.questionEnabled": true }),
 	options: CreateSessionOptions = {},
 ): ToolSession {
 	settings.set("images.autoResize", false);
@@ -175,6 +175,25 @@ describe("read image questions", () => {
 		removeSyncWithRetries(testDir);
 	});
 
+	it("returns an explicit disabled error without sending image bytes", async () => {
+		const stub = createCompleteSimpleForbiddenStub();
+		const session = createSession(testDir, visionModel, "test-key", Settings.isolated());
+		await expect(
+			new ReadTool(session, stub.fn).execute("call", { path: imagePath + "?q=Private pixels" }),
+		).rejects.toThrow("disabled");
+		expect(stub.calls).toHaveLength(0);
+	});
+
+	it("does not fall back to the active model when vision is disabled", async () => {
+		const stub = createCompleteSimpleForbiddenStub();
+		const session = createSession(testDir, visionModel);
+		session.settings.setModelRole("vision", "none");
+		await expect(
+			new ReadTool(session, stub.fn).execute("call", { path: imagePath + "?q=Private pixels" }),
+		).rejects.toThrow("disabled");
+		expect(stub.calls).toHaveLength(0);
+	});
+
 	it("returns only answer text and sends image before the question", async () => {
 		const stub = createCompleteSimpleSuccessStub("Detected text: Settings");
 		const tool = new ReadTool(createSession(testDir, visionModel), stub.fn);
@@ -193,9 +212,15 @@ describe("read image questions", () => {
 	it("answers questions about attachment URLs", async () => {
 		const image: ImageContent = { type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" };
 		const stub = createCompleteSimpleSuccessStub("Attached image");
-		const session = createSession(testDir, visionModel, "test-key", Settings.isolated(), {
-			imageAttachments: [{ label: "Image #1", uri: "attachment://1", image, sourcePath: imagePath }],
-		});
+		const session = createSession(
+			testDir,
+			visionModel,
+			"test-key",
+			Settings.isolated({ "images.questionEnabled": true }),
+			{
+				imageAttachments: [{ label: "Image #1", uri: "attachment://1", image, sourcePath: imagePath }],
+			},
+		);
 
 		const result = await new ReadTool(session, stub.fn).execute("call", {
 			path: "attachment://1?q=Describe the attachment",
@@ -222,7 +247,7 @@ describe("read image questions", () => {
 	});
 
 	it("forwards configured thinking effort", async () => {
-		const settings = Settings.isolated();
+		const settings = Settings.isolated({ "images.questionEnabled": true });
 		settings.setModelRole("vision", `${reasoningVisionModel.provider}/${reasoningVisionModel.id}:high`);
 		const stub = createCompleteSimpleSuccessStub("Red");
 		const session = createSession(testDir, reasoningVisionModel, "test-key", settings, {
@@ -238,7 +263,7 @@ describe("read image questions", () => {
 
 	it("maps a stalled vision request to the image question timeout", async () => {
 		const stub = createCompleteSimpleHangingStub();
-		const settings = Settings.isolated({ "images.questionTimeoutMs": 50 });
+		const settings = Settings.isolated({ "images.questionEnabled": true, "images.questionTimeoutMs": 50 });
 		const tool = new ReadTool(createSession(testDir, visionModel, "test-key", settings), stub.fn);
 		const timeoutController = new AbortController();
 		const nativeTimeout = AbortSignal.timeout;
@@ -263,7 +288,7 @@ describe("read image questions", () => {
 
 	it("blocks delegated image questions when image submission is disabled", async () => {
 		const stub = createCompleteSimpleForbiddenStub();
-		const settings = Settings.isolated({ "images.blockImages": true });
+		const settings = Settings.isolated({ "images.questionEnabled": true, "images.blockImages": true });
 		const tool = new ReadTool(createSession(testDir, visionModel, "test-key", settings), stub.fn);
 
 		await expect(tool.execute("call", { path: `${imagePath}?q=What is visible?` })).rejects.toThrow(
@@ -283,10 +308,16 @@ describe("read image questions", () => {
 	});
 
 	it("returns metadata and a question hint without pixels for text-only active models", async () => {
-		const session = createSession(testDir, visionModel, "test-key", Settings.isolated(), {
-			activeModel: textOnlyModel,
-			availableModels: [textOnlyModel, visionModel],
-		});
+		const session = createSession(
+			testDir,
+			visionModel,
+			"test-key",
+			Settings.isolated({ "images.questionEnabled": true }),
+			{
+				activeModel: textOnlyModel,
+				availableModels: [textOnlyModel, visionModel],
+			},
+		);
 		const result = await new ReadTool(session).execute("call", { path: imagePath });
 
 		expect(textOf(result)).toContain("Dimensions:");

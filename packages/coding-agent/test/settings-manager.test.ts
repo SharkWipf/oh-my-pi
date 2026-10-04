@@ -1780,6 +1780,22 @@ describe("Settings", () => {
 	});
 
 	describe("kind role settings migration", () => {
+		it("keeps explicit disabled helper roles through legacy local-model migration", () => {
+			const settings = Settings.isolated({
+				modelRoles: { tiny: "none", memory: "none", judge: "none" },
+				providers: { tinyModel: "lfm2.5-350m", memoryModel: "lfm2-1.2b", autoThinkingModel: "qwen3-1.7b" },
+			} as unknown as Partial<Record<SettingPath, unknown>>);
+			expect(settings.getModelRoles()).toEqual({ tiny: "none", memory: "none", judge: "none" });
+		});
+
+		it("keeps an explicit native judge choice without adding prompted remote fallbacks", () => {
+			const settings = Settings.isolated({
+				providers: { judgmentProvider: "typesafe", autoThinkingModel: "qwen3-1.7b" },
+			} as unknown as Partial<Record<SettingPath, unknown>>);
+			expect(settings.getModelRole("judge")).toBe("typesafe/jev-latest");
+			expect(settings.get("retry.fallbackChains").judge).toEqual(["local/qwen3-1.7b"]);
+		});
+
 		type LegacyMigrationCase = readonly [
 			name: string,
 			path: string,
@@ -1876,15 +1892,15 @@ describe("Settings", () => {
 				"auto-thinking model",
 				"providers.autoThinkingModel",
 				"qwen3-1.7b",
-				{ judge: "typesafe/jev-latest" },
-				{ judge: ["local/qwen3-1.7b", "@tiny", "@smol", "@default"] },
+				{ judge: "local/qwen3-1.7b" },
+				{ judge: [] },
 			],
 			[
 				"unexpected-stop model",
 				"providers.unexpectedStopModel",
 				"gemma-3-1b",
-				{ judge: "typesafe/jev-latest" },
-				{ judge: ["local/gemma-3-1b", "@tiny", "@smol", "@default"] },
+				{ judge: "local/gemma-3-1b" },
+				{ judge: [] },
 			],
 			["tiny model", "providers.tinyModel", "lfm2.5-230m", { tiny: "local/lfm2.5-230m" }, {}],
 			["memory model", "providers.memoryModel", "lfm2-1.2b", { memory: "local/lfm2-1.2b" }, {}],

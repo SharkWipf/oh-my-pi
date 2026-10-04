@@ -91,6 +91,7 @@ async function createFixture(overrides?: Partial<Record<string, unknown>>): Prom
 		model,
 		modelRegistry,
 		refreshBaseSystemPrompt,
+		emitNotice: vi.fn(),
 	};
 
 	return { agentDir, sessionDir, sessionFile, settings, session, modelRegistry, model, whenSettled: settled.promise };
@@ -197,8 +198,56 @@ describe("memories runtime", () => {
 		expect(stage1Spy).not.toHaveBeenCalled();
 	});
 
+	test("does not infer legacy memories when the memory role is disabled", async () => {
+		const fx = await createFixture({ modelRoles: { memory: "none", default: "openai/test-model" } });
+		const rolloutPath = path.join(fx.sessionDir, "thread-disabled.jsonl");
+		await fs.writeFile(
+			rolloutPath,
+			[
+				JSON.stringify({ type: "session", id: "thread-disabled", cwd: fx.agentDir }),
+				JSON.stringify({ type: "message", message: { role: "user", content: "summarize this rollout" } }),
+				"",
+			].join("\n"),
+		);
+		const complete = vi.spyOn(ai, "completeSimple");
+		startMemoryStartupTask({
+			session: fx.session,
+			settings: fx.settings,
+			modelRegistry: fx.modelRegistry,
+			agentDir: fx.agentDir,
+			taskDepth: 0,
+		});
+		await settle(fx.whenSettled, "disabled memory startup");
+		expect(complete).not.toHaveBeenCalled();
+		expect(fx.modelRegistry.getApiKey).not.toHaveBeenCalled();
+	});
+
+	test("does not reroute an explicit local memory selection to the paid phase model", async () => {
+		const fx = await createFixture({
+			modelRoles: { memory: "local/missing-memory-model", default: "openai/test-model" },
+		});
+		const complete = vi.spyOn(ai, "completeSimple");
+		startMemoryStartupTask({
+			session: fx.session,
+			settings: fx.settings,
+			modelRegistry: fx.modelRegistry,
+			agentDir: fx.agentDir,
+			taskDepth: 0,
+		});
+		await settle(fx.whenSettled, "unsupported local memory startup");
+		expect(complete).not.toHaveBeenCalled();
+		expect(fx.modelRegistry.getApiKey).not.toHaveBeenCalled();
+		expect(fx.session.emitNotice).toHaveBeenCalledWith(
+			"warning",
+			expect.stringContaining("cannot run a local model"),
+			"memory",
+		);
+	});
+
 	test("runs phase1 to phase2 and writes consolidated outputs", async () => {
-		const fx = await createFixture();
+		const fx = await createFixture({ modelRoles: { memory: "openai/selected-memory-model" } });
+		const memoryModel = createModel("selected-memory-model");
+		fx.modelRegistry.getAll.mockReturnValue([fx.model, memoryModel]);
 		const rolloutPath = path.join(fx.sessionDir, "thread-a.jsonl");
 		const rolloutRows = [
 			{ type: "session", id: "thread-a", cwd: fx.agentDir },
@@ -256,8 +305,7 @@ describe("memories runtime", () => {
 			"# Deploy\nUse blue/green.",
 		);
 		expect(fx.session.refreshBaseSystemPrompt).toHaveBeenCalledTimes(1);
-		expect(ai.completeSimple).toHaveBeenCalled();
-		expect(ai.completeSimple).toHaveBeenCalledTimes(2);
+		expect(completeSpy.mock.calls.map(([model]) => model.id)).toEqual([memoryModel.id, memoryModel.id]);
 		const phase2Prompt = completeSpy.mock.calls[1]?.[1];
 		expect(phase2Prompt?.systemPrompt?.[0]).toContain("memory-stage-two consolidator");
 	});

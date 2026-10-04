@@ -47,6 +47,17 @@ describe("auto thinking classifier helpers", () => {
 		};
 	}
 
+	it("returns no inferred effort when the judge role is explicitly disabled", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-6")!;
+		const settings = Settings.isolated({ modelRoles: { judge: "none", smol: `${model.provider}/${model.id}` } });
+		const registry = createRegistry([model], { anthropic: "test-key" });
+		const online = vi.spyOn(ai, "completeSimple");
+		const local = vi.spyOn(tinyModelClient, "complete");
+		expect(await classifyDifficulty("Classify a task", { model, settings, registry })).toBeUndefined();
+		expect(online).not.toHaveBeenCalled();
+		expect(local).not.toHaveBeenCalled();
+	});
+
 	it("parses configured thinking without widening provider-facing thinking selectors", () => {
 		expect(parseConfiguredThinkingLevel(AUTO_THINKING)).toBe(AUTO_THINKING);
 		expect(parseConfiguredThinkingLevel(Effort.High)).toBe(Effort.High);

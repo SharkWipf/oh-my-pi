@@ -6,6 +6,7 @@
 import type { AssistantMessage, Model, NoulQuestion } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
+import { isModelRoleDisabled } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import { resolveJudge } from "../judgment";
 
@@ -65,6 +66,7 @@ export async function classifyUnexpectedStop(
 	text: string,
 	deps: ClassifyUnexpectedStopDeps,
 ): Promise<boolean | undefined> {
+	if (isModelRoleDisabled("judge", deps.settings)) return undefined;
 	try {
 		const judge = resolveJudge({
 			settings: deps.settings,

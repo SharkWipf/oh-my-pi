@@ -46,6 +46,10 @@ import {
 import { isAuthenticated, kNoAuth, type ModelRegistry } from "./model-registry";
 import {
 	DEFAULT_MODEL_ROLE_ALIAS,
+	MODEL_ROLE_DISABLED,
+	isDisabledModelRoleValue,
+	isModelRoleDisabled,
+	isLocalModelRoleSelection,
 	formatModelRoleAlias,
 	LEGACY_MODEL_ROLE_ALIAS_PREFIX,
 	CHAT_MODEL_ROLE_IDS,
@@ -1107,6 +1111,10 @@ function resolveNestedRolePatterns(
 			modelRoleAliasPrefixLength(pattern) ?? LEGACY_MODEL_ROLE_ALIAS_PREFIX.length,
 			MAX_THINKING_SUFFIX_OPTIONS,
 		);
+		if (isDisabledModelRoleValue(pattern)) {
+			resolved.push(MODEL_ROLE_DISABLED);
+			break;
+		}
 		const aliasRole = getModelRoleAlias(aliasCandidate, settings);
 		if (!aliasRole) {
 			resolved.push(pattern);
@@ -1123,6 +1131,7 @@ function resolveNestedRolePatterns(
 
 		const recursed = resolveConfiguredRolePattern(pattern, settings, new Set(visited));
 		if (recursed) resolved.push(...recursed);
+		if (isDisabledModelRoleValue(resolved.at(-1))) break;
 	}
 	return resolved;
 }
@@ -1145,6 +1154,7 @@ function resolveConfiguredRolePattern(
 ): string[] | undefined {
 	const normalized = value.trim();
 	if (!normalized) return undefined;
+	if (isDisabledModelRoleValue(normalized)) return [MODEL_ROLE_DISABLED];
 
 	const { base: aliasCandidate, level: thinkingLevel } = splitThinkingSuffix(
 		normalized,
@@ -1153,6 +1163,7 @@ function resolveConfiguredRolePattern(
 	);
 	const role = getModelRoleAlias(aliasCandidate, settings);
 	if (!role) return [normalized];
+	if (settings && isModelRoleDisabled(role, settings)) return [MODEL_ROLE_DISABLED];
 	if (visited.has(role)) return undefined;
 	visited.add(role);
 
@@ -1180,7 +1191,9 @@ function resolveConfiguredRolePattern(
 		return undefined;
 	}
 
-	return thinkingLevel ? resolved.map(pattern => `${pattern}:${thinkingLevel}`) : resolved;
+	return thinkingLevel
+		? resolved.map(pattern => (isDisabledModelRoleValue(pattern) ? pattern : `${pattern}:${thinkingLevel}`))
+		: resolved;
 }
 
 /**
@@ -1196,15 +1209,23 @@ export function expandRoleAlias(value: string, settings?: ModelRoleLookup): stri
 	return resolved ?? value;
 }
 
+function resolveConfiguredPatternList(value: string | string[] | undefined, settings?: ModelRoleLookup): string[] {
+	const resolved: string[] = [];
+	for (const pattern of normalizeModelPatternList(value)) {
+		const expanded = resolveConfiguredRolePattern(pattern, settings);
+		if (expanded) resolved.push(...expanded);
+		if (isDisabledModelRoleValue(resolved.at(-1))) break;
+	}
+	return resolved;
+}
+
 export function resolveConfiguredModelPatterns(
 	value: string | string[] | undefined,
 	settings?: ModelRoleLookup,
 ): string[] {
-	const patterns = normalizeModelPatternList(value);
-	return patterns.flatMap(pattern => {
-		const resolved = resolveConfiguredRolePattern(pattern, settings);
-		return resolved ?? [];
-	});
+	const patterns = resolveConfiguredPatternList(value, settings);
+	if (isDisabledModelRoleValue(patterns.at(-1))) patterns.pop();
+	return patterns;
 }
 export interface AgentModelPatternResolutionOptions {
 	/** Highest-priority request selector, when supplied by a caller. */
@@ -1226,18 +1247,24 @@ function resolveEffectiveAgentModelSelection(
 ): EffectiveAgentModelSelection {
 	const { requestModel, settingsOverride, agentModel, settings, activeModelPattern, fallbackModelPattern } = options;
 
-	const requestPatterns = resolveConfiguredModelPatterns(requestModel, settings);
+	const requestPatterns = resolveConfiguredPatternList(requestModel, settings);
 	if (requestPatterns.length > 0) {
+		if (isDisabledModelRoleValue(requestPatterns.at(-1))) requestPatterns.pop();
 		return { source: requestModel, patterns: requestPatterns };
 	}
 
-	const overridePatterns = resolveConfiguredModelPatterns(settingsOverride, settings);
+	const overridePatterns = resolveConfiguredPatternList(settingsOverride, settings);
 	if (overridePatterns.length > 0) {
+		if (isDisabledModelRoleValue(overridePatterns.at(-1))) overridePatterns.pop();
 		return { source: settingsOverride, patterns: overridePatterns };
 	}
 
 	const normalizedAgentPatterns = normalizeModelPatternList(agentModel);
-	const configuredAgentPatterns = resolveConfiguredModelPatterns(agentModel, settings);
+	const configuredAgentPatterns = resolveConfiguredPatternList(agentModel, settings);
+	if (isDisabledModelRoleValue(configuredAgentPatterns.at(-1))) {
+		configuredAgentPatterns.pop();
+		return { source: agentModel, patterns: configuredAgentPatterns };
+	}
 	const singleAgentPattern = normalizedAgentPatterns.length === 1 ? normalizedAgentPatterns[0] : undefined;
 	const agentInheritsSessionModel = singleAgentPattern ? isSessionInheritedAgentPattern(singleAgentPattern) : false;
 	if (configuredAgentPatterns.length > 0) {
@@ -1510,12 +1537,19 @@ export function resolveRoleChain(
 	pool: Model<Api>[],
 	options?: { hoistProvider?: string },
 ): RoleChainCandidate[] {
+	if (isModelRoleDisabled(role, settings)) return [];
 	const configuredRoles = settings.getModelRoles();
 	const configured = settings.getModelRole(role)?.trim();
 	const primarySelector = configured || formatModelRoleAlias(role);
 	const configuredFallbacks = settings.get("retry.fallbackChains")[role];
 	const hasConfiguredFallbackChain = Array.isArray(configuredFallbacks);
-	const fallbackSelectors = hasConfiguredFallbackChain ? configuredFallbacks : rolePriorityDefaults(role);
+	const localHelper =
+		["tiny", "memory", "judge", "speech"].includes(role) && isLocalModelRoleSelection(role, settings);
+	const fallbackSelectors = hasConfiguredFallbackChain
+		? configuredFallbacks
+		: localHelper
+			? []
+			: rolePriorityDefaults(role);
 	const selectors = [
 		{ selector: primarySelector, explicit: Object.hasOwn(configuredRoles, role) },
 		...fallbackSelectors.map(selector => ({ selector, explicit: hasConfiguredFallbackChain })),
@@ -1523,18 +1557,24 @@ export function resolveRoleChain(
 	const candidates: RoleChainCandidate[] = [];
 	const candidateByRoute = new Map<string, RoleChainCandidate>();
 	for (const { selector, explicit } of selectors) {
+		const terminal = isDisabledModelRoleValue(resolveConfiguredPatternList(selector, settings).at(-1));
 		const resolved = resolveModelRoleValue(selector, pool, { settings });
-		if (!resolved.model) continue;
+		if (!resolved.model) {
+			if (terminal) break;
+			continue;
+		}
 		const key = formatModelStringWithRouting(resolved.model);
 		const existing = candidateByRoute.get(key);
 		if (existing) {
 			if (explicit) existing.explicit = true;
+			if (terminal) break;
 			continue;
 		}
 		const candidate: RoleChainCandidate = { model: resolved.model, explicit };
 		if (resolved.thinkingLevel !== undefined) candidate.thinkingLevel = resolved.thinkingLevel;
 		candidateByRoute.set(key, candidate);
 		candidates.push(candidate);
+		if (terminal) break;
 	}
 
 	const hoistProvider = options?.hoistProvider;

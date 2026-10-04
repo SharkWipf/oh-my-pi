@@ -218,6 +218,31 @@ describe("setup wizard model selection", () => {
 });
 
 describe("setup wizard persistence", () => {
+	it("None disables web search without availability requests while Auto clears the role", () => {
+		const settings = Settings.isolated();
+		const ctx = createSetupHost({ settings } as unknown as InteractiveModeContext);
+		const availability = mock(async () => true);
+		ctx.isSearchProviderAvailable = availability;
+		const tab = new WebSearchTab({
+			ctx,
+			requestRender: () => {},
+			finish: () => {},
+			setFocus: () => {},
+			restoreFocus: () => {},
+		});
+		tab.handleInput("\x1b[A"); // Auto -> Disabled (None).
+		tab.handleInput("\n");
+		expect(settings.getModelRole("web")).toBe("none");
+		expect(ctx.webSearchOrder).toEqual(["none"]);
+		tab.onActivate();
+		expect(availability).not.toHaveBeenCalled();
+		tab.handleInput("\x1b[B"); // Disabled -> Auto.
+		tab.handleInput("\n");
+		expect(settings.getModelRole("web")).toBeUndefined();
+		expect(availability).not.toHaveBeenCalled();
+		tab.dispose();
+	});
+
 	it("marks the current setup version complete", async () => {
 		const settings = Settings.isolated();
 		await markSetupWizardComplete(settings);

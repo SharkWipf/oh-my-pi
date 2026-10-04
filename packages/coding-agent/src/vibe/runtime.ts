@@ -27,6 +27,7 @@ import * as path from "node:path";
 import { logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobManager } from "../async/job-manager";
 import { resolveAgentModelSelection } from "../config/model-resolver";
+import { isModelRoleDisabled } from "../config/model-roles";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
@@ -802,8 +803,13 @@ export class VibeSessionRegistry {
 		if (this.#terminatedScopes.has(scopeKey(scope, ""))) {
 			throw new ToolError("Vibe mode has exited; enter Vibe mode again before spawning a worker.");
 		}
-		const manager = this.#manager(session);
 		const { agent, modelOverride, modelRole } = this.#resolveWorker(session, args.cli);
+		if (modelOverride?.length === 0 && modelRole && isModelRoleDisabled(modelRole, session.settings)) {
+			throw new ToolError(
+				`Model role "${modelRole}" is disabled. Select another model or enable the role before spawning.`,
+			);
+		}
+		const manager = this.#manager(session);
 		if (!session.agentOutputManager) {
 			session.agentOutputManager = new AgentOutputManager(session.getArtifactsDir ?? (() => null));
 		}

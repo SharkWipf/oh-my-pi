@@ -127,6 +127,8 @@ export interface ModelHubCallbacks {
 	) => void | boolean | Promise<void | boolean>;
 	/** Clear a configured role back to auto-selection. */
 	onUnassign: (role: string, scope?: ModelRoleSelectionScope) => void;
+	/** Disable a role without invoking automatic selection or fallback. */
+	onDisable: (role: string, scope?: ModelRoleSelectionScope) => void | Promise<void>;
 	/** Persist a `retry.fallbackChains` entry — keyed by a role, `provider/model-id`, or `provider/*`; an empty chain clears the key. */
 	onFallbackChainChange?: (role: string, chain: string[]) => void;
 	/** Locked provider activation: forward to the /login flow. */
@@ -180,6 +182,7 @@ type StripState =
 			/** Thinking value already committed for this strip. */
 			initialThinkingLevel?: ConfiguredThinkingLevel;
 	  })
+	| (HubStripState<StripChip> & { kind: "disableScope"; role: string })
 	| {
 			/** Footer text input naming a new custom role. */
 			kind: "roleName";
@@ -1008,7 +1011,7 @@ export class ModelHubComponent implements Component {
 
 	#unassignRole(role: string): void {
 		const assignment = this.#roles[role];
-		if (!assignment || assignment.autoSelected) return;
+		if ((!assignment || assignment.autoSelected) && !this.#settings.isRoleDisabled(role)) return;
 		if (this.#settings.modelRoleStorage === "project") {
 			const source = this.#settings.getModelRoleSource(role);
 			this.#callbacks.onUnassign(role, source === "default" ? undefined : source);
@@ -1261,6 +1264,11 @@ export class ModelHubComponent implements Component {
 		if (!strip || strip.kind === "roleName") return;
 		const chip = strip.chips[strip.index];
 		if (!chip) return;
+		if (strip.kind === "disableScope") {
+			this.#finishAssignment(this.#callbacks.onDisable(strip.role, chip.scope), () => this.#refreshAfterMutation());
+			this.#closeStrip();
+			return;
+		}
 		switch (chip.action) {
 			case "assign":
 				if (chip.role) {
@@ -1781,6 +1789,22 @@ export class ModelHubComponent implements Component {
 			return;
 		}
 		const printable = extractPrintableText(data);
+		if (printable === "d" && role && role !== "default") {
+			if (this.#settings.modelRoleStorage === "project") {
+				this.#strip = {
+					kind: "disableScope",
+					role,
+					index: 0,
+					chips: [
+						{ label: "project", styled: theme.fg("accent", "project"), action: "scope", scope: "project" },
+						{ label: "global", styled: theme.fg("muted", "global"), action: "scope", scope: "global" },
+					],
+				};
+			} else {
+				this.#finishAssignment(this.#callbacks.onDisable(role), () => this.#refreshAfterMutation());
+			}
+			return;
+		}
 		if (printable === "x") {
 			if (role) this.#unassignRole(role);
 			else if (row?.kind === "fallback") this.#removeFallback(row);
@@ -2159,7 +2183,11 @@ export class ModelHubComponent implements Component {
 			let tagStyled: string;
 			let value: string;
 			let levelStyled = "";
-			if (assignment && !assignment.autoSelected) {
+			if (this.#settings.isRoleDisabled(role)) {
+				dot = theme.fg("dim", theme.status.disabled);
+				tagStyled = theme.fg("dim", tag);
+				value = theme.fg("dim", "Disabled — no automatic selection or fallback");
+			} else if (assignment && !assignment.autoSelected) {
 				dot = theme.fg(info.color ?? "muted", theme.status.enabled);
 				tagStyled = theme.fg(info.color ?? "muted", tag);
 				value = `${theme.fg("dim", `${assignment.model.provider}/`)}${selected ? theme.fg("accent", assignment.model.id) : assignment.model.id}`;
@@ -2200,6 +2228,12 @@ export class ModelHubComponent implements Component {
 			if (hiddenAbove > 0) parts.push(`↑ ${hiddenAbove} more`);
 			if (hiddenBelow > 0) parts.push(`↓ ${hiddenBelow} more`);
 			lines.push(truncateToWidth(theme.fg("dim", `   ${parts.join("   ")}`), width));
+		}
+
+		const selectedRow = this.#rolesRows[this.#roleIndex];
+		if (selectedRow?.kind === "role" && lines.length < rows - 1) {
+			const purpose = this.#settings.getRoleInfo(selectedRow.role).purpose;
+			if (purpose) lines.push(truncateToWidth(theme.fg("dim", `  ${purpose}`), width));
 		}
 
 		// Live preview of the quick-switch cycle, rendered with the exact
@@ -2270,7 +2304,8 @@ export class ModelHubComponent implements Component {
 				return "Enter create + pick model · Esc cancel";
 			}
 			if (strip.kind === "role") return "←/→ choose · Enter assign/clear · Esc cancel";
-			if (strip.kind === "scope") return "←/→ save scope · Enter choose · Esc cancel";
+			if (strip.kind === "scope" || strip.kind === "disableScope")
+				return "←/→ save scope · Enter choose · Esc cancel";
 			return "←/→ thinking level · Enter apply · Esc keep";
 		}
 		if (this.#assigning !== null) {
@@ -2303,7 +2338,7 @@ export class ModelHubComponent implements Component {
 			if (row?.kind === "newFallback") {
 				return "↑/↓ rows · Enter new model/provider fallback chain · ← providers";
 			}
-			return "↑/↓ rows · Enter pick · f fallback · x clear · t thinking · c cycle · [/] reorder · n new";
+			return `↑/↓ rows · Enter pick · f fallback · x Auto${row?.kind === "role" && row.role !== "default" ? " · d Disable" : ""} · t thinking · c cycle · n new`;
 		}
 		if (entry.kind === "provider" && entry.locked) {
 			return entry.oauth ? "Enter log in · ↑/↓ providers · Esc close" : "↑/↓ providers · Esc close";
@@ -2331,9 +2366,11 @@ export class ModelHubComponent implements Component {
 		}
 
 		const prefix =
-			strip.kind === "role"
-				? `${theme.fg("accent", strip.item.id)}${theme.fg("dim", " →")} `
-				: `${theme.fg(this.#settings.getRoleInfo(strip.role ?? "").color ?? "muted", (this.#settings.getRoleInfo(strip.role ?? "").tag ?? strip.role ?? "").toLowerCase())}${theme.fg("dim", ` · ${strip.item.id} →`)} `;
+			strip.kind === "disableScope"
+				? `${theme.fg("accent", strip.role)} disable in → `
+				: strip.kind === "role"
+					? `${theme.fg("accent", strip.item.id)}${theme.fg("dim", " →")} `
+					: `${theme.fg(this.#settings.getRoleInfo(strip.role ?? "").color ?? "muted", (this.#settings.getRoleInfo(strip.role ?? "").tag ?? strip.role ?? "").toLowerCase())}${theme.fg("dim", ` · ${strip.item.id} →`)} `;
 
 		// Horizontal window: once the strip overflows, drop leading chips behind
 		// a dim ellipsis so the selected chip (plus one chip of lookahead when it

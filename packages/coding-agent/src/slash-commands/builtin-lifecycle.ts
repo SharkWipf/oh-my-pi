@@ -671,6 +671,10 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		handle: async (command, runtime) => {
 			const session = runtime.session;
 			const sessionManager = runtime.sessionManager;
+			if (!command.args && !session.settings.get("title.enabled")) {
+				await runtime.output("Title generation is disabled. Enable title.enabled or use /rename <title>.");
+				return commandConsumed();
+			}
 			const runRename = async (): Promise<void> => {
 				const sessionId = sessionManager.getSessionId();
 				const titleSignal = session.titleGenerationSignal;
@@ -718,6 +722,10 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		handleTui: async (command, runtime) => {
 			runtime.ctx.editor.setText("");
 			const session = runtime.ctx.session;
+			if (!command.args.trim() && !session.settings.get("title.enabled")) {
+				runtime.ctx.showStatus("Title generation is disabled. Enable title.enabled or use /rename <title>.");
+				return;
+			}
 			const sessionManager = runtime.ctx.sessionManager;
 			const sessionId = sessionManager.getSessionId();
 			const titleSignal = session.titleGenerationSignal;

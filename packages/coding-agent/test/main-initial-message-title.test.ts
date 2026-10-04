@@ -21,7 +21,7 @@ describe.skipIf(!hasPtyHarness)("CLI initial-message title generation", () => {
 			await fs.mkdir(agentDir, { recursive: true });
 			await Bun.write(
 				path.join(agentDir, "config.yml"),
-				"setupVersion: 1\nstartup:\n  setupWizard: false\n  showSplash: false\n  checkUpdate: false\nproviders:\n  tinyModel: online\n",
+				"setupVersion: 1\nstartup:\n  setupWizard: false\n  showSplash: false\n  checkUpdate: false\ntitle:\n  enabled: true\nproviders:\n  tinyModel: online\n",
 			);
 			const command = [
 				JSON.stringify(process.execPath),

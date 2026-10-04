@@ -69,7 +69,7 @@ function makeDeps(
 			getApiKey: async () => apiKey,
 			resolver: () => async () => apiKey,
 		} as unknown as DescribeAttachedImagesDeps["modelRegistry"],
-		settings: Settings.isolated(),
+		settings: Settings.isolated({ "images.describeForTextModels": true }),
 		localProtocolOptions: { getArtifactsDir: () => artifactsDir, getSessionId: () => "test-session" },
 		activeModelString: `${textModel.provider}/${textModel.id}`,
 		completeImpl,
@@ -77,6 +77,20 @@ function makeDeps(
 }
 
 describe("describeAttachedImagesForTextModel", () => {
+	it("preserves the local image without dispatch when automatic description is disabled", async () => {
+		const stub = makeCompleteStub("unexpected");
+		const deps = makeDeps(testDir, [textModel, visionModel], stub.fn);
+		deps.settings.override("images.describeForTextModels", false);
+		const blocks = await describeAttachedImagesForTextModel(
+			[{ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" }],
+			deps,
+		);
+		expect(stub.calls).toHaveLength(0);
+		const saved = blocks[0]!.text.match(new RegExp('path="local://([^"]+)"'));
+		expect(saved).not.toBeNull();
+		expect(await Bun.file(path.join(testDir, "local", saved![1]!)).exists()).toBe(true);
+	});
+
 	let testDir: string;
 
 	beforeEach(async () => {
@@ -85,6 +99,18 @@ describe("describeAttachedImagesForTextModel", () => {
 
 	afterEach(async () => {
 		await removeWithRetries(testDir);
+	});
+
+	it("does not bypass a disabled vision role with an available fallback", async () => {
+		const stub = makeCompleteStub("unexpected");
+		const deps = makeDeps(testDir, [textModel, visionModel], stub.fn);
+		deps.settings.setModelRole("vision", "none");
+		const blocks = await describeAttachedImagesForTextModel(
+			[{ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" }],
+			deps,
+		);
+		expect(stub.calls).toHaveLength(0);
+		expect(blocks[0]!.text).toContain("local://");
 	});
 
 	it("saves the image under local:// and injects a vision description block", async () => {

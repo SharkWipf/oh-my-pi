@@ -140,6 +140,12 @@ function createHub(options: {
 		options.scoped ? modelsFn().map(model => ({ model })) : [],
 		{
 			onAssign: options.callbacks?.onAssign ?? onAssign,
+			onDisable:
+				options.callbacks?.onDisable ??
+				((role, scope) => {
+					if (scope === "project") settings.setProjectModelRole(role, "none");
+					else settings.setModelRole(role, "none");
+				}),
 			onUnassign: options.callbacks?.onUnassign ?? onUnassign,
 			onLoginRequest: options.callbacks?.onLoginRequest ?? onLoginRequest,
 			onCycleOrderChange: options.callbacks?.onCycleOrderChange,
@@ -299,6 +305,54 @@ describe("ModelHub", () => {
 			expect(onAssign.mock.calls[0]?.[0]).toBe(storedModel);
 			expect(onAssign.mock.calls[0]?.[1]).toBe("default");
 			expect(onAssign.mock.calls[0]?.[4]).toBe("global");
+		});
+
+		test("Disable persists without Auto fallback, and reset restores role inheritance", async () => {
+			const model = makeModel("test", "worker-model");
+			const settings = Settings.isolated({ modelRoles: { default: "test/worker-model" } });
+			const { hub } = createHub({
+				models: [model],
+				settings,
+				callbacks: {
+					onUnassign: role => settings.setModelRole(role, undefined),
+				},
+			});
+			hub.handleInput(UP);
+			hub.handleInput("\n");
+			hub.handleInput("d");
+			expect(settings.getModelRole("default")).toBe("test/worker-model");
+			hub.handleInput(DOWN);
+			hub.handleInput("d");
+			await Bun.sleep(0);
+			expect(settings.getModelRole("smol")).toBe("none");
+			expect(
+				hub
+					.render(220)
+					.map(stripVTControlCharacters)
+					.find(line => line.includes("SMOL")),
+			).toContain("Disabled");
+			hub.handleInput("x");
+			expect(settings.getModelRole("smol")).toBeUndefined();
+			expect(
+				hub
+					.render(220)
+					.map(stripVTControlCharacters)
+					.find(line => line.includes("SMOL")),
+			).toContain("test/worker-model");
+		});
+
+		test("Disable asks for project or global scope before saving", () => {
+			const settings = Settings.isolated({ modelRoleStorage: "project" });
+			const { hub } = createHub({ models: [makeModel("test", "worker-model")], settings });
+			hub.handleInput(UP);
+			hub.handleInput("\n");
+			hub.handleInput(DOWN);
+			hub.handleInput("d");
+			expect(settings.getModelRole("smol")).toBeUndefined();
+			hub.handleInput("\x1b[C");
+			hub.handleInput("\n");
+			expect(settings.getGlobalModelRole("smol")).toBe("none");
+			expect(settings.getProjectModelRole("smol")).toBeUndefined();
 		});
 
 		test("x clears a configured role back to auto-selection", () => {

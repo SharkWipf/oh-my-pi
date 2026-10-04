@@ -17,6 +17,7 @@ import {
 	resolveAgentPrewalkPattern,
 	resolveAllowedModels,
 	resolveCliModel,
+	resolveConfiguredModelPatterns,
 	resolveExplicitModelRole,
 	resolveModelFromSettings,
 	resolveModelFromString,
@@ -887,6 +888,66 @@ describe("role priorities and chains", () => {
 		expect(rolePriorityDefaults("not-a-built-in-role")).toEqual([]);
 		expect(rolePriorityDefaults("__proto__")).toEqual([]);
 		expect(rolePriorityDefaults("memory")).toEqual(rolePriorityDefaults("smol"));
+	});
+
+	test("disabled roles stop primary and retry fallback selection", () => {
+		const parallel = roleChainModel("web", "parallel");
+		const settings = Settings.isolated({
+			modelRoles: { web: "none", tiny: "none", memory: "@tiny" },
+			"retry.fallbackChains": { web: ["web/parallel"] },
+		});
+		expect(resolveRoleChain("web", settings, [parallel])).toEqual([]);
+		expect(resolveModelRoleValue("@memory", [parallel], { settings }).model).toBeUndefined();
+		expect(resolveConfiguredModelPatterns("@memory", settings)).toEqual([]);
+	});
+
+	test("a single explicit local helper does not admit online defaults", () => {
+		const local = roleChainModel("local", "local-helper");
+		const online = roleChainModel("typesafe", "jev-latest");
+		const settings = Settings.isolated({ modelRoles: { judge: "local/local-helper" } });
+		expect(resolveRoleChain("judge", settings, [local, online]).map(candidate => candidate.model.id)).toEqual([
+			"local-helper",
+		]);
+	});
+
+	test("none stops the remaining retry chain, including an alias to a disabled role", () => {
+		const local = roleChainModel("local", "local-helper");
+		const online = roleChainModel("typesafe", "jev-latest");
+		const settings = Settings.isolated({
+			modelRoles: { judge: "local/local-helper", tiny: "none" },
+			"retry.fallbackChains": { judge: ["none", "typesafe/jev-latest"] },
+		});
+		expect(resolveRoleChain("judge", settings, [local, online]).map(candidate => candidate.model.id)).toEqual([
+			"local-helper",
+		]);
+		settings.override("retry.fallbackChains", { judge: ["@tiny", "typesafe/jev-latest"] });
+		expect(resolveRoleChain("judge", settings, [local, online]).map(candidate => candidate.model.id)).toEqual([
+			"local-helper",
+		]);
+		settings.overrideModelRoles({ judge: "local/local-helper,none" });
+		settings.override("retry.fallbackChains", { judge: ["typesafe/jev-latest"] });
+		expect(resolveRoleChain("judge", settings, [local, online]).map(candidate => candidate.model.id)).toEqual([
+			"local-helper",
+		]);
+	});
+
+	test("a disabled agent selector does not fall through to the active primary model", () => {
+		const settings = Settings.isolated({ modelRoles: { smol: "none" } });
+		expect(
+			resolveAgentModelSelection({ agentModel: "@smol", settings, activeModelPattern: "anthropic/claude-primary" }),
+		).toEqual({ role: "smol", patterns: [] });
+		expect(
+			resolveAgentModelPatterns({
+				requestModel: "none",
+				agentModel: "anthropic/claude-worker",
+				settings,
+				activeModelPattern: "anthropic/claude-primary",
+			}),
+		).toEqual([]);
+		expect(resolveConfiguredModelPatterns(["none", "typesafe/jev-latest"], settings)).toEqual([]);
+		expect(resolveConfiguredModelPatterns("local/helper,none,typesafe/jev-latest", settings)).toEqual([
+			"local/helper",
+		]);
 	});
 
 	test("appends non-explicit web defaults after a configured primary", () => {

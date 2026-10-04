@@ -16,6 +16,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 
 import type { ModelRegistry } from "../config/model-registry";
+import { isLocalModelRoleSelection, isModelRoleDisabled } from "../config/model-roles";
 import { getModelMatchPreferences, resolveModelRoleValue } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import { redactMemorySecrets as redactSecrets } from "../memory-backend/redact";
@@ -1275,13 +1276,33 @@ async function resolveMemoryModel(options: {
 	fallbackRole: string;
 }): Promise<Model | undefined> {
 	const { modelRegistry, session, fallbackRole } = options;
-	const requestedModel = session.settings.getModelRole(fallbackRole) || session.settings.getModelRole("default");
+	if (isModelRoleDisabled("memory", session.settings)) return undefined;
+	const memorySelection = session.settings.getModelRole("memory");
+	const selectedRole = memorySelection ? "memory" : fallbackRole;
+	if (isModelRoleDisabled(selectedRole, session.settings)) return undefined;
+	if (isLocalModelRoleSelection(selectedRole, session.settings)) {
+		const message =
+			"Legacy memory inference cannot run a local model. Select a supported memory model or use the Mnemopi backend; no remote fallback was attempted.";
+		logger.warn(message, { role: selectedRole });
+		session.emitNotice("warning", message, "memory");
+		return undefined;
+	}
+	const requestedModel =
+		memorySelection || session.settings.getModelRole(fallbackRole) || session.settings.getModelRole("default");
 	if (requestedModel) {
 		const resolved = resolveModelRoleValue(requestedModel, modelRegistry.getAll(), {
 			settings: session.settings,
 			matchPreferences: getModelMatchPreferences(session.settings),
 		});
 		if (resolved.model) return resolved.model;
+		if (memorySelection) {
+			session.emitNotice(
+				"warning",
+				`The selected memory model is unavailable: ${memorySelection}. No fallback was attempted.`,
+				"memory",
+			);
+			return undefined;
+		}
 	}
 	return session.model ?? modelRegistry.getAll()[0];
 }

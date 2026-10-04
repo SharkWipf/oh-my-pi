@@ -27,7 +27,7 @@ import { showGitOverlay } from "../../cli/git-tui";
 import { formatLoginIdentity } from "../../cli/oauth-terminal";
 import { resolveAdvisorRoleSelection, resolveModelRoleValue } from "../../config/model-resolver";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
-import { getRoleInfo } from "../../config/model-roles";
+import { getRoleInfo, MODEL_ROLE_DISABLED } from "../../config/model-roles";
 import { settings } from "../../config/settings";
 import { createSettingsHost } from "../../config/settings-ui";
 import type { SettingPath } from "../../config/settings-schema";
@@ -1636,6 +1636,22 @@ export class SelectorController {
 						return false;
 					} finally {
 						releaseDefaultMutation?.();
+						hub?.refreshAfterExternalMutation();
+					}
+				},
+				onDisable: async (role, scope?: ModelRoleSelectionScope) => {
+					if (role === "default") return;
+					try {
+						const project = this.ctx.settings.get("modelRoleStorage") === "project" && scope !== "global";
+						if (project) this.ctx.settings.setProjectModelRole(role, MODEL_ROLE_DISABLED);
+						else this.ctx.settings.setModelRole(role, MODEL_ROLE_DISABLED);
+						await this.ctx.settings.flush();
+						this.ctx.showStatus(
+							`${getRoleInfo(role, settings).name} disabled — no automatic selection or fallback`,
+						);
+					} catch (error) {
+						this.ctx.showError(error instanceof Error ? error.message : String(error));
+					} finally {
 						hub?.refreshAfterExternalMutation();
 					}
 				},

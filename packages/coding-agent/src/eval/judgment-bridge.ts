@@ -23,6 +23,7 @@ import type {
 	ScoreQuestion,
 } from "@oh-my-pi/pi-ai";
 import { isRecord } from "@oh-my-pi/pi-utils";
+import { isModelRoleDisabled } from "../config/model-roles";
 import { type ChainJudge, type JudgmentUsage, journalJudgmentUsage, resolveJudge } from "../judgment";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { withBridgeTimeoutPause } from "./bridge-timeout";
@@ -160,6 +161,18 @@ export function toEvalJudgmentResult(result: JudgmentResult<Questions>): EvalJud
 	return { answers, model: `${result.provider}/${result.model}` };
 }
 
+/** Admission applies to both judge helpers before creating host-owned work. */
+export function assertEvalJudgmentEnabled(session: EvalCompletionBridgeOptions["session"]): void {
+	if (!session.settings.get("eval.judgmentEnabled")) {
+		throw new ToolError(
+			"judge() and judge_batch() are disabled. Enable eval.judgmentEnabled to permit auxiliary judgment.",
+		);
+	}
+	if (isModelRoleDisabled("judge", session.settings)) {
+		throw new ToolError("judge() and judge_batch() are disabled by modelRoles.judge=none.");
+	}
+}
+
 /**
  * Resolve the judge role chain for a bridge call's session; `purpose` labels its
  * cost on the session ledger. `onUsage` additionally observes every attempt
@@ -171,6 +184,7 @@ export function sessionJudge(
 	onUsage?: (usage: JudgmentUsage) => void,
 ): ChainJudge {
 	const { session } = options;
+	assertEvalJudgmentEnabled(session);
 	const registry = session.modelRegistry;
 	if (!registry) throw new ToolError("judge() has no model registry.");
 	const journal = journalJudgmentUsage(session.sessionManager, purpose);
@@ -201,6 +215,7 @@ export async function runEvalJudgment(
 	return withBridgeTimeoutPause(options.emitStatus, async () => {
 		await evalRequestSlots.acquire(signal);
 		try {
+			assertEvalJudgmentEnabled(options.session);
 			return toEvalJudgmentResult(await judge.judge({ state, questions }, { signal }));
 		} finally {
 			evalRequestSlots.release();

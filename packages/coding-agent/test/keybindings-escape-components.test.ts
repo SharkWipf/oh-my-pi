@@ -99,6 +99,7 @@ describe("component escape bindings", () => {
 			[{ model, thinkingLevel: "off" }],
 			{
 				onAssign: () => {},
+				onDisable: () => {},
 				onUnassign: () => {},
 				onCancel,
 			},

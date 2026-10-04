@@ -29,7 +29,7 @@ import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelStringWithRouting, resolveRoleChain, type RoleChainCandidate } from "../config/model-resolver";
-import { roleCandidatePool } from "../config/model-roles";
+import { isLocalModelRoleSelection, isModelRoleDisabled, roleCandidatePool } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import type { SessionManager } from "../session/session-manager";
 import { getTinyLocalModelSpec } from "../tiny/models";
@@ -224,6 +224,10 @@ export class ChainJudge implements Judge {
 	}
 
 	#resolveCandidates(): RoleChainCandidate[] {
+		if (isModelRoleDisabled("judge", this.#deps.settings))
+			throw new Error(
+				"judgment: judge role is disabled; choose a model in /models before enabling judgment helpers",
+			);
 		const now = Date.now();
 		if (this.#candidates && now < this.#candidates.expiresAt) return this.#candidates.list;
 		const list = this.#buildCandidates();
@@ -234,7 +238,12 @@ export class ChainJudge implements Judge {
 	#buildCandidates(): RoleChainCandidate[] {
 		const { settings, registry, sessionModel } = this.#deps;
 		const candidates = judgeRoleChain(settings, registry);
-		if (!sessionModel || candidates.some(candidate => kindOf(candidate) === "native")) return candidates;
+		if (
+			!sessionModel ||
+			isLocalModelRoleSelection("judge", settings) ||
+			candidates.some(candidate => kindOf(candidate) === "native")
+		)
+			return candidates;
 		const sessionIdentity = formatModelStringWithRouting(sessionModel);
 		if (candidates.some(candidate => formatModelStringWithRouting(candidate.model) === sessionIdentity)) {
 			return candidates;

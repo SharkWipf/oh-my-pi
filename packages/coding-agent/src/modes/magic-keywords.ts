@@ -25,6 +25,10 @@ export interface MagicKeywordContext {
 	scoutAvailable: boolean;
 	/** `eval.tools.enabled`: whether `@tool`-defined kernel tools exist. */
 	evalTools: boolean;
+	/** Explicit consent for auxiliary completion inference. */
+	completionEnabled: boolean;
+	/** Explicit consent for typed auxiliary judgment. */
+	judgmentEnabled: boolean;
 }
 
 /** One magic keyword: trigger word, gradient, settings copy, and the notice it injects. */
@@ -48,8 +52,10 @@ export interface MagicKeyword {
 /** Hidden notice for "ultrathink": careful multi-step reasoning. */
 export const ULTRATHINK_NOTICE: string = ultrathinkNotice.trim();
 
-/** Hidden notice for "jevify": bulk classification through the eval kernel's `judge()`. */
-export const JEVIFY_NOTICE: string = jevifyNotice.trim();
+/** Hidden notice for "jevify", honoring session judgment permission. */
+export function renderJevifyNotice({ judgmentEnabled }: Pick<MagicKeywordContext, "judgmentEnabled">): string {
+	return prompt.render(jevifyNotice, { judgmentEnabled }).trim();
+}
 
 /** Hidden notice for "orchestrate", naming only the tools the session actually exposes. */
 export function renderOrchestrateNotice({ tools }: Pick<MagicKeywordContext, "tools">): string {
@@ -61,8 +67,15 @@ export function renderWorkflowNotice({
 	taskBatch,
 	scoutAvailable,
 	evalTools,
-}: Pick<MagicKeywordContext, "taskBatch" | "scoutAvailable" | "evalTools">): string {
-	return prompt.render(workflowNotice, { taskBatch, scoutAvailable, evalTools }).trim();
+	completionEnabled,
+	judgmentEnabled,
+}: Pick<
+	MagicKeywordContext,
+	"taskBatch" | "scoutAvailable" | "evalTools" | "completionEnabled" | "judgmentEnabled"
+>): string {
+	return prompt
+		.render(workflowNotice, { taskBatch, scoutAvailable, evalTools, completionEnabled, judgmentEnabled })
+		.trim();
 }
 
 export const MAGIC_KEYWORDS = [
@@ -102,7 +115,7 @@ export const MAGIC_KEYWORDS = [
 		description: "Let standalone jevify append its hidden bulk-judge classification notice",
 		// The contract is entirely about the eval kernel's `judge()` helper.
 		requires: ["eval"],
-		notice: () => JEVIFY_NOTICE,
+		notice: renderJevifyNotice,
 	},
 ] as const satisfies readonly MagicKeyword[];
 

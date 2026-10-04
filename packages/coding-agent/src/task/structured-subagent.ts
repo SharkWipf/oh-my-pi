@@ -9,6 +9,7 @@ import * as os from "node:os";
 import path from "node:path";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import { resolveAgentModelSelection, resolveConfiguredModelPatterns } from "../config/model-resolver";
+import { isModelRoleDisabled } from "../config/model-roles";
 import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides } from "../config/service-tier";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { LocalProtocolOptions } from "../internal-urls";
@@ -324,6 +325,12 @@ export async function resolveEffectiveSubagentPolicy(
 	// child's inherited retry-fallback chain is keyed off the role.
 	const hasExplicitModelChoice = hasExplicitSubagentModelChoice(effectiveAgent, modelResolution);
 	const { patterns: modelOverride, role: modelRole } = resolveAgentModelSelection(modelResolution);
+	if (modelOverride.length === 0 && modelRole && isModelRoleDisabled(modelRole, request.session.settings)) {
+		throw new StructuredSubagentError(
+			"preflight",
+			`Model role "${modelRole}" is disabled. Select another model or enable the role before spawning.`,
+		);
+	}
 	const isolationEnabled = request.session.settings.get("task.isolation.enabled");
 	const isIsolated = request.isolation?.requested === true;
 	if (isIsolated && !isolationEnabled) {

@@ -13,6 +13,7 @@ function getModelOrThrow(id: string): Model<Api> {
 
 function createSettings(model: Model<Api>) {
 	return Settings.isolated({
+		"title.enabled": true,
 		modelRoles: { tiny: `${model.provider}/${model.id}` },
 	});
 }
@@ -30,6 +31,14 @@ afterEach(() => {
 });
 
 describe("task label generation", () => {
+	it("does not infer a task label without title opt-in", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		const online = vi.spyOn(ai, "completeSimple");
+		const settings = Settings.isolated({ modelRoles: { tiny: `${model.provider}/${model.id}` } });
+		expect(await generateTaskLabel("Investigate shutdown", createRegistry(model), settings)).toBeNull();
+		expect(online).not.toHaveBeenCalled();
+	});
+
 	it("settles when its executor cancellation signal aborts an in-flight title request", async () => {
 		const model = getModelOrThrow("claude-sonnet-4-5");
 		const controller = new AbortController();

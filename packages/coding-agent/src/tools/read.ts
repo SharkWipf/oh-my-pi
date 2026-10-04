@@ -29,6 +29,7 @@ import {
 	prompt,
 	readImageMetadata,
 } from "@oh-my-pi/pi-utils";
+import { isModelRoleDisabled } from "../config/model-roles";
 import { normalizeToLF } from "../edit/normalize";
 import { getEditStore } from "../edit/store";
 import { InternalUrlRouter, resolveLocalUrlToFile, resolveLocalUrlToPath } from "../internal-urls";
@@ -1270,7 +1271,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						? "- Alpha: no"
 						: "- Alpha: unknown",
 				"",
-				`To analyze the image, read \`${imageQuestionPath}?q=<question>\` — the question is answered by a vision model and returned as text.`,
+				this.session.settings.get("images.questionEnabled") && !isModelRoleDisabled("vision", this.session.settings)
+					? "To analyze the image, read " +
+						imageQuestionPath +
+						"?q=<question> — this sends pixels to the configured vision model and returns text."
+					: "Vision question inference is disabled; enable images.questionEnabled to permit it.",
 			];
 			return { content: [{ type: "text", text: metadataLines.join("\n") }], details: {}, sourcePath: absolutePath };
 		}

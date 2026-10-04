@@ -10,7 +10,7 @@ import {
 	type SetupSceneSelectionOptions,
 } from "@oh-my-pi/pi-tui/setup/wizard";
 import { formatModelString, resolveModelRoleValue, rolePriorityDefaults } from "../config/model-resolver";
-import { getRoleInfo } from "../config/model-roles";
+import { getRoleInfo, isModelRoleDisabled, MODEL_ROLE_DISABLED } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import { captureBrowserSession } from "../utils/browser-session";
 import { copyToClipboard } from "../utils/clipboard";
@@ -73,12 +73,13 @@ export function createSetupHost(ctx: InteractiveModeContext): SetupHost {
 			return ctx.settings.get("colorBlindMode");
 		},
 		get webSearchOrder() {
+			if (isModelRoleDisabled("web", ctx.settings)) return ["none"];
 			const configured = ctx.settings.getModelRole("web")?.trim();
 			if (!configured) return [];
 			const model = resolveModelRoleValue(configured, webRoleModels(ctx), { settings: ctx.settings }).model;
 			if (model?.provider === "web") {
 				const option = SEARCH_PROVIDER_OPTIONS.find(candidate => candidate.value === model.id);
-				if (option && option.value !== "auto" && option.value !== "none") return [option.value];
+				if (option && option.value !== "auto") return [option.value];
 			}
 			return model?.webSearch ? [model.webSearch] : [];
 		},
@@ -124,6 +125,10 @@ export function createSetupHost(ctx: InteractiveModeContext): SetupHost {
 			return provider.isExplicitlyAvailable(ctx.session.modelRegistry.authStorage, selection.model);
 		},
 		saveSearchProvider: id => {
+			if (id === "none") {
+				ctx.settings.setModelRole("web", MODEL_ROLE_DISABLED);
+				return;
+			}
 			if (id === "auto") {
 				ctx.settings.setModelRole("web", undefined);
 				return;

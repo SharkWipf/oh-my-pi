@@ -4,6 +4,7 @@ import { completeSimple, Effort, type Model, retryTransientCompletion } from "@o
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
+import { isDisabledModelRoleValue } from "../config/model-roles";
 import { getModelMatchPreferences, resolveModelRoleValue, resolveRoleSelection } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import extractInputTemplate from "../prompts/memories/sharpshooter-extract-input.md" with { type: "text" };
@@ -154,13 +155,15 @@ export async function resolveSharpshooterModel(
 	modelRegistry: ModelRegistry,
 ): Promise<Model | undefined> {
 	const selector = settings.get("sharpshooter.model");
+	if (isDisabledModelRoleValue(selector)) return undefined;
 	if (selector) {
 		const resolved = resolveModelRoleValue(selector, modelRegistry.getAll(), {
 			settings,
 			matchPreferences: getModelMatchPreferences(settings),
 		});
 		if (resolved.model) return resolved.model;
-		logger.debug("Sharpshooter extraction model selector did not resolve", { selector });
+		logger.debug("Sharpshooter extraction skipped: configured model selector did not resolve", { selector });
+		return undefined;
 	}
 
 	const fallback = resolveRoleSelection(["smol"], settings, modelRegistry.getAvailable())?.model;

@@ -75,7 +75,11 @@ interface SessionOptions {
 }
 
 function makeSession(opts: SessionOptions = {}): ToolSession {
-	const settings = Settings.isolated({ "async.enabled": false, "task.isolation.enabled": false });
+	const settings = Settings.isolated({
+		"async.enabled": false,
+		"task.isolation.enabled": false,
+		"eval.completionEnabled": true,
+	});
 	const roles = opts.roles ?? { smol: "p/smol", slow: "p/slow" };
 	for (const role in roles) {
 		const value = roles[role as keyof typeof roles];
@@ -158,7 +162,7 @@ const SMOL = {
 	contextWindow: 128000,
 	maxTokens: 4096,
 };
-const settings = Settings.isolated({ "async.enabled": false, "task.isolation.enabled": false });
+const settings = Settings.isolated({ "async.enabled": false, "task.isolation.enabled": false, "eval.completionEnabled": true });
 settings.setModelRole("smol", "p/smol");
 settings.setModelRole("slow", "p/slow");
 const session = {
@@ -208,6 +212,25 @@ process.exit(0);
 }
 
 describe("runEvalCompletion", () => {
+	it("rejects disabled completion before model discovery or dispatch", async () => {
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "unexpected" }));
+		const session = makeSession();
+		session.settings.override("eval.completionEnabled", false);
+		const discover = vi.spyOn(session.modelRegistry!, "getAvailable");
+		await expect(
+			runEvalCompletionAndWait({ prompt: "private state", model: "default" }, { session }),
+		).rejects.toThrow("disabled");
+		expect(discover).not.toHaveBeenCalled();
+		expect(spy).not.toHaveBeenCalled();
+	});
+
+	it("does not substitute the active model for a disabled default role", async () => {
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "unexpected" }));
+		const session = makeSession({ roles: { default: "none" } });
+		await expect(runEvalCompletionAndWait({ prompt: "private state" }, { session })).rejects.toThrow("disabled");
+		expect(spy).not.toHaveBeenCalled();
+	});
+
 	afterEach(() => {
 		vi.restoreAllMocks();
 		releaseCompletionHandles("Main");

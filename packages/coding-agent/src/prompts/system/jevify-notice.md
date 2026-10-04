@@ -1,4 +1,5 @@
 <system-notice>
+{{#if judgmentEnabled}}
 User message contains **jevify** → bulk classification through the `eval` kernel's `judge()`. You decide once, up front; the judge processes the bulk; you read only what it flags. This overrides the tendency to split the data up and scan it yourself.
 
 <critical>
@@ -87,4 +88,7 @@ Then print only `diffs[f]` for `f in flag`, confirm each against the code, and r
 <critical>
 Rubric frozen before data. Judge classifies the bulk. You read only what it flags. Report counts, then evidence.
 </critical>
+{{else}}
+User message contains jevify, but auxiliary judgment inference is disabled (eval.judgmentEnabled=false or modelRoles.judge=none). NEVER call judge() or judge_batch()/judgeBatch(). Complete the requested analysis directly without auxiliary inference.
+{{/if}}
 </system-notice>

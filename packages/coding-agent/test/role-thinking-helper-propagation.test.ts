@@ -21,7 +21,7 @@ function createRegistry(model: Model<Api>) {
 }
 
 function createSettings(modelRoles: Record<string, string>) {
-	return Settings.isolated({ modelRoles });
+	return Settings.isolated({ "title.enabled": true, modelRoles });
 }
 
 beforeEach(() => {
