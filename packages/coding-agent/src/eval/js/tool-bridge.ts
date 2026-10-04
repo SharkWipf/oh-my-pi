@@ -220,6 +220,7 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 	if (name === "__prelude__") {
 		const request = parsePreludeRequest(args);
 		const toolCallId = `prelude-${request.name}-${crypto.randomUUID()}`;
+		const completePrewalkToolCall = options.session.beginPrewalkToolCall?.();
 		try {
 			// Browser/computer operations own their deadlines. Charging their host
 			// wait to Eval as well can kill its kernel during a first-use browser
@@ -246,6 +247,8 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 				error: error instanceof Error ? error.message : String(error),
 			});
 			throw error;
+		} finally {
+			completePrewalkToolCall?.();
 		}
 	}
 	if (name === EVAL_COMPLETION_BRIDGE_NAME) {
@@ -321,13 +324,20 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 		!intentIsDeclared ? (options.defaultIntent ?? "js prelude") : undefined,
 	);
 	const shadowCell = options.shadowCell ?? getActiveEvalShadowCell();
+	const completePrewalkToolCall = options.session.beginPrewalkToolCall?.();
 	if (shadowCell && options.identity) {
 		const claimed = await waitForSpeculativeClaim(
 			shadowCell.claim(name, normalizedArgs, options.identity, Number.MAX_SAFE_INTEGER, options.signal),
 			options.signal,
 		);
 		options.signal?.throwIfAborted();
-		if (claimed) return bridgeValueFromToolResult(name, normalizedArgs, claimed, options.emitStatus);
+		if (claimed) {
+			try {
+				return bridgeValueFromToolResult(name, normalizedArgs, claimed, options.emitStatus);
+			} finally {
+				completePrewalkToolCall?.();
+			}
+		}
 	}
 	try {
 		const result = await tool.execute(
@@ -351,5 +361,7 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 			error: error instanceof Error ? error.message : String(error),
 		});
 		throw error;
+	} finally {
+		completePrewalkToolCall?.();
 	}
 }

@@ -29,7 +29,7 @@ import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 
 /**
  * Prewalk switches once from planning to execution after an edit/write with
- * the todo gate open, or an optional completed-response maximum. A minimum
+ * the todo gate open, or an optional completed-action maximum. A minimum
  * delays eligibility; early implementation actions are discarded. Hidden
  * plan/continuation nudges precede the switch, with a verification checklist
  * afterward. See the unchanged prompts under `src/prompts/system/prewalk-*.md`.
@@ -1356,6 +1356,60 @@ describe("AgentSession prewalk", () => {
 		return { source, target, requests, agent, settings, session };
 	}
 
+	it("counts primary responses and executed tools, including failures, but excludes side messages", async () => {
+		const t = cycleHarness(
+			[
+				toolCall("first", "record"),
+				{
+					content: [
+						{ type: "toolCall", id: "second", name: "record", arguments: {} },
+						{ type: "toolCall", id: "failed", name: "bash", arguments: {} },
+					],
+					stopReason: "toolUse",
+				},
+				{ content: ["done"] },
+			],
+			{ maximum: 5 },
+		);
+		t.agent.setTools([
+			{
+				...recordTool,
+				async execute() {
+					for (const customType of ["advisor", "injection"]) {
+						t.agent.appendMessage({
+							role: "custom",
+							customType,
+							content: "side context",
+							display: false,
+							timestamp: 1,
+						});
+					}
+					t.agent.appendMessage({
+						role: "branchSummary",
+						summary: "side summary",
+						fromId: "earlier",
+						timestamp: 1,
+					});
+					t.agent.appendMessage({
+						role: "compactionSummary",
+						summary: "compacted context",
+						tokensBefore: 100,
+						timestamp: 1,
+					});
+					return { content: [{ type: "text", text: "observed" }], details: undefined };
+				},
+			} as AgentTool,
+			{
+				...bashTool,
+				async execute() {
+					throw new Error("executed tool failed");
+				},
+			} as AgentTool,
+		]);
+		await t.session.prompt("investigate");
+		expect(t.requests.map(request => request.model)).toEqual([t.source.id, t.source.id, t.target.id]);
+	});
+
 	it("discards implementation before the minimum without latching it or recounting a tool batch", async () => {
 		const t = cycleHarness(
 			[
@@ -1371,7 +1425,7 @@ describe("AgentSession prewalk", () => {
 				toolCall("eligible-write", "write"),
 				{ content: ["done"] },
 			],
-			{ minimum: 3 },
+			{ minimum: 7 },
 		);
 		t.agent.setTools([todoTool as AgentTool, writeTool as AgentTool, recordTool as AgentTool]);
 		await t.session.prompt("plan before implementing");
@@ -1392,7 +1446,7 @@ describe("AgentSession prewalk", () => {
 				toolCall("read-3", "record"),
 				{ content: ["done"] },
 			],
-			{ minimum: 3, maximum: 2 },
+			{ minimum: 6, maximum: 4 },
 		);
 		t.agent.setTools([todoTool as AgentTool, recordTool as AgentTool]);
 		await t.session.prompt("investigate without editing");
@@ -1473,9 +1527,44 @@ describe("AgentSession prewalk", () => {
 		}
 	});
 
-	it("does not recount tool replay in a live cycle or after hot revival", async () => {
-		const t = cycleHarness([toolCall("first", "record"), toolCall("second", "record")], { maximum: 3 });
+	it("counts nested completions once and fences old cycles without switching before a safe boundary", async () => {
+		const t = cycleHarness([toolCall("first", "record"), toolCall("second", "record"), { content: ["done"] }], {
+			maximum: 4,
+		});
 		t.agent.setTools([recordTool as AgentTool]);
+		const stale = t.session.beginPrewalkToolCall();
+		expect(stale).toBeDefined();
+		await t.session.resetSessionContext();
+		expect(t.session.armPrewalk(t.target, Effort.Low)).toBe(true);
+		const complete = t.session.beginPrewalkToolCall();
+		expect(complete).toBeDefined();
+		complete!();
+		complete!();
+		stale!();
+		t.agent.appendMessage({
+			role: "custom",
+			customType: "advisor",
+			content: "side advice",
+			display: false,
+			timestamp: 1,
+		});
+		expect(t.session.getPrewalkSnapshot().completedActions).toBe(1);
+		expect(t.session.model?.id).toBe(t.source.id);
+		await t.session.prompt("investigate");
+		expect(t.requests.map(request => request.model)).toEqual([t.source.id, t.source.id, t.target.id]);
+	});
+
+	it("does not recount responses but counts actual missing-result tool reexecution live and after hot revival", async () => {
+		const t = cycleHarness([toolCall("first", "record"), toolCall("second", "record")], { maximum: 8 });
+		const executions: string[] = [];
+		const replayTool: AgentTool<typeof recordToolSchema, undefined> = {
+			...recordTool,
+			async execute(id) {
+				executions.push(id);
+				return { content: [{ type: "text", text: "observed" }], details: undefined };
+			},
+		};
+		t.agent.setTools([replayTool]);
 		t.agent.setBeforeModelCall(() => (t.requests.length >= 1 ? { stop: true } : undefined));
 		await t.session.prompt("investigate");
 		expect(t.session.armPrewalk(t.target, Effort.Low)).toBe(true);
@@ -1485,18 +1574,45 @@ describe("AgentSession prewalk", () => {
 		await t.agent.continue();
 		expect(t.requests.map(request => request.model)).toEqual([t.source.id, t.source.id]);
 		expect(t.session.model?.id).toBe(t.source.id);
+		expect(executions).toEqual(["first", "first", "second"]);
 		const snapshot = t.session.getPrewalkSnapshot();
 		const secondTail = t.agent.state.messages.findLastIndex(message => message.role === "assistant");
 		const replayMessages = structuredClone(t.agent.state.messages.slice(0, secondTail + 1));
 		await t.session.dispose();
-		const revived = cycleHarness([toolCall("third", "record"), { content: ["done"] }], { maximum: 3, snapshot });
-		revived.agent.setTools([recordTool as AgentTool]);
+		const revived = cycleHarness([toolCall("third", "record"), { content: ["done"] }], { maximum: 8, snapshot });
+		revived.agent.setTools([replayTool]);
 		revived.agent.replaceMessages(replayMessages);
 		await revived.agent.continue();
 		expect(revived.requests.map(request => request.model)).toEqual([revived.source.id, revived.target.id]);
+		expect(executions).toEqual(["first", "first", "second", "second", "third"]);
 	});
 
-	it("does not spend the response limit on errored or aborted responses", async () => {
+	it("retains action accounting across passive history restoration without reexecuting completed tools", async () => {
+		const t = cycleHarness([toolCall("first", "record")], { maximum: 4 });
+		t.agent.setTools([recordTool as AgentTool]);
+		t.agent.setBeforeModelCall(() => (t.requests.length >= 1 ? { stop: true } : undefined));
+		await t.session.prompt("investigate");
+		const snapshot = t.session.getPrewalkSnapshot();
+		const messages = structuredClone(t.agent.state.messages);
+		await t.session.dispose();
+		const revived = cycleHarness([toolCall("second", "record"), { content: ["done"] }], { maximum: 4, snapshot });
+		const executions: string[] = [];
+		revived.agent.setTools([
+			{
+				...recordTool,
+				async execute(id) {
+					executions.push(id);
+					return { content: [{ type: "text", text: "observed" }], details: undefined };
+				},
+			} as AgentTool,
+		]);
+		revived.agent.replaceMessages(messages);
+		await revived.agent.continue();
+		expect(executions).toEqual(["second"]);
+		expect(revived.requests.map(request => request.model)).toEqual([revived.source.id, revived.target.id]);
+	});
+
+	it("does not spend the action limit on errored or aborted responses", async () => {
 		const t = cycleHarness(
 			[
 				{ content: ["failed"], stopReason: "error", errorMessage: "non-retryable failure" },
@@ -1505,7 +1621,7 @@ describe("AgentSession prewalk", () => {
 				toolCall("completed-2", "record"),
 				{ content: ["done"] },
 			],
-			{ maximum: 2 },
+			{ maximum: 4 },
 		);
 		t.settings.set("retry.enabled", false);
 		t.settings.set("prewalk.afterEveryUserMessage", false);
@@ -1522,7 +1638,7 @@ describe("AgentSession prewalk", () => {
 		]);
 	});
 
-	it("restarts the response limit for each newly delivered user cycle", async () => {
+	it("restarts the action limit for each newly delivered user cycle", async () => {
 		const t = cycleHarness(
 			[
 				toolCall("first-1", "record"),
@@ -1532,7 +1648,7 @@ describe("AgentSession prewalk", () => {
 				toolCall("second-2", "record"),
 				{ content: ["done"] },
 			],
-			{ maximum: 2 },
+			{ maximum: 4 },
 		);
 		t.agent.setTools([recordTool as AgentTool]);
 		await t.session.prompt("first task");
