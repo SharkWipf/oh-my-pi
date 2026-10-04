@@ -45,6 +45,25 @@ Calls to other tools do not trigger the handoff. A read-only `xd://` device requ
 
 After each handoff, the current prewalk disarms itself. Without automatic restarts, it stays disarmed until explicitly armed again. A target already matching the model and configured thinking level needs no handoff.
 
+## Minimum and maximum messages
+
+Under **Model → Prewalk**, **Minimum Prewalk Messages** and **Maximum Prewalk Messages** bound each planning cycle. One message means one completed assistant response, including a response with tool calls. User messages, tool results and streaming chunks do not count; failed or aborted responses do not count either.
+
+- The minimum defaults to **No minimum** (`0`). Before the minimum is reached, edit/write handoff triggers are ignored, not saved for later. Afterward, a new qualifying action can trigger the normal handoff.
+- The maximum defaults to **Unlimited** (`0`). A finite maximum switches to the execution model after that many responses, even without a todo list or edit/write.
+- The minimum takes precedence: with minimum `25` and maximum `10`, the earliest forced handoff is response `25`.
+- A running background Eval cell delays a maximum-forced handoff until a later completed-response boundary; this limit never switches models mid-cell.
+
+For example:
+
+```yaml
+prewalk:
+  minMessages: 15
+  maxMessages: 150
+```
+
+The count starts at zero for every new cycle, including `/prewalk restart` and automatic restarts after user input. Parking and reviving a live subagent retains its current cycle count. The default limits leave the existing handoff behavior unchanged.
+
 ## Restart for every user message
 
 In `/settings`, open **Model → Prewalk** and enable **Prewalk Every User Message**:
@@ -81,3 +100,11 @@ If prewalk is already armed, the command leaves the existing target in place. To
 Task subagents have separate controls: agent frontmatter, `task.prewalk`, per-agent `task.agentPrewalk` overrides, and **Tasks → Subagents → Prewalk Unpinned Subagents** (`task.prewalkWithoutModelOverride`). The explicit per-agent setting overrides frontmatter; `task.prewalk` retains its existing behavior for the bundled task agent.
 
 The unpinned-subagent setting defaults off. When enabled, eligible launches start on `@slow` with its configured thinking level, then hand off to the existing prewalk target or otherwise the model and thinking level the child would normally use. Explicit agent models, configured role choices, per-agent model overrides, launch overrides and extension-selected models are exempt. An unconfigured bundled `@task` default and ordinary parent-model inheritance are not overrides. Explicit per-agent prewalk off stays off; plan-mode launches do not receive this automatic fallback. An unavailable planning model is reported and skipped rather than failing the child launch.
+
+**Tasks → Subagents → Minimum/Maximum Prewalk Messages** set separate child limits. Both default to **Inherit** (`-1`), using the parent’s effective limits. An explicit minimum `0` removes the child minimum; an explicit maximum `0` makes the child maximum unlimited. These limits do not enable prewalk by themselves.
+
+```yaml
+task:
+  prewalkMinMessages: 10
+  prewalkMaxMessages: 100
+```

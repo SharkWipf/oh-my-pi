@@ -13,6 +13,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import type { PrewalkSnapshot } from "@oh-my-pi/pi-coding-agent/session/prewalk";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import type { TuiSlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
 import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
@@ -20,13 +21,11 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 /**
- * Prewalk: one-way switch from the starting model to a fast/cheap target
- * at the first completed turn that starts execution — an edit/write tool,
- * or the todo-list init the plan nudge asks for — with a hidden plan nudge
- * before the switch and a hidden verify-before-finishing checklist after
- * it. This is the single mechanism that won out over fixed-turn and
- * ungated variants in benchmark testing — see the plan nudge / checklist /
- * continuation-safety-net prompts under `src/prompts/system/prewalk-*.md`.
+ * Prewalk switches once from planning to execution after an edit/write with
+ * the todo gate open, or an optional completed-response maximum. A minimum
+ * delays eligibility; early implementation actions are discarded. Hidden
+ * plan/continuation nudges precede the switch, with a verification checklist
+ * afterward. See the unchanged prompts under `src/prompts/system/prewalk-*.md`.
  */
 describe("AgentSession prewalk", () => {
 	let tempDir: TempDir;
@@ -1097,11 +1096,21 @@ describe("AgentSession prewalk", () => {
 	});
 	function cycleHarness(
 		responses: MockResponse[],
-		options: { explicit?: boolean; disabled?: boolean; manager?: AsyncJobManager; persistent?: boolean } = {},
+		options: {
+			explicit?: boolean;
+			disabled?: boolean;
+			manager?: AsyncJobManager;
+			persistent?: boolean;
+			minimum?: number;
+			maximum?: number;
+			snapshot?: PrewalkSnapshot;
+		} = {},
 	) {
 		const source = modelOrThrow("claude-sonnet-4-5");
 		const target = modelOrThrow("claude-sonnet-4-6");
 		const settings = Settings.isolated({ "compaction.enabled": false, "prewalk.afterEveryUserMessage": true });
+		settings.set("prewalk.minMessages", options.minimum ?? 0);
+		settings.set("prewalk.maxMessages", options.maximum ?? 0);
 		settings.setModelRole("default", source.provider + "/" + source.id + ":high");
 		settings.setModelRole("smol", target.provider + "/" + target.id + ":low");
 		const mock = createMockModel({ responses });
@@ -1136,9 +1145,201 @@ describe("AgentSession prewalk", () => {
 					? undefined
 					: { target, thinkingLevel: Effort.Low },
 			asyncJobManager: options.manager,
+			prewalkSnapshot: options.snapshot,
 		});
 		return { source, target, requests, agent, settings, session };
 	}
+
+	it("discards implementation before the minimum without latching it or recounting a tool batch", async () => {
+		const t = cycleHarness(
+			[
+				{
+					content: [
+						{ type: "toolCall", id: "early-todo", name: "todo", arguments: {} },
+						{ type: "toolCall", id: "early-write", name: "write", arguments: {} },
+					],
+					stopReason: "toolUse",
+				},
+				toolCall("read-2", "record"),
+				toolCall("read-3", "record"),
+				toolCall("eligible-write", "write"),
+				{ content: ["done"] },
+			],
+			{ minimum: 3 },
+		);
+		t.agent.setTools([todoTool as AgentTool, writeTool as AgentTool, recordTool as AgentTool]);
+		await t.session.prompt("plan before implementing");
+		expect(t.requests.map(request => request.model)).toEqual([
+			t.source.id,
+			t.source.id,
+			t.source.id,
+			t.source.id,
+			t.target.id,
+		]);
+	});
+
+	it("lets the minimum win over the maximum, which bypasses both todo and implementation", async () => {
+		const t = cycleHarness(
+			[
+				toolCall("read-1", "record"),
+				toolCall("read-2", "record"),
+				toolCall("read-3", "record"),
+				{ content: ["done"] },
+			],
+			{ minimum: 3, maximum: 2 },
+		);
+		t.agent.setTools([todoTool as AgentTool, recordTool as AgentTool]);
+		await t.session.prompt("investigate without editing");
+		expect(t.requests.map(request => request.model)).toEqual([t.source.id, t.source.id, t.source.id, t.target.id]);
+	});
+
+	it("counts text-only and length-completed responses, not their synthetic tool results", async () => {
+		const t = cycleHarness(
+			[
+				{ content: ["planning"] },
+				{ ...toolCall("truncated", "record"), stopReason: "length" },
+				{ content: ["done"] },
+			],
+			{ maximum: 2 },
+		);
+		t.agent.setTools([recordTool as AgentTool]);
+		await t.session.prompt("investigate");
+		expect(t.requests.map(request => request.model)).toEqual([t.source.id, t.source.id, t.target.id]);
+	});
+
+	it("counts distinct same-millisecond responses even when their text is identical", async () => {
+		const t = cycleHarness(
+			[{ content: ["planning"] }, { content: ["planning"] }, { content: ["done"] }, { content: ["finished"] }],
+			{ maximum: 2 },
+		);
+		t.agent.transformAssistantMessage = message => {
+			message.timestamp = 1;
+		};
+		await t.session.prompt("investigate");
+		expect(t.requests.slice(0, 3).map(request => request.model)).toEqual([t.source.id, t.source.id, t.target.id]);
+	});
+
+	it("keeps maximum accounting while Eval is running and hands off only after it settles", async () => {
+		const gate = Promise.withResolvers<string>();
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const t = cycleHarness([toolCall("busy-write", "write"), toolCall("settle", "record"), { content: ["done"] }], {
+			maximum: 1,
+			manager,
+		});
+		let jobId = "";
+		t.agent.setTools([
+			{
+				...writeTool,
+				async execute() {
+					jobId = manager.register("eval", "live cell", () => gate.promise);
+					return { content: [{ type: "text", text: "wrote" }], details: undefined };
+				},
+			} as AgentTool,
+			{
+				...recordTool,
+				async execute() {
+					gate.resolve("settled");
+					await manager.getJob(jobId)?.promise;
+					return { content: [{ type: "text", text: "settled" }], details: undefined };
+				},
+			} as AgentTool,
+		]);
+		try {
+			await t.session.prompt("work during Eval");
+			expect(t.requests.map(request => request.model)).toEqual([t.source.id, t.source.id, t.target.id]);
+		} finally {
+			gate.resolve("settled");
+			await manager.dispose();
+		}
+	});
+
+	it("keeps unlimited handoffs on the existing action path while Eval is running", async () => {
+		const gate = Promise.withResolvers<string>();
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const t = cycleHarness([toolCall("write", "write"), { content: ["done"] }], { manager });
+		manager.register("eval", "live cell", () => gate.promise);
+		try {
+			await t.session.prompt("implement");
+			expect(t.requests.map(request => request.model)).toEqual([t.source.id, t.target.id]);
+		} finally {
+			gate.resolve("settled");
+			await manager.dispose();
+		}
+	});
+
+	it("does not recount tool replay in a live cycle or after hot revival", async () => {
+		const t = cycleHarness([toolCall("first", "record"), toolCall("second", "record")], { maximum: 3 });
+		t.agent.setTools([recordTool as AgentTool]);
+		t.agent.setBeforeModelCall(() => (t.requests.length >= 1 ? { stop: true } : undefined));
+		await t.session.prompt("investigate");
+		expect(t.session.armPrewalk(t.target, Effort.Low)).toBe(true);
+		const firstTail = t.agent.state.messages.findLastIndex(message => message.role === "assistant");
+		t.agent.replaceMessages(t.agent.state.messages.slice(0, firstTail + 1));
+		t.agent.setBeforeModelCall(() => (t.requests.length >= 2 ? { stop: true } : undefined));
+		await t.agent.continue();
+		expect(t.requests.map(request => request.model)).toEqual([t.source.id, t.source.id]);
+		expect(t.session.model?.id).toBe(t.source.id);
+		const snapshot = t.session.getPrewalkSnapshot();
+		const secondTail = t.agent.state.messages.findLastIndex(message => message.role === "assistant");
+		const replayMessages = structuredClone(t.agent.state.messages.slice(0, secondTail + 1));
+		await t.session.dispose();
+		const revived = cycleHarness([toolCall("third", "record"), { content: ["done"] }], { maximum: 3, snapshot });
+		revived.agent.setTools([recordTool as AgentTool]);
+		revived.agent.replaceMessages(replayMessages);
+		await revived.agent.continue();
+		expect(revived.requests.map(request => request.model)).toEqual([revived.source.id, revived.target.id]);
+	});
+
+	it("does not spend the response limit on errored or aborted responses", async () => {
+		const t = cycleHarness(
+			[
+				{ content: ["failed"], stopReason: "error", errorMessage: "non-retryable failure" },
+				{ content: ["interrupted"], stopReason: "aborted" },
+				toolCall("completed-1", "record"),
+				toolCall("completed-2", "record"),
+				{ content: ["done"] },
+			],
+			{ maximum: 2 },
+		);
+		t.settings.set("retry.enabled", false);
+		t.settings.set("prewalk.afterEveryUserMessage", false);
+		t.agent.setTools([recordTool as AgentTool]);
+		await t.session.prompt("first attempt");
+		await t.session.prompt("second attempt", { synthetic: true });
+		await t.session.prompt("completed attempt", { synthetic: true });
+		expect(t.requests.map(request => request.model)).toEqual([
+			t.source.id,
+			t.source.id,
+			t.source.id,
+			t.source.id,
+			t.target.id,
+		]);
+	});
+
+	it("restarts the response limit for each newly delivered user cycle", async () => {
+		const t = cycleHarness(
+			[
+				toolCall("first-1", "record"),
+				toolCall("first-2", "record"),
+				{ content: ["done"] },
+				toolCall("second-1", "record"),
+				toolCall("second-2", "record"),
+				{ content: ["done"] },
+			],
+			{ maximum: 2 },
+		);
+		t.agent.setTools([recordTool as AgentTool]);
+		await t.session.prompt("first task");
+		await t.session.prompt("second task");
+		expect(t.requests.map(request => request.model)).toEqual([
+			t.source.id,
+			t.source.id,
+			t.target.id,
+			t.source.id,
+			t.source.id,
+			t.target.id,
+		]);
+	});
 
 	it("repeats explicit cycles with exact source effort, ignoring synthetic delivery and retained history", async () => {
 		const t = cycleHarness([
