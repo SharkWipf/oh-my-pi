@@ -16,6 +16,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import type { PrewalkSnapshot } from "@oh-my-pi/pi-coding-agent/session/prewalk";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import type { TuiSlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
+import { createSubagentSettings } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
@@ -1103,12 +1104,15 @@ describe("AgentSession prewalk", () => {
 			persistent?: boolean;
 			minimum?: number;
 			maximum?: number;
+			baseSettings?: Settings;
 			snapshot?: PrewalkSnapshot;
 		} = {},
 	) {
 		const source = modelOrThrow("claude-sonnet-4-5");
 		const target = modelOrThrow("claude-sonnet-4-6");
-		const settings = Settings.isolated({ "compaction.enabled": false, "prewalk.afterEveryUserMessage": true });
+		const settings = options.baseSettings
+			? createSubagentSettings(options.baseSettings)
+			: Settings.isolated({ "compaction.enabled": false, "prewalk.afterEveryUserMessage": true });
 		settings.set("prewalk.minMessages", options.minimum ?? 0);
 		settings.set("prewalk.maxMessages", options.maximum ?? 0);
 		settings.setModelRole("default", source.provider + "/" + source.id + ":high");
@@ -1224,6 +1228,113 @@ describe("AgentSession prewalk", () => {
 		);
 	}
 
+	for (const restart of [false, true]) {
+		it(`subagent parent input ${restart ? "restarts by opt-in" : "does not restart by default"}, including hot revival`, async () => {
+			const baseSettings = Settings.isolated({
+				"compaction.enabled": false,
+				"prewalk.planNudge": false,
+				"prewalk.repeatPlanNudge": true,
+				"prewalk.afterEveryUserMessage": true,
+				"task.prewalkAfterEveryUserMessage": restart,
+			});
+			const t = cycleHarness(
+				[
+					toolCall("read-1", "record"),
+					toolCall("read-2", "record"),
+					toolCall("write", "write"),
+					{ content: ["done"] },
+					{ content: ["follow-up"] },
+				],
+				{ baseSettings },
+			);
+			const plans: string[] = [];
+			t.agent.subscribe(event => {
+				if (
+					event.type === "message_end" &&
+					event.message.role === "custom" &&
+					event.message.customType === "prewalk-plan"
+				)
+					plans.push(event.message.customType);
+			});
+			t.session.setInterruptMode("wait");
+			let reads = 0;
+			t.agent.setTools([
+				{
+					...recordTool,
+					async execute() {
+						if (++reads === 2)
+							await t.session.sendUserMessage("direction during prewalk", { deliverAs: "steer" });
+						return { content: [{ type: "text", text: "read" }], details: undefined };
+					},
+				} as AgentTool,
+				writeTool as AgentTool,
+			]);
+			await t.session.prompt("initial child task");
+			expect(plans).toHaveLength(1);
+			await t.session.sendUserMessage("later parent direction");
+			expect(t.requests.at(-1)?.model).toBe(restart ? t.source.id : t.target.id);
+			const snapshot = t.session.getPrewalkSnapshot();
+			await t.session.dispose();
+			const revived = cycleHarness([{ content: ["revived follow-up"] }], { baseSettings, snapshot });
+			await revived.session.setModelTemporary(restart ? t.source : t.target, restart ? Effort.High : Effort.Low, {
+				ephemeral: true,
+			});
+			await revived.session.prompt("parent input after revival");
+			expect(revived.requests[0]?.model).toBe(restart ? t.source.id : t.target.id);
+		});
+	}
+	it("repeats a child plan without restarting its action budget or enabling later parent-input rearm", async () => {
+		const baseSettings = Settings.isolated({
+			"compaction.enabled": false,
+			"prewalk.planNudge": false,
+			"prewalk.afterEveryUserMessage": true,
+			"task.prewalkRepeatPlanNudge": true,
+			"task.prewalkMaxMessages": 8,
+		});
+		const t = cycleHarness(
+			[
+				toolCall("read-1", "record"),
+				toolCall("read-2", "record"),
+				toolCall("read-3", "record"),
+				toolCall("read-4", "record"),
+				{ content: ["done"] },
+				{ content: ["parent follow-up"] },
+			],
+			{ baseSettings, maximum: 8 },
+		);
+		let plans = 0;
+		t.agent.subscribe(event => {
+			if (
+				event.type === "message_end" &&
+				event.message.role === "custom" &&
+				event.message.customType === "prewalk-plan"
+			)
+				plans++;
+		});
+		t.session.setInterruptMode("wait");
+		let reads = 0;
+		t.agent.setTools([
+			{
+				...recordTool,
+				async execute() {
+					if (++reads === 2) await t.session.sendUserMessage("parent direction", { deliverAs: "steer" });
+					return { content: [{ type: "text", text: "read" }], details: undefined };
+				},
+			} as AgentTool,
+		]);
+		await t.session.prompt("initial child task");
+
+		expect(plans).toBe(2);
+		expect(t.requests.map(request => request.model)).toEqual([
+			t.source.id,
+			t.source.id,
+			t.source.id,
+			t.source.id,
+			t.target.id,
+		]);
+		await t.session.sendUserMessage("later parent input");
+		expect(t.requests.at(-1)?.model).toBe(t.target.id);
+	});
 	it("counts primary responses and executed tools, including failures, but excludes side messages", async () => {
 		const t = cycleHarness(
 			[

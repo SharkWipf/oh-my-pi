@@ -26,6 +26,13 @@ const CONDITIONS: Record<string, () => boolean> = {
 			return false;
 		}
 	},
+	taskPrewalkPlanNudgeEnabled: () => {
+		try {
+			return Settings.instance.get("task.prewalkPlanNudge") === true;
+		} catch {
+			return false;
+		}
+	},
 	advisorEnabled: () => {
 		try {
 			return Settings.instance.get("advisor.enabled") === true;

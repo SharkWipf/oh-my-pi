@@ -231,10 +231,18 @@ export class PrewalkCoordinator {
 		if (
 			this.#automaticDisabled ||
 			this.#disabledByToggle ||
-			(!this.#policy && !this.#host.settings.get("prewalk.enabled")) ||
-			!this.#host.settings.get("prewalk.afterEveryUserMessage")
+			(!this.#policy && !this.#host.settings.get("prewalk.enabled"))
 		) {
 			this.#rearmPending = false;
+			return;
+		}
+		if (!this.#host.settings.get("prewalk.afterEveryUserMessage")) {
+			this.#rearmPending = false;
+			if (hasNewUserInput && this.#prewalk && this.#host.settings.get("prewalk.repeatPlanNudge")) {
+				this.#scrubPlanNudge();
+				this.#planInjected = false;
+				this.#continuePending = false;
+			}
 			return;
 		}
 		if (hasNewUserInput) this.#rearmPending = true;

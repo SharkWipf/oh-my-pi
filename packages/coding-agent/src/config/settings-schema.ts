@@ -5376,6 +5376,40 @@ export const SETTINGS_SCHEMA = {
 				"Start subagents without an explicit model choice on the configured slow planning role, then hand off to their normal execution model. Explicit agent models, configured task-role models, per-agent overrides and launch overrides are unchanged. Per-agent prewalk off remains off.",
 		},
 	},
+	"task.prewalkPlanNudge": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Subagent Deep Plan Nudge",
+			description:
+				"Inject the deep-plan reminder during each subagent prewalk cycle and its related continuation reminder. Independent of the main-agent setting; does not enable initial prewalk or change action limits or handoff.",
+		},
+	},
+	"task.prewalkRepeatPlanNudge": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Repeat Subagent Plan Nudge",
+			description:
+				"Repeat the deep-plan reminder when new parent input arrives during an unfinished active subagent prewalk. Fresh cycles already receive their initial reminder. Requires Subagent Deep Plan Nudge; independent of the main-agent setting and does not enable initial prewalk.",
+			condition: "taskPrewalkPlanNudgeEnabled",
+		},
+	},
+	"task.prewalkAfterEveryUserMessage": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Restart Prewalk on Subagent Input",
+			description:
+				"Restart an eligible subagent’s prewalk on later parent messages. Off by default: follow-ups do not rearm prewalk. When enabled, input after handoff starts a fresh cycle with its initial nudge if Subagent Deep Plan Nudge is on. Independent of the main-agent setting; does not enable initial prewalk.",
+		},
+	},
 	"task.prewalkMinMessages": {
 		type: "number",
 		default: -1,
