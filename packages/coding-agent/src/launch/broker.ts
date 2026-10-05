@@ -1480,7 +1480,9 @@ export async function startDaemonBrokerFromEnvironment(options: DaemonBrokerStar
 			error: error instanceof Error ? error.message : String(error),
 		});
 	});
-	const token = (await Bun.file(path.join(runtimeDir, TOKEN_FILE)).text()).trim();
+	// Keep startup alive until listen(): the floating CLI entry can exit while
+	// a Bun.file read has no referenced libuv handle (as with the lease read).
+	const token = (await fs.readFile(path.join(runtimeDir, TOKEN_FILE), "utf8")).trim();
 	if (!token) throw new Error("Daemon broker token is empty");
 	const broker = new DaemonBroker(projectDir, runtimeDir, token, idleGraceMs, restartBackoffBaseMs);
 	const cancelCleanup = postmortem.register("daemon-broker", () => broker.shutdown());
