@@ -91,6 +91,12 @@ On a resumed session without an existing cycle, the next new user message resolv
 
 The status line shows a walking person while a handoff is armed and a standing person after a successful handoff while its execution model remains active. Unicode uses 🚶 and 🧍; Nerd Font and ASCII presets have corresponding alternatives. Other modes remain visible alongside it. Custom status layouts need the `mode` segment to display these icons.
 
+### Skip one user input
+
+Use `/noprewalk <message>` to send that message without triggering automatic prewalk or a new planning nudge. Bare `/noprewalk` skips the next real user input once; internal continuations and hidden attachment companions do not consume it. Later ordinary inputs use the normal settings again. The bypass is transient and is cleared by `/clear` or a session change.
+
+This skips a **new automatic trigger** only when **Prewalk Every User Message** is enabled. It does not cancel an already-armed or running prewalk, remove its existing nudge, switch models, or change persistent settings. Other normal inputs delivered in the same batch can still trigger prewalk.
+
 ## Arm from an active session
 
 Run either slash command without restarting OMP:

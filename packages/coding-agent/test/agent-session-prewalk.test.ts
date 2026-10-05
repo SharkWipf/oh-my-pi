@@ -1361,6 +1361,163 @@ describe("AgentSession prewalk", () => {
 		});
 		return { source, target, requests, agent, settings, session };
 	}
+
+	it("/noprewalk strips its prefix, skips only that input, and leaves later replanning enabled", async () => {
+		const t = cycleHarness([{ content: ["quick answer"] }, toolCall("write", "write"), { content: ["done"] }], {
+			explicit: false,
+		});
+		t.settings.set("prewalk.enabled", true);
+		const ctx = {
+			session: t.session,
+			sessionManager: t.session.sessionManager,
+			settings: t.settings,
+			collabGuest: false,
+			showStatus: vi.fn(),
+			editor: { setText: vi.fn() },
+			refreshSlashCommandState: vi.fn(),
+		} as unknown as InteractiveModeContext;
+		const body = await executeBuiltinSlashCommand("/noprewalk quick question", { ctx });
+		expect(body).toBe("quick question");
+		if (typeof body !== "string") throw new Error("Expected submitted body");
+		await t.session.prompt(body);
+		expect(t.requests.map(request => request.model)).toEqual([t.target.id]);
+		expect(
+			t.agent.state.messages.some(message => message.role === "custom" && message.customType === "prewalk-plan"),
+		).toBe(false);
+		await t.session.prompt("implement next task");
+		expect(t.requests.map(request => request.model)).toEqual([t.target.id, t.source.id, t.target.id]);
+	});
+	it("bare /noprewalk waits for actual user input, not internal continuations or hidden companions", async () => {
+		const t = cycleHarness(
+			[
+				{ content: ["internal"] },
+				{ content: ["companion"] },
+				{ content: ["quick"] },
+				toolCall("write", "write"),
+				{ content: ["done"] },
+			],
+			{ explicit: false },
+		);
+		t.settings.set("prewalk.enabled", true);
+		const ctx = {
+			session: t.session,
+			sessionManager: t.session.sessionManager,
+			settings: t.settings,
+			collabGuest: false,
+			showStatus: vi.fn(),
+			editor: { setText: vi.fn() },
+			refreshSlashCommandState: vi.fn(),
+		} as unknown as InteractiveModeContext;
+		expect(await executeBuiltinSlashCommand("/noprewalk", { ctx })).toBe(true);
+		await t.session.prompt("internal", { synthetic: true });
+		await t.session.sendCustomMessage(
+			{ customType: "image-attachment-description", content: "hidden", display: false, attribution: "user" },
+			{ triggerTurn: true },
+		);
+		await t.session.prompt("quick question");
+		await t.session.prompt("next task");
+		expect(t.requests.map(request => request.model)).toEqual([
+			t.target.id,
+			t.target.id,
+			t.target.id,
+			t.source.id,
+			t.target.id,
+		]);
+	});
+	for (const delivery of ["followUp", "steer", "custom"] as const) {
+		it("consumes the bypass when " + delivery + " user input is admitted during execution", async () => {
+			const t = cycleHarness([
+				toolCall("first", "write"),
+				{ content: ["done"] },
+				toolCall("read", "record"),
+				{ content: ["quick"] },
+				...(delivery === "followUp" ? [{ content: ["follow-up answer"] }] : []),
+				toolCall("next", "write"),
+				{ content: ["done"] },
+			]);
+			await t.session.prompt("first task");
+			t.session.setInterruptMode("wait");
+			t.agent.setTools([
+				{
+					...recordTool,
+					async execute() {
+						t.session.skipNextPrewalk();
+						if (delivery === "followUp") await t.session.followUp("quick");
+						else if (delivery === "steer") await t.session.sendUserMessage("quick", { deliverAs: "steer" });
+						else
+							await t.session.sendCustomMessage(
+								{ customType: "user-submission", content: "quick", display: true, attribution: "user" },
+								{ triggerTurn: true },
+							);
+						return { content: [{ type: "text", text: "read" }], details: undefined };
+					},
+				} as AgentTool,
+				writeTool as AgentTool,
+			]);
+			await t.session.prompt("internal continuation", { synthetic: true });
+			await t.session.waitForIdle();
+			expect(t.requests.map(request => request.model)).toEqual([
+				t.source.id,
+				t.target.id,
+				t.target.id,
+				t.target.id,
+				...(delivery === "followUp" ? [t.target.id] : []),
+			]);
+			await t.session.prompt("next task");
+			expect(t.requests.slice(-2).map(request => request.model)).toEqual([t.source.id, t.target.id]);
+		});
+	}
+	it("suppresses a new repeat nudge without cancelling the active prewalk or its initial nudge", async () => {
+		const t = cycleHarness([
+			toolCall("read-1", "record"),
+			toolCall("read-2", "record"),
+			toolCall("write", "write"),
+			{ content: ["done"] },
+		]);
+		t.settings.set("prewalk.repeatPlanNudge", true);
+		t.session.setInterruptMode("wait");
+		let plans = 0;
+		t.agent.subscribe(event => {
+			if (
+				event.type === "message_end" &&
+				event.message.role === "custom" &&
+				event.message.customType === "prewalk-plan"
+			)
+				plans++;
+		});
+		let reads = 0;
+		t.agent.setTools([
+			{
+				...recordTool,
+				async execute() {
+					if (++reads === 2) {
+						t.session.skipNextPrewalk();
+						await t.session.sendUserMessage("small clarification", { deliverAs: "steer" });
+					}
+					return { content: [{ type: "text", text: "read" }], details: undefined };
+				},
+			} as AgentTool,
+			writeTool as AgentTool,
+		]);
+		await t.session.prompt("initial task");
+		expect(t.requests.map(request => request.model)).toEqual([t.source.id, t.source.id, t.source.id, t.target.id]);
+		expect(plans).toBe(1);
+	});
+	it("clears an unused bypass at context reset rather than leaking it into a new task", async () => {
+		const t = cycleHarness([toolCall("write", "write"), { content: ["done"] }], { explicit: false });
+		t.settings.set("prewalk.enabled", true);
+		t.session.skipNextPrewalk();
+		await t.session.resetSessionContext();
+		await t.session.prompt("new task");
+		expect(t.requests.map(request => request.model)).toEqual([t.source.id, t.target.id]);
+	});
+	it("does not disable an explicit prewalk when per-user replanning is off", async () => {
+		const t = cycleHarness([toolCall("write", "write"), { content: ["done"] }]);
+		t.settings.set("prewalk.afterEveryUserMessage", false);
+		t.session.skipNextPrewalk();
+		await t.session.prompt("initial task");
+		expect(t.requests.map(request => request.model)).toEqual([t.source.id, t.target.id]);
+	});
 	for (const explicitArm of [false, true]) {
 		it(
 			"disables planning nudges without disabling " + (explicitArm ? "explicit" : "startup") + " handoff",
