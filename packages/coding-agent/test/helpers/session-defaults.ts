@@ -11,6 +11,7 @@ export function createSessionDefaults() {
 			standingTarget: undefined,
 			planInjected: false,
 			continuePending: false,
+			suppressPlanNudge: false,
 			todoSeen: false,
 			completedActions: 0,
 			lastCountedMessage: undefined,
