@@ -618,6 +618,7 @@ export class AgentSession {
 	readonly #tools: SessionTools;
 	readonly #prewalk: PrewalkCoordinator;
 	#primaryUserMessages = new WeakSet<AgentMessage>();
+	#skipNextPrewalk = false;
 	#detachPrewalkBeforeModelCall: (() => void) | undefined;
 
 	readonly #providerBoundary: SessionProviderBoundary;
@@ -1259,6 +1260,17 @@ export class AgentSession {
 		return this.#prewalk.arm(target, thinkingLevel);
 	}
 
+	/** Skip only the next real user input’s automatic trigger; an active prewalk continues. */
+	skipNextPrewalk(): void {
+		this.#skipNextPrewalk = true;
+	}
+
+	#trackPrewalkUserInput(message: AgentMessage): void {
+		const skip = this.#skipNextPrewalk;
+		this.#skipNextPrewalk = false;
+		if (skip && this.settings.get("prewalk.afterEveryUserMessage")) return;
+		this.#primaryUserMessages.add(message);
+	}
 	/** Restore a planning model and re-arm prewalk without partially applying a rejected restart. */
 	restartPrewalk(
 		source: Model,
@@ -5223,6 +5235,7 @@ export class AgentSession {
 
 		this.#prewalk.reset();
 		this.#primaryUserMessages = new WeakSet();
+		this.#skipNextPrewalk = false;
 		return { droppedCount };
 	}
 
@@ -6593,7 +6606,7 @@ export class AgentSession {
 					userInitiated: options?.userInitiated === true ? true : undefined,
 				}
 			: { role: "user" as const, content: userContent, attribution: promptAttribution, timestamp: submittedAt };
-		if (!options?.synthetic && promptAttribution !== "agent") this.#primaryUserMessages.add(message);
+		if (!options?.synthetic && promptAttribution !== "agent") this.#trackPrewalkUserInput(message);
 		const preludeMessages: AgentMessage[] = [];
 		if (eagerTodoPrelude) {
 			if (eagerTodoPrelude.toolChoice) {
@@ -6760,7 +6773,7 @@ export class AgentSession {
 			timestamp: Date.now(),
 		};
 		if (customMessage.attribution === "user" && !isHiddenUserCompanion(customMessage)) {
-			this.#primaryUserMessages.add(customMessage);
+			this.#trackPrewalkUserInput(customMessage);
 		}
 		outcome.sessionClaimed = await this.#promptWithMessage(customMessage, textContent, {
 			...options,
@@ -7428,7 +7441,7 @@ export class AgentSession {
 			timestamp: timestamp ?? Date.now(),
 			...(mode === "steer" ? { steering: true } : {}),
 		};
-		if (attribution !== "agent") this.#primaryUserMessages.add(primaryMessage);
+		if (attribution !== "agent") this.#trackPrewalkUserInput(primaryMessage);
 		if (mode === "aside") {
 			if (await this.#sessionGenerationChanged(sessionGeneration)) return;
 			const records: AgentMessage[] = [];
@@ -7671,7 +7684,7 @@ export class AgentSession {
 		};
 		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
 		if (normalizedAppMessage.attribution === "user" && !isHiddenUserCompanion(normalizedAppMessage))
-			this.#primaryUserMessages.add(normalizedAppMessage);
+			this.#trackPrewalkUserInput(normalizedAppMessage);
 		if (deliverAs === "aside") {
 			if (await this.#sessionGenerationChanged(sessionGeneration)) return;
 			// Non-interrupting: rides the same step-boundary aside poll as
@@ -7781,7 +7794,7 @@ export class AgentSession {
 		};
 		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
 		if (normalizedAppMessage.attribution === "user" && !isHiddenUserCompanion(normalizedAppMessage))
-			this.#primaryUserMessages.add(normalizedAppMessage);
+			this.#trackPrewalkUserInput(normalizedAppMessage);
 		if (this.isStreaming) {
 			// Queued into a turn the agent owns: that turn holds the session. Busy only
 			// from another prompt's setup claims nothing (that prompt decides).
@@ -8544,6 +8557,7 @@ export class AgentSession {
 
 			this.#prewalk.reset();
 			this.#primaryUserMessages = new WeakSet();
+			this.#skipNextPrewalk = false;
 			return true;
 		} finally {
 			if (advisorRecordersDetached) {
@@ -9886,6 +9900,7 @@ export class AgentSession {
 			this.#sessionGenerationSettled = previousSessionGenerationSettled;
 			this.#prewalk.reset();
 			this.#primaryUserMessages = new WeakSet();
+			this.#skipNextPrewalk = false;
 			return true;
 		} catch (error) {
 			this.sessionManager.restoreState(previousSessionState);

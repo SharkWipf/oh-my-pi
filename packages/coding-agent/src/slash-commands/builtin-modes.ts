@@ -662,4 +662,20 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			return commandConsumed();
 		},
 	},
+	{
+		name: "noprewalk",
+		icon: "prewalk",
+		description: "Skip the next user input’s automatic prewalk and plan nudge (active prewalk continues)",
+		allowArgs: true,
+		inlineHint: "[message]",
+		acpInputHint: "[message]",
+		handle: async (command, runtime) => {
+			runtime.session.skipNextPrewalk();
+			await runtime.output(
+				"Next user input will not trigger automatic prewalk or a new plan nudge; an active prewalk continues.",
+			);
+			const prompt = command.args.trim();
+			return prompt ? { prompt } : commandConsumed();
+		},
+	},
 ];
