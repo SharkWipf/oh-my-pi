@@ -21,6 +21,8 @@ export interface IrcBridgeHost {
 	planModeEnabled(): boolean;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	wakeForIrc(records: AgentMessage[]): void;
+	/** Marks newly delivered parent input without changing its agent attribution. */
+	onParentInput?(message: AgentMessage): void;
 	runEphemeralTurn(args: { promptText: string }): Promise<{ replyText: string }>;
 }
 
@@ -215,16 +217,18 @@ export class IrcBridge {
 			timestamp: msg.ts,
 		};
 		void this.#host.emitSessionEvent({ type: "irc_message", message: record });
+		const fromParent = AgentRegistry.global().get(msg.to)?.parentId === msg.from;
 		if (streaming) {
-			const recipientParentId = AgentRegistry.global().get(msg.to)?.parentId;
-			if (recipientParentId === msg.from) {
-				this.#host.agent.steer({
+			if (fromParent) {
+				const steering: AgentMessage = {
 					role: "user",
 					content: prompt.render(parentIrcSteerTemplate, { from: msg.from, message: msg.body }),
 					attribution: "agent",
 					timestamp: msg.ts,
 					steering: true,
-				});
+				};
+				this.#host.onParentInput?.(steering);
+				this.#host.agent.steer(steering);
 			} else {
 				this.#interrupts.push(record);
 			}
@@ -243,6 +247,7 @@ export class IrcBridge {
 			if (autoReply) this.#startAutoReply(msg);
 			return "injected";
 		}
+		if (fromParent) this.#host.onParentInput?.(record);
 		this.#host.wakeForIrc([record]);
 		return "woken";
 	}

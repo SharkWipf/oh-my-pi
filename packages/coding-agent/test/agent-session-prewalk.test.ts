@@ -9,6 +9,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -1140,6 +1141,7 @@ describe("AgentSession prewalk", () => {
 				? SessionManager.create(process.cwd(), tempDir.path())
 				: SessionManager.inMemory(),
 			settings,
+			agentKind: options.baseSettings ? "sub" : "main",
 			modelRegistry,
 			toolRegistry,
 			thinkingLevel: Effort.High,
@@ -1894,6 +1896,58 @@ describe("AgentSession prewalk", () => {
 			{ model: t.target.id, effort: Effort.Low },
 		]);
 	});
+	for (const [sender, restart] of [
+		["Parent", false],
+		["Parent", true],
+		["Peer", true],
+	] as const) {
+		it(`child prewalk treats ${sender} IRC input with restart=${restart} at its next request boundary`, async () => {
+			const baseSettings = Settings.isolated({
+				"compaction.enabled": false,
+				"task.prewalkAfterEveryUserMessage": restart,
+			});
+			const t = cycleHarness(
+				[
+					toolCall("first-write", "write"),
+					toolCall("read", "record"),
+					toolCall("next-write", "write"),
+					{ content: ["done"] },
+				],
+				{ baseSettings },
+			);
+			const id = `prewalk-child-${crypto.randomUUID()}`;
+			const registry = AgentRegistry.global();
+			const ref = registry.register({ id, displayName: id, kind: "sub", parentId: "Parent", session: t.session });
+			t.session.setInterruptMode("wait");
+			t.agent.setTools([
+				{
+					...recordTool,
+					async execute() {
+						await t.session.deliverIrcMessage({
+							id: "direction",
+							from: sender,
+							to: id,
+							body: "implement the next step",
+							ts: Date.now(),
+						});
+						return { content: [{ type: "text", text: "read" }], details: undefined };
+					},
+				} as AgentTool,
+				writeTool as AgentTool,
+			]);
+			try {
+				await t.session.prompt("first task");
+				expect(t.requests.map(request => request.model)).toEqual([
+					t.source.id,
+					t.target.id,
+					sender === "Parent" && restart ? t.source.id : t.target.id,
+					t.target.id,
+				]);
+			} finally {
+				registry.unregister(id, ref);
+			}
+		});
+	}
 	for (const deliverAs of ["steer", "aside"] as const) {
 		it("rearms " + deliverAs + " user input at the next model request boundary", async () => {
 			const t = cycleHarness([
