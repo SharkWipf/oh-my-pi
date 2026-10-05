@@ -1427,6 +1427,9 @@ export class AgentSession {
 			isStreaming: () => this.isStreaming,
 			planModeEnabled: () => this.#planModeState?.enabled === true,
 			emitSessionEvent: event => this.#emitSessionEvent(event),
+			onParentInput: message => {
+				if (this.#agentKind === "sub") this.#primaryUserMessages.add(message);
+			},
 			wakeForIrc: records => this.#wakeForIrc(records),
 			runEphemeralTurn: args => this.runEphemeralTurn(args),
 		};
