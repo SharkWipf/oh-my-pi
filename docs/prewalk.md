@@ -112,6 +112,14 @@ Task subagents have separate controls: agent frontmatter, `task.prewalk`, per-ag
 
 The unpinned-subagent setting defaults off. When enabled, eligible launches start on `@slow` with its configured thinking level, then hand off to the existing prewalk target or otherwise the model and thinking level the child would normally use. Explicit agent models, configured role choices, per-agent model overrides, launch overrides and extension-selected models are exempt. An unconfigured bundled `@task` default and ordinary parent-model inheritance are not overrides. Explicit per-agent prewalk off stays off; plan-mode launches do not receive this automatic fallback. An unavailable planning model is reported and skipped rather than failing the child launch.
 
+**Tasks → Subagents** also has independent child planning controls:
+
+- **Subagent Deep Plan Nudge** (`task.prewalkPlanNudge`) defaults on. Each fresh child prewalk cycle receives its initial deep-plan reminder and related continuation reminder. Turning it off changes only the nudges, not action limits or handoff.
+- **Repeat Subagent Plan Nudge** (`task.prewalkRepeatPlanNudge`) defaults off and is shown only while **Subagent Deep Plan Nudge** is on. It repeats the reminder when later parent input arrives during an unfinished active child prewalk. It does not control initial reminders for fresh cycles.
+- **Restart Prewalk on Subagent Input** (`task.prewalkAfterEveryUserMessage`) defaults off. Later parent messages do not rearm child prewalk by default, so a child that has handed off stays on its execution model. Enabling this explicit restart option lets later input restart an eligible child’s planning phase; input after handoff starts a fresh cycle with a fresh nudge while **Subagent Deep Plan Nudge** is on. During an unfinished cycle, a restart preserves the already-sent reminder unless **Repeat Subagent Plan Nudge** is on.
+
+These settings are independent of the main agent’s `prewalk.planNudge`, `prewalk.repeatPlanNudge` and `prewalk.afterEveryUserMessage` settings. None enables initial subagent prewalk: launch eligibility remains controlled by the settings and agent configuration described above.
+
 **Tasks → Subagents → Minimum/Maximum Prewalk Actions** set separate child limits. Both default to **Inherit** (`-1`), using the parent’s effective limits. An explicit minimum `0` removes the child minimum; an explicit maximum `0` makes the child maximum unlimited. These limits do not enable prewalk by themselves.
 
 ```yaml

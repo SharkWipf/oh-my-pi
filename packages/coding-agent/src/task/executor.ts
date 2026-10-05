@@ -994,6 +994,9 @@ export function createSubagentSettings(
 	snapshot["tier.openai"] = subagentTiers.openai ?? "none";
 	snapshot["tier.anthropic"] = subagentTiers.anthropic ?? "none";
 	snapshot["tier.google"] = subagentTiers.google ?? "none";
+	snapshot["prewalk.planNudge"] = baseSettings.get("task.prewalkPlanNudge");
+	snapshot["prewalk.repeatPlanNudge"] = baseSettings.get("task.prewalkRepeatPlanNudge");
+	snapshot["prewalk.afterEveryUserMessage"] = baseSettings.get("task.prewalkAfterEveryUserMessage");
 	const prewalkMinimum = baseSettings.get("task.prewalkMinMessages");
 	const prewalkMaximum = baseSettings.get("task.prewalkMaxMessages");
 	if (prewalkMinimum >= 0) snapshot["prewalk.minMessages"] = prewalkMinimum;
