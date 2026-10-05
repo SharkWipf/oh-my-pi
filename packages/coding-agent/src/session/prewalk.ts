@@ -106,6 +106,7 @@ export interface PrewalkSnapshot {
 	readonly standingTarget: Pick<Model, "provider" | "id"> | undefined;
 	readonly planInjected: boolean;
 	readonly continuePending: boolean;
+	readonly suppressPlanNudge: boolean;
 	readonly todoSeen: boolean;
 	readonly completedActions: number;
 	readonly lastCountedMessage: AssistantMessage | undefined;
@@ -134,6 +135,7 @@ export class PrewalkCoordinator {
 	#standingTarget: Pick<Model, "provider" | "id"> | undefined;
 	#planInjected = false;
 	#continuePending = false;
+	#suppressPlanNudge = false;
 	#todoSeen = false;
 	#completedActions = 0;
 	#cycleGeneration = 0;
@@ -152,6 +154,7 @@ export class PrewalkCoordinator {
 			this.#standingTarget = snapshot.standingTarget;
 			this.#planInjected = snapshot.planInjected;
 			this.#continuePending = snapshot.continuePending;
+			this.#suppressPlanNudge = snapshot.suppressPlanNudge;
 			this.#todoSeen = snapshot.todoSeen;
 			this.#completedActions = snapshot.completedActions;
 			this.#lastCountedMessage = snapshot.lastCountedMessage;
@@ -171,6 +174,7 @@ export class PrewalkCoordinator {
 			standingTarget: this.#standingTarget,
 			planInjected: this.#planInjected,
 			continuePending: this.#continuePending,
+			suppressPlanNudge: this.#suppressPlanNudge,
 			todoSeen: this.#todoSeen,
 			completedActions: this.#completedActions,
 			lastCountedMessage: this.#lastCountedMessage,
@@ -227,7 +231,9 @@ export class PrewalkCoordinator {
 	}
 
 	/** Restores planning only at a safe request boundary after newly delivered user input. */
-	async beforeModelCall(hasNewUserInput: boolean): Promise<void> {
+	async beforeModelCall(hasNewUserInput: boolean, hasSkippedUserInput: boolean): Promise<void> {
+		// Keep the bypass through tool/synthetic continuations; ordinary input wins a mixed batch.
+		if (hasNewUserInput || hasSkippedUserInput) this.#suppressPlanNudge = !hasNewUserInput;
 		if (
 			this.#automaticDisabled ||
 			this.#disabledByToggle ||
@@ -261,7 +267,9 @@ export class PrewalkCoordinator {
 		const retainPlanNudge =
 			this.#prewalk !== undefined && this.#planInjected && !this.#host.settings.get("prewalk.repeatPlanNudge");
 		if (!retainPlanNudge) this.#scrubPlanNudge();
+		const suppressPlanNudge = this.#suppressPlanNudge;
 		this.#clearPrewalkState();
+		this.#suppressPlanNudge = suppressPlanNudge;
 		this.#planInjected = retainPlanNudge;
 		this.#standingTarget = undefined;
 		this.#policy = policy;
@@ -288,6 +296,7 @@ export class PrewalkCoordinator {
 		this.#prewalk = undefined;
 		this.#planInjected = false;
 		this.#continuePending = false;
+		this.#suppressPlanNudge = false;
 		this.#todoSeen = false;
 		this.#completedActions = 0;
 		this.#lastCountedMessage = undefined;
@@ -337,9 +346,10 @@ export class PrewalkCoordinator {
 		if (context.toolResults.some(result => result.toolName === "todo" && !result.isError)) this.#todoSeen = true;
 
 		const hasToolResults = context.toolResults.length > 0;
-		if (this.#host.settings.get("prewalk.planNudge") && this.#planInjected && hasToolResults) {
+		const planNudgeEnabled = this.#host.settings.get("prewalk.planNudge") && !this.#suppressPlanNudge;
+		if (planNudgeEnabled && this.#planInjected && hasToolResults) {
 			this.#continuePending = true;
-		} else if (this.#host.settings.get("prewalk.planNudge") && this.#continuePending) {
+		} else if (planNudgeEnabled && this.#continuePending) {
 			this.#continuePending = false;
 			this.#host.agent.steer({
 				role: "custom",
@@ -361,7 +371,7 @@ export class PrewalkCoordinator {
 				? context.toolResults.find(result => isPrewalkImplementationAction(result))
 				: undefined;
 		if (!minimumReached || (!maximumReached && !action) || (maximumReached && this.#host.hasRunningEvalJobs?.())) {
-			if (this.#host.settings.get("prewalk.planNudge") && !this.#planInjected) {
+			if (planNudgeEnabled && !this.#planInjected) {
 				this.#planInjected = true;
 				this.#continuePending = true;
 				this.#host.agent.steer({
@@ -425,6 +435,7 @@ export class PrewalkCoordinator {
 			return false;
 		}
 		this.#capturePolicy(candidate);
+		this.#suppressPlanNudge = false;
 		this.#rearmPending = false;
 		this.#prewalk = candidate;
 		this.#planInjected = this.#host.settings.get("prewalk.planNudge");

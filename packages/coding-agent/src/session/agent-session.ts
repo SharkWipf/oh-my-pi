@@ -617,7 +617,7 @@ export class AgentSession {
 	readonly #models: ModelControls;
 	readonly #tools: SessionTools;
 	readonly #prewalk: PrewalkCoordinator;
-	#primaryUserMessages = new WeakSet<AgentMessage>();
+	#primaryUserMessages = new WeakMap<AgentMessage, boolean>();
 	#skipNextPrewalk = false;
 	#detachPrewalkBeforeModelCall: (() => void) | undefined;
 
@@ -1268,8 +1268,7 @@ export class AgentSession {
 	#trackPrewalkUserInput(message: AgentMessage): void {
 		const skip = this.#skipNextPrewalk;
 		this.#skipNextPrewalk = false;
-		if (skip && this.settings.get("prewalk.afterEveryUserMessage")) return;
-		this.#primaryUserMessages.add(message);
+		this.#primaryUserMessages.set(message, !(skip && this.settings.get("prewalk.afterEveryUserMessage")));
 	}
 	/** Restore a planning model and re-arm prewalk without partially applying a rejected restart. */
 	restartPrewalk(
@@ -1374,7 +1373,7 @@ export class AgentSession {
 			planModeEnabled: () => this.#planModeState?.enabled === true,
 			emitSessionEvent: event => this.#emitSessionEvent(event),
 			onParentInput: message => {
-				if (this.#agentKind === "sub") this.#primaryUserMessages.add(message);
+				if (this.#agentKind === "sub") this.#primaryUserMessages.set(message, true);
 			},
 			wakeForIrc: records => this.#wakeForIrc(records),
 			runEphemeralTurn: args => this.runEphemeralTurn(args),
@@ -1536,10 +1535,15 @@ export class AgentSession {
 		this.agent.prepareQueuedMessages = this.#prepareQueuedUserMessages;
 		this.#detachPrewalkBeforeModelCall = this.agent.addBeforeModelCallHook(async (_signal, turnMessages) => {
 			let hasNewUserInput = false;
+			let hasSkippedUserInput = false;
 			for (const message of turnMessages) {
-				if (this.#primaryUserMessages.delete(message)) hasNewUserInput = true;
+				const trigger = this.#primaryUserMessages.get(message);
+				if (trigger === undefined) continue;
+				this.#primaryUserMessages.delete(message);
+				if (trigger) hasNewUserInput = true;
+				else hasSkippedUserInput = true;
 			}
-			await this.#prewalk.beforeModelCall(hasNewUserInput);
+			await this.#prewalk.beforeModelCall(hasNewUserInput, hasSkippedUserInput);
 		});
 		this.#detachUsageBeforeModelCall = this.agent.addBeforeModelCallHook(async signal => {
 			if (!this.settings.get("retry.usageAwareFallback")) return;
@@ -5234,7 +5238,7 @@ export class AgentSession {
 		await this.refreshBaseSystemPrompt();
 
 		this.#prewalk.reset();
-		this.#primaryUserMessages = new WeakSet();
+		this.#primaryUserMessages = new WeakMap();
 		this.#skipNextPrewalk = false;
 		return { droppedCount };
 	}
@@ -8556,7 +8560,7 @@ export class AgentSession {
 			}
 
 			this.#prewalk.reset();
-			this.#primaryUserMessages = new WeakSet();
+			this.#primaryUserMessages = new WeakMap();
 			this.#skipNextPrewalk = false;
 			return true;
 		} finally {
@@ -9899,7 +9903,7 @@ export class AgentSession {
 			generationSettled.resolve();
 			this.#sessionGenerationSettled = previousSessionGenerationSettled;
 			this.#prewalk.reset();
-			this.#primaryUserMessages = new WeakSet();
+			this.#primaryUserMessages = new WeakMap();
 			this.#skipNextPrewalk = false;
 			return true;
 		} catch (error) {

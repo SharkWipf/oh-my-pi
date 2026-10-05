@@ -95,7 +95,7 @@ The status line shows a walking person while a handoff is armed and a standing p
 
 Use `/noprewalk <message>` to send that message without triggering automatic prewalk or a new planning nudge. Bare `/noprewalk` skips the next real user input once; internal continuations and hidden attachment companions do not consume it. Later ordinary inputs use the normal settings again. The bypass is transient and is cleared by `/clear` or a session change.
 
-This skips a **new automatic trigger** only when **Prewalk Every User Message** is enabled. It does not cancel an already-armed or running prewalk, remove its existing nudge, switch models, or change persistent settings. Other normal inputs delivered in the same batch can still trigger prewalk.
+This skips a **new automatic trigger** only when **Prewalk Every User Message** is enabled. It also prevents delayed first-plan and continuation nudges during that input’s tool and internal continuations, even if a prewalk was already armed. It does not cancel that cycle, reset its action count, remove an existing nudge, switch models, or change persistent settings. Other normal inputs delivered in the same batch can still trigger prewalk; later ordinary input restores normal nudge behavior.
 
 ## Arm from an active session
 

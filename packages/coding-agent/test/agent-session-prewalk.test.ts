@@ -1297,6 +1297,110 @@ describe("AgentSession prewalk", () => {
 		expect(t.requests.map(request => request.model)).toEqual([t.source.id, t.source.id, t.source.id, t.target.id]);
 		expect(plans).toBe(1);
 	});
+	it("/noprewalk suppresses the delayed first plan nudge in an already-armed cycle", async () => {
+		const t = cycleHarness([
+			{ content: ["quick answer"] },
+			toolCall("read", "record"),
+			toolCall("write", "write"),
+			{ content: ["done"] },
+		]);
+		t.agent.setTools([recordTool as AgentTool, writeTool as AgentTool]);
+		let plans = 0;
+		t.agent.subscribe(event => {
+			if (
+				event.type === "message_end" &&
+				event.message.role === "custom" &&
+				event.message.customType === "prewalk-plan"
+			)
+				plans++;
+		});
+		const ctx = {
+			session: t.session,
+			sessionManager: t.session.sessionManager,
+			settings: t.settings,
+			collabGuest: false,
+			showStatus: vi.fn(),
+			editor: { setText: vi.fn() },
+			refreshSlashCommandState: vi.fn(),
+		} as unknown as InteractiveModeContext;
+		const body = await executeBuiltinSlashCommand("/noprewalk quick question", { ctx });
+		if (typeof body !== "string") throw new Error("Expected submitted body");
+		await t.session.prompt(body);
+		expect(plans).toBe(0);
+		expect(t.requests.map(request => request.model)).toEqual([t.source.id]);
+		expect(t.session.getPrewalkState()?.target.id).toBe(t.target.id);
+		await t.session.prompt("resume normal task");
+		expect(plans).toBe(1);
+		expect(t.requests.map(request => request.model)).toEqual([t.source.id, t.source.id, t.source.id, t.target.id]);
+	});
+	it("retains the bypass through tools, synthetic continuations and hot revival without resetting handoff accounting", async () => {
+		const t = cycleHarness([toolCall("first", "record"), { content: ["pause"] }], { minimum: 9, maximum: 9 });
+		t.agent.setTools([recordTool as AgentTool]);
+		t.session.skipNextPrewalk();
+		await t.session.prompt("quick investigation");
+		const snapshot = t.session.getPrewalkSnapshot();
+		const messages = structuredClone(t.agent.state.messages);
+		await t.session.dispose();
+		const revived = cycleHarness(
+			[
+				toolCall("second", "record"),
+				toolCall("third", "record"),
+				{ content: ["pause"] },
+				toolCall("fourth", "record"),
+				{ content: ["done"] },
+			],
+			{ minimum: 9, maximum: 9, snapshot },
+		);
+		revived.agent.setTools([recordTool as AgentTool]);
+		revived.agent.replaceMessages(messages);
+		const nudges: string[] = [];
+		revived.agent.subscribe(event => {
+			if (event.type === "message_end" && event.message.role === "custom") nudges.push(event.message.customType);
+		});
+		await revived.session.prompt("continue", { synthetic: true });
+		expect(revived.requests.map(request => request.model)).toEqual([
+			revived.source.id,
+			revived.source.id,
+			revived.source.id,
+		]);
+		expect(nudges).toEqual([]);
+		await revived.session.prompt("continue again", { synthetic: true });
+		expect(revived.requests.map(request => request.model)).toEqual([
+			revived.source.id,
+			revived.source.id,
+			revived.source.id,
+			revived.source.id,
+			revived.target.id,
+		]);
+		expect(nudges).toEqual(["prewalk-checklist"]);
+	});
+	it("ordinary input in a mixed steering batch still restarts the cycle and its action budget", async () => {
+		const t = cycleHarness(
+			[
+				toolCall("read", "record"),
+				toolCall("write-1", "write"),
+				toolCall("write-2", "write"),
+				{ content: ["done"] },
+			],
+			{ minimum: 4 },
+		);
+		t.session.setInterruptMode("wait");
+		t.agent.setSteeringMode("all");
+		t.agent.setTools([
+			{
+				...recordTool,
+				async execute() {
+					t.session.skipNextPrewalk();
+					await t.session.sendUserMessage("quick clarification", { deliverAs: "steer" });
+					await t.session.sendUserMessage("normal task", { deliverAs: "steer" });
+					return { content: [{ type: "text", text: "read" }], details: undefined };
+				},
+			} as AgentTool,
+			writeTool as AgentTool,
+		]);
+		await t.session.prompt("initial task");
+		expect(t.requests.map(request => request.model)).toEqual([t.source.id, t.source.id, t.source.id, t.target.id]);
+	});
 	it("clears an unused bypass at context reset rather than leaking it into a new task", async () => {
 		const t = cycleHarness([toolCall("write", "write"), { content: ["done"] }], { explicit: false });
 		t.settings.set("prewalk.enabled", true);
