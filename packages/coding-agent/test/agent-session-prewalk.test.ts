@@ -1149,6 +1149,80 @@ describe("AgentSession prewalk", () => {
 		});
 		return { source, target, requests, agent, settings, session };
 	}
+	for (const explicitArm of [false, true]) {
+		it(
+			"disables planning nudges without disabling " + (explicitArm ? "explicit" : "startup") + " handoff",
+			async () => {
+				const t = cycleHarness([toolCall("read", "record"), toolCall("write", "write"), { content: ["done"] }], {
+					disabled: explicitArm,
+				});
+				t.settings.set("prewalk.planNudge", false);
+				if (explicitArm) expect(t.session.armPrewalk(t.target, Effort.Low)).toBe(true);
+				const nudges: string[] = [];
+				t.agent.subscribe(event => {
+					if (
+						event.type === "message_end" &&
+						event.message.role === "custom" &&
+						event.message.customType.startsWith("prewalk-")
+					)
+						nudges.push(event.message.customType);
+				});
+				t.agent.setTools([recordTool as AgentTool, writeTool as AgentTool]);
+				await t.session.prompt("investigate and implement");
+				expect(nudges).toEqual(["prewalk-checklist"]);
+				expect(t.requests.map(request => request.model)).toEqual([t.source.id, t.source.id, t.target.id]);
+			},
+		);
+	}
+	for (const repeat of [false, true]) {
+		it(
+			(repeat ? "repeats" : "does not repeat") + " the plan nudge for injected user input while still walking",
+			async () => {
+				const t = cycleHarness([
+					toolCall("read-1", "record"),
+					toolCall("read-2", "record"),
+					toolCall("read-3", "record"),
+					toolCall("write", "write"),
+					{ content: ["done"] },
+					toolCall("fresh-read", "record"),
+					toolCall("fresh-write", "write"),
+					{ content: ["done"] },
+				]);
+				if (repeat) t.settings.set("prewalk.repeatPlanNudge", true);
+				t.session.setInterruptMode("wait");
+				let reads = 0;
+				const record: AgentTool<typeof recordToolSchema, undefined> = {
+					...recordTool,
+					async execute() {
+						if (++reads === 2) await t.session.sendUserMessage("additional direction", { deliverAs: "steer" });
+						return { content: [{ type: "text", text: "read" }], details: undefined };
+					},
+				};
+				const nudges: string[] = [];
+				t.agent.subscribe(event => {
+					if (
+						event.type === "message_end" &&
+						event.message.role === "custom" &&
+						event.message.customType === "prewalk-plan"
+					)
+						nudges.push(event.message.customType);
+				});
+				t.agent.setTools([record as AgentTool, writeTool as AgentTool]);
+				await t.session.prompt("first task");
+				expect(nudges).toHaveLength(repeat ? 2 : 1);
+				expect(t.requests.map(request => request.model)).toEqual([
+					t.source.id,
+					t.source.id,
+					t.source.id,
+					t.source.id,
+					t.target.id,
+				]);
+				await t.session.prompt("new task after handoff");
+				expect(nudges).toHaveLength(repeat ? 3 : 2);
+				expect(t.requests.slice(-3).map(request => request.model)).toEqual([t.source.id, t.source.id, t.target.id]);
+			},
+		);
+	}
 
 	it("counts primary responses and executed tools, including failures, but excludes side messages", async () => {
 		const t = cycleHarness(

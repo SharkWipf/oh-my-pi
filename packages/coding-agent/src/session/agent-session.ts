@@ -1421,7 +1421,7 @@ export class AgentSession {
 			getEnabledToolNames: () => this.getEnabledToolNames(),
 			toolRegistry: () => this.#tools.registry,
 			planModeEnabled: () => this.#planModeState?.enabled === true,
-			prewalkWillHandoff: () => this.#prewalk.willHandoff,
+			prewalkWillHandoff: () => this.#prewalk.willHandoff && this.settings.get("prewalk.planNudge"),
 			consumeLastServedToolChoiceLabel: () => this.#toolChoiceQueue.consumeLastServedLabel(),
 		};
 		this.#todo = new TodoTracker(todoHost);

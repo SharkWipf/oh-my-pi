@@ -250,8 +250,11 @@ export class PrewalkCoordinator {
 			return;
 		}
 		await this.#host.setModelTemporary(policy.source, policy.thinkingLevel, { ephemeral: true });
-		this.#scrubPlanNudge();
+		const retainPlanNudge =
+			this.#prewalk !== undefined && this.#planInjected && !this.#host.settings.get("prewalk.repeatPlanNudge");
+		if (!retainPlanNudge) this.#scrubPlanNudge();
 		this.#clearPrewalkState();
+		this.#planInjected = retainPlanNudge;
 		this.#standingTarget = undefined;
 		this.#policy = policy;
 		this.#rearmPending = false;
@@ -326,9 +329,9 @@ export class PrewalkCoordinator {
 		if (context.toolResults.some(result => result.toolName === "todo" && !result.isError)) this.#todoSeen = true;
 
 		const hasToolResults = context.toolResults.length > 0;
-		if (this.#planInjected && hasToolResults) {
+		if (this.#host.settings.get("prewalk.planNudge") && this.#planInjected && hasToolResults) {
 			this.#continuePending = true;
-		} else if (this.#continuePending) {
+		} else if (this.#host.settings.get("prewalk.planNudge") && this.#continuePending) {
 			this.#continuePending = false;
 			this.#host.agent.steer({
 				role: "custom",
@@ -350,7 +353,7 @@ export class PrewalkCoordinator {
 				? context.toolResults.find(result => isPrewalkImplementationAction(result))
 				: undefined;
 		if (!minimumReached || (!maximumReached && !action) || (maximumReached && this.#host.hasRunningEvalJobs?.())) {
-			if (!this.#planInjected) {
+			if (this.#host.settings.get("prewalk.planNudge") && !this.#planInjected) {
 				this.#planInjected = true;
 				this.#continuePending = true;
 				this.#host.agent.steer({
@@ -416,20 +419,22 @@ export class PrewalkCoordinator {
 		this.#capturePolicy(candidate);
 		this.#rearmPending = false;
 		this.#prewalk = candidate;
-		this.#planInjected = true;
-		this.#continuePending = true;
+		this.#planInjected = this.#host.settings.get("prewalk.planNudge");
+		this.#continuePending = this.#planInjected;
 		this.#todoSeen = false;
 		this.#completedActions = 0;
 		this.#cycleGeneration++;
 		this.#lastCountedMessage = undefined;
-		this.#host.agent.steer({
-			role: "custom",
-			customType: PREWALK_PLAN_MESSAGE_TYPE,
-			content: prewalkPlanPrompt,
-			display: false,
-			attribution: "agent",
-			timestamp: Date.now(),
-		});
+		if (this.#planInjected) {
+			this.#host.agent.steer({
+				role: "custom",
+				customType: PREWALK_PLAN_MESSAGE_TYPE,
+				content: prewalkPlanPrompt,
+				display: false,
+				attribution: "agent",
+				timestamp: Date.now(),
+			});
+		}
 		this.#host.emitNotice(
 			"info",
 			`Prewalk: armed for ${target.provider}/${target.id} — will switch at the first edit/write once the todo list exists.`,

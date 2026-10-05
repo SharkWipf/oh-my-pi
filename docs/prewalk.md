@@ -37,9 +37,17 @@ omp --prewalk-into openai/gpt-5-mini
 
 At startup, OMP resolves the target with the normal model-role and model-matching rules. If the target cannot be resolved or has no configured credentials, OMP prints a warning and starts with prewalk unarmed.
 
+## Planning nudges
+
+Under **Model → Prewalk**, **Deep Plan Nudge** (`prewalk.planNudge`) defaults on and injects the deep-plan reminder during each prewalk cycle, along with its related continuation reminder. Turning it off changes only these nudges: prewalk, action counting, limits and handoff remain enabled.
+
+**Repeat Plan Nudge** (`prewalk.repeatPlanNudge`) defaults off and is shown only while **Deep Plan Nudge** is on. Enable it to repeat the reminder when new user input arrives during an unfinished prewalk. With repeat off, an already-sent reminder remains in the live thread rather than being removed or injected again.
+
+Repeat does not control ordinary fresh cycles: each fresh cycle receives its initial reminder while **Deep Plan Nudge** is on. With **Prewalk Every User Message**, new input during an unfinished prewalk still resets the action counter and restarts the cycle, but preserves the already-sent reminder unless **Repeat Plan Nudge** is on. New input after handoff and an explicit `/prewalk restart` start fresh cycles with their initial reminders.
+
 ## Handoff trigger
 
-An armed prewalk injects a planning nudge. When the `todo` tool is active, any successful `todo` call—including the read-only `view` operation—opens the handoff gate. OMP then switches models after the first successful completed `edit` or `write` call.
+When the `todo` tool is active, any successful `todo` call—including the read-only `view` operation—opens the handoff gate. OMP then switches models after the first successful completed `edit` or `write` call.
 
 Calls to other tools do not trigger this first-mutation handoff, but their executions count toward the action limits below. A read-only `xd://` device request routed through `write`, such as LSP navigation, does not qualify as a mutation; only device operations classified as workspace writes or execution qualify.
 
