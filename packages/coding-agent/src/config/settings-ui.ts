@@ -32,6 +32,13 @@ import {
 const CONDITIONS: Record<string, () => boolean> = {
 	macOS: () => process.platform === "darwin",
 	hasImageProtocol: () => !!TERMINAL.imageProtocol,
+	prewalkPlanNudgeEnabled: () => {
+		try {
+			return Settings.instance.get("prewalk.planNudge") === true;
+		} catch {
+			return false;
+		}
+	},
 	advisorEnabled: () => {
 		try {
 			return Settings.instance.get("advisor.enabled") === true;

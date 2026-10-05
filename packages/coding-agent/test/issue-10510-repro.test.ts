@@ -73,7 +73,10 @@ describe("issue #10510: prewalk + eager-todo conflict", () => {
 	}
 
 	/** Runs a first-turn prompt and returns every hidden/visible text sent to the model. */
-	async function collectInjectedText(options: { prewalk: "handoff" | "noop" | "off" }): Promise<string> {
+	async function collectInjectedText(options: {
+		prewalk: "handoff" | "noop" | "off";
+		planNudge?: boolean;
+	}): Promise<string> {
 		const primary = modelOrThrow("claude-sonnet-4-5");
 		const handoffTarget = modelOrThrow("claude-sonnet-4-6");
 		const prewalkTarget =
@@ -115,6 +118,7 @@ describe("issue #10510: prewalk + eager-todo conflict", () => {
 				"todo.enabled": true,
 				"todo.eager": "always",
 				"todo.reminders": false,
+				"prewalk.planNudge": options.planNudge ?? true,
 			}),
 			modelRegistry,
 			toolRegistry,
@@ -140,6 +144,11 @@ describe("issue #10510: prewalk + eager-todo conflict", () => {
 
 	it("keeps the forced eager-todo prelude when the armed prewalk is a no-op", async () => {
 		const text = await collectInjectedText({ prewalk: "noop" });
+		expect(text.includes("write complete plan")).toBe(false);
+		expect(text.includes("You MUST call") && text.includes("first in this turn")).toBe(true);
+	});
+	it("keeps eager todo when the planning nudge is disabled without preventing handoff", async () => {
+		const text = await collectInjectedText({ prewalk: "handoff", planNudge: false });
 		expect(text.includes("write complete plan")).toBe(false);
 		expect(text.includes("You MUST call") && text.includes("first in this turn")).toBe(true);
 	});

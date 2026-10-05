@@ -390,7 +390,30 @@ export const SETTINGS_SCHEMA = {
 			group: "Prewalk",
 			label: "Enable Prewalk",
 			description:
-				"Start on the active model, then switch to a fast/cheap model (default the 'smol' role) at the first edit/write after the plan nudge's todo list exists — the strong model plans, commits the todos, and starts the implementation before handing off. Overridable per session with --prewalk / --no-prewalk.",
+				"Start on the active model, then switch to a fast/cheap model (default the 'smol' role) at the first edit/write after a successful todo call — the strong model plans, commits the todos, and starts the implementation before handing off. Overridable per session with --prewalk / --no-prewalk.",
+		},
+	},
+	"prewalk.planNudge": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "model",
+			group: "Prewalk",
+			label: "Deep Plan Nudge",
+			description:
+				"Inject the deep-plan reminder during each prewalk cycle and its related continuation reminder. Disabling it does not disable prewalk, action limits or handoff.",
+		},
+	},
+	"prewalk.repeatPlanNudge": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Prewalk",
+			label: "Repeat Plan Nudge",
+			description:
+				"Repeat the deep-plan reminder when new user input arrives during an unfinished prewalk. Fresh cycles already receive their initial reminder; this toggle is not needed for normal cycle starts. Requires Deep Plan Nudge.",
+			condition: "prewalkPlanNudgeEnabled",
 		},
 	},
 	"prewalk.afterEveryUserMessage": {
