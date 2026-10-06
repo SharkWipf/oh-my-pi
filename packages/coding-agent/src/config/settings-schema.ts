@@ -394,7 +394,19 @@ export const SETTINGS_SCHEMA = {
 			group: "Prewalk",
 			label: "Deep Plan Nudge",
 			description:
-				"Inject the deep-plan reminder during each prewalk cycle and its related continuation reminder. Disabling it does not disable prewalk, action limits or handoff.",
+				"Inject the deep-plan reminder during each prewalk cycle. Disabling it also disables continuation reminders, but not prewalk, action limits or handoff.",
+		},
+	},
+	"prewalk.continueNudge": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "model",
+			group: "Prewalk",
+			label: "Continuation Nudge",
+			description:
+				"After planning or tool use during an armed prewalk, ask the agent to continue when it tries to end its turn. This can force another model request after a final answer. Off removes that reminder; the minimum only gates model handoff, not completion. Requires Deep Plan Nudge.",
+			condition: "prewalkPlanNudgeEnabled",
 		},
 	},
 	"prewalk.repeatPlanNudge": {
@@ -5384,7 +5396,19 @@ export const SETTINGS_SCHEMA = {
 			group: "Subagents",
 			label: "Subagent Deep Plan Nudge",
 			description:
-				"Inject the deep-plan reminder during each subagent prewalk cycle and its related continuation reminder. Independent of the main-agent setting; does not enable initial prewalk or change action limits or handoff.",
+				"Inject the deep-plan reminder during each subagent prewalk cycle. Disabling it also disables continuation reminders. Independent of the main-agent setting; does not enable initial prewalk or change action limits or handoff.",
+		},
+	},
+	"task.prewalkContinueNudge": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Subagent Continuation Nudge",
+			description:
+				"After planning or tool use during an armed child prewalk, ask the subagent to continue when it tries to end its turn. May force another model request after a final answer. Off by default; independent of the main-agent setting. Requires Subagent Deep Plan Nudge.",
+			condition: "taskPrewalkPlanNudgeEnabled",
 		},
 	},
 	"task.prewalkRepeatPlanNudge": {

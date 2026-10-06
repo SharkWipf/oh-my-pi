@@ -993,6 +993,7 @@ export function createSubagentSettings(
 	snapshot["tier.anthropic"] = subagentTiers.anthropic ?? "none";
 	snapshot["tier.google"] = subagentTiers.google ?? "none";
 	snapshot["prewalk.planNudge"] = baseSettings.get("task.prewalkPlanNudge");
+	snapshot["prewalk.continueNudge"] = baseSettings.get("task.prewalkContinueNudge");
 	snapshot["prewalk.repeatPlanNudge"] = baseSettings.get("task.prewalkRepeatPlanNudge");
 	snapshot["prewalk.afterEveryUserMessage"] = baseSettings.get("task.prewalkAfterEveryUserMessage");
 	const prewalkMinimum = baseSettings.get("task.prewalkMinMessages");
