@@ -380,9 +380,11 @@ export class PrewalkCoordinator {
 
 		const hasToolResults = context.toolResults.length > 0;
 		const planNudgeEnabled = this.#host.settings.get("prewalk.planNudge") && !this.#suppressPlanNudge;
-		if (planNudgeEnabled && this.#planInjected && hasToolResults) {
+		const continueNudgeEnabled = planNudgeEnabled && this.#host.settings.get("prewalk.continueNudge");
+		if (!continueNudgeEnabled) this.#continuePending = false;
+		if (continueNudgeEnabled && this.#planInjected && hasToolResults) {
 			this.#continuePending = true;
-		} else if (planNudgeEnabled && this.#continuePending) {
+		} else if (continueNudgeEnabled && this.#continuePending) {
 			this.#continuePending = false;
 			this.#host.agent.steer({
 				role: "custom",
@@ -406,7 +408,7 @@ export class PrewalkCoordinator {
 		if (!minimumReached || (!maximumReached && !action) || (maximumReached && this.#host.hasRunningEvalJobs?.())) {
 			if (planNudgeEnabled && !this.#planInjected) {
 				this.#planInjected = true;
-				this.#continuePending = true;
+				this.#continuePending = continueNudgeEnabled;
 				this.#host.agent.steer({
 					role: "custom",
 					customType: PREWALK_PLAN_MESSAGE_TYPE,
@@ -472,7 +474,7 @@ export class PrewalkCoordinator {
 		this.#rearmPending = false;
 		this.#prewalk = candidate;
 		this.#planInjected = this.#host.settings.get("prewalk.planNudge");
-		this.#continuePending = this.#planInjected;
+		this.#continuePending = this.#planInjected && this.#host.settings.get("prewalk.continueNudge");
 		this.#todoSeen = false;
 		this.#completedActions = 0;
 		this.#cycleGeneration++;

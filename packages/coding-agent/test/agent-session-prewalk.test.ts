@@ -1647,6 +1647,123 @@ describe("AgentSession prewalk", () => {
 			},
 		);
 	}
+	it("continuation off lets an answer finish below the handoff minimum while retaining the plan and later handoff", async () => {
+		const t = cycleHarness(
+			[
+				toolCall("read", "record"),
+				{ content: ["investigation complete"] },
+				toolCall("todo", "todo"),
+				toolCall("write", "write"),
+				{ content: ["implemented"] },
+			],
+			{ minimum: 5 },
+		);
+		t.settings.set("prewalk.continueNudge", false);
+		t.agent.setTools([recordTool as AgentTool, todoTool as AgentTool, writeTool as AgentTool]);
+		const nudges: string[] = [];
+		t.agent.subscribe(event => {
+			if (event.type === "message_end" && event.message.role === "custom") nudges.push(event.message.customType);
+		});
+		await t.session.prompt("investigate");
+		expect(t.requests.map(request => request.model)).toEqual([t.source.id, t.source.id]);
+		expect(nudges).toEqual(["prewalk-plan"]);
+		await t.session.prompt("implement the result", { synthetic: true });
+		expect(t.requests.map(request => request.model)).toEqual([
+			t.source.id,
+			t.source.id,
+			t.source.id,
+			t.source.id,
+			t.target.id,
+		]);
+		expect(nudges).toEqual(["prewalk-plan", "prewalk-checklist"]);
+	});
+
+	for (const optIn of [false, true]) {
+		it(
+			optIn
+				? "child continuation opt-in forces an extra request even when the parent disables continuation"
+				: "child continuation defaults off and finishes despite the parent enabling continuation",
+			async () => {
+				const baseSettings = Settings.isolated({
+					"compaction.enabled": false,
+					"prewalk.planNudge": false,
+					"prewalk.continueNudge": !optIn,
+					...(optIn ? { "task.prewalkContinueNudge": true } : {}),
+				});
+				const t = cycleHarness(
+					[
+						toolCall("read", "record"),
+						{ content: ["child answer"] },
+						...(optIn ? [{ content: ["child finished"] }] : []),
+					],
+					{ baseSettings, minimum: 9 },
+				);
+				t.agent.setTools([recordTool as AgentTool]);
+				const nudges: string[] = [];
+				t.agent.subscribe(event => {
+					if (event.type === "message_end" && event.message.role === "custom")
+						nudges.push(event.message.customType);
+				});
+				await t.session.prompt("investigate the child task");
+				expect(t.requests.map(request => request.model)).toEqual(
+					optIn ? [t.source.id, t.source.id, t.source.id] : [t.source.id, t.source.id],
+				);
+				expect(nudges).toEqual(optIn ? ["prewalk-plan", "prewalk-continue"] : ["prewalk-plan"]);
+			},
+		);
+	}
+
+	it("continuation off clears pending work so turning it on alone cannot revive an old nudge", async () => {
+		const t = cycleHarness([
+			toolCall("first", "record"),
+			{ content: ["finished with continuation off"] },
+			{ content: ["finished after re-enabling"] },
+			toolCall("new-work", "record"),
+			{ content: ["new answer"] },
+			{ content: ["new work finished"] },
+		]);
+		t.agent.setTools([recordTool as AgentTool]);
+		const nudges: string[] = [];
+		t.agent.subscribe(event => {
+			if (event.type === "message_end" && event.message.role === "custom") nudges.push(event.message.customType);
+		});
+		t.agent.setBeforeModelCall(() => (t.requests.length >= 1 ? { stop: true } : undefined));
+		await t.session.prompt("investigate");
+		t.agent.setBeforeModelCall(undefined);
+		t.settings.set("prewalk.continueNudge", false);
+		await t.session.prompt("finish", { synthetic: true });
+		expect(t.requests.map(request => request.model)).toEqual([t.source.id, t.source.id]);
+		t.settings.set("prewalk.continueNudge", true);
+		await t.session.prompt("finish again", { synthetic: true });
+		expect(t.requests.map(request => request.model)).toEqual([t.source.id, t.source.id, t.source.id]);
+		expect(nudges).toEqual(["prewalk-plan"]);
+		await t.session.prompt("investigate something new", { synthetic: true });
+		expect(t.requests.map(request => request.model)).toEqual(Array(6).fill(t.source.id));
+		expect(nudges).toEqual(["prewalk-plan", "prewalk-continue"]);
+	});
+
+	it("hot revival of pending continuation respects the child continuation setting", async () => {
+		const baseSettings = Settings.isolated({ "compaction.enabled": false, "task.prewalkContinueNudge": true });
+		const t = cycleHarness([toolCall("read", "record")], { baseSettings });
+		t.agent.setTools([recordTool as AgentTool]);
+		t.agent.setBeforeModelCall(() => (t.requests.length >= 1 ? { stop: true } : undefined));
+		await t.session.prompt("investigate child task");
+		const snapshot = t.session.getPrewalkSnapshot();
+		const messages = structuredClone(t.agent.state.messages);
+		await t.session.dispose();
+		const revived = cycleHarness([{ content: ["revived child finished"] }], {
+			baseSettings: Settings.isolated({ "compaction.enabled": false }),
+			snapshot,
+		});
+		revived.agent.replaceMessages(messages);
+		const nudges: string[] = [];
+		revived.agent.subscribe(event => {
+			if (event.type === "message_end" && event.message.role === "custom") nudges.push(event.message.customType);
+		});
+		await revived.session.prompt("finish child task", { synthetic: true });
+		expect(revived.requests.map(request => request.model)).toEqual([revived.source.id]);
+		expect(nudges).not.toContain("prewalk-continue");
+	});
 	for (const repeat of [false, true]) {
 		it(
 			(repeat ? "repeats" : "does not repeat") + " the plan nudge for injected user input while still walking",

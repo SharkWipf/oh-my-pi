@@ -39,7 +39,9 @@ At startup, OMP resolves the target with the normal model-role and model-matchin
 
 ## Planning nudges
 
-Under **Model → Prewalk**, **Deep Plan Nudge** (`prewalk.planNudge`) defaults on and injects the deep-plan reminder during each prewalk cycle, along with its related continuation reminder. Turning it off changes only these nudges: prewalk, action counting, limits and handoff remain enabled.
+Under **Model → Prewalk**, **Deep Plan Nudge** (`prewalk.planNudge`) defaults on and injects the deep-plan reminder during each prewalk cycle. It is also the master switch for continuation nudges: turning it off suppresses both kinds of nudge without disabling prewalk, action counting, limits or handoff.
+
+**Continuation Nudge** (`prewalk.continueNudge`) defaults on for the main agent and requires **Deep Plan Nudge**. While prewalk remains armed, a pending continuation forces an extra model request after an answer that would otherwise end the run. The initial plan reminder and later tool work can arm this continuation; after it fires, another answer can finish unless new tool work arms it again. Turning continuation off leaves the initial plan reminder enabled and does not change handoff or action limits. Pending continuation is cleared at the next completed turn while disabled; simply turning it back on does not revive the old pending state.
 
 **Repeat Plan Nudge** (`prewalk.repeatPlanNudge`) defaults off and is shown only while **Deep Plan Nudge** is on. Enable it to repeat the reminder when new user input arrives during an unfinished prewalk. With repeat off, an already-sent reminder remains in the live thread rather than being removed or injected again.
 
@@ -57,7 +59,7 @@ After each handoff, the current prewalk disarms itself. Without automatic restar
 
 Under **Model → Prewalk**, **Minimum Prewalk Actions** and **Maximum Prewalk Actions** bound each planning cycle. Every successful completed assistant response counts once; every actual primary-thread tool execution counts once, including failed executions and host tools called inside JavaScript or Python Eval. An assistant response with three executed tools therefore contributes four actions. Failed or aborted assistant responses, user input, advisor activity, injections, summaries, compaction, streaming chunks and synthetic results for tools that never executed do not count. Reading retained history contributes nothing; actually reexecuting a tool whose result is missing contributes a new action without recounting its original assistant response.
 
-- The minimum defaults to **No minimum** (`0`). Before the minimum is reached, edit/write handoff triggers are ignored, not saved for later. Afterward, a new qualifying action can trigger the normal handoff.
+- The minimum defaults to **No minimum** (`0`). It is a handoff floor, not a requirement to perform that much work: an answer can finish below the minimum when no continuation is pending. Before the minimum is reached, edit/write handoff triggers are ignored, not saved for later. Afterward, a new qualifying action can trigger the normal handoff.
 - The maximum defaults to **Unlimited** (`0`). A finite maximum switches to the execution model even without a todo list or edit/write.
 - Limits are evaluated at safe completed-response boundaries, after the response’s tool batch settles. A batch can exceed the maximum; the minimum sees the completed batch count.
 - The minimum takes precedence: with minimum `25` and maximum `10`, forced handoff waits for a safe boundary with at least `25` actions.
@@ -120,11 +122,12 @@ The unpinned-subagent setting defaults off. When enabled, eligible launches star
 
 **Tasks → Subagents** also has independent child planning controls:
 
-- **Subagent Deep Plan Nudge** (`task.prewalkPlanNudge`) defaults on. Each fresh child prewalk cycle receives its initial deep-plan reminder and related continuation reminder. Turning it off changes only the nudges, not action limits or handoff.
+- **Subagent Deep Plan Nudge** (`task.prewalkPlanNudge`) defaults on. Each fresh child prewalk cycle receives its initial deep-plan reminder. Turning it off suppresses both plan and continuation nudges, not action limits or handoff.
+- **Subagent Continuation Nudge** (`task.prewalkContinueNudge`) defaults off and requires **Subagent Deep Plan Nudge**. Enable it explicitly to force an extra request after an answer while a continuation is pending in an armed child prewalk. With it off, children can finish their answer without this extra request, even below the minimum handoff floor; their initial plan reminder and normal handoff remain enabled.
 - **Repeat Subagent Plan Nudge** (`task.prewalkRepeatPlanNudge`) defaults off and is shown only while **Subagent Deep Plan Nudge** is on. It repeats the reminder when later parent input arrives during an unfinished active child prewalk. It does not control initial reminders for fresh cycles.
 - **Restart Prewalk on Subagent Input** (`task.prewalkAfterEveryUserMessage`) defaults off. Later parent messages do not rearm child prewalk by default, so a child that has handed off stays on its execution model. Enabling this explicit restart option lets later input restart an eligible child’s planning phase; input after handoff starts a fresh cycle with a fresh nudge while **Subagent Deep Plan Nudge** is on. During an unfinished cycle, a restart preserves the already-sent reminder unless **Repeat Subagent Plan Nudge** is on.
 
-These settings are independent of the main agent’s `prewalk.planNudge`, `prewalk.repeatPlanNudge` and `prewalk.afterEveryUserMessage` settings. Parent input includes live `hub send` messages, whether they steer a running child or wake an idle child; peer replies and internal notices do not restart child prewalk. None enables initial subagent prewalk: launch eligibility remains controlled by the settings and agent configuration described above.
+These settings are independent of the main agent’s `prewalk.planNudge`, `prewalk.continueNudge`, `prewalk.repeatPlanNudge` and `prewalk.afterEveryUserMessage` settings. Parent input includes live `hub send` messages, whether they steer a running child or wake an idle child; peer replies and internal notices do not restart child prewalk. None enables initial subagent prewalk: launch eligibility remains controlled by the settings and agent configuration described above.
 
 **Tasks → Subagents → Minimum/Maximum Prewalk Actions** set separate child limits. Both default to **Inherit** (`-1`), using the parent’s effective limits. An explicit minimum `0` removes the child minimum; an explicit maximum `0` makes the child maximum unlimited. These limits do not enable prewalk by themselves.
 
